@@ -1,0 +1,721 @@
+{
+  "id": "T-1530",
+  "created_at": 1790898780.284208,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: B2b v2 (fix round of T-1506): daemon dispatch on the shared predicates with per-row slot accounting: one now per tick, claude_freedom once, row_capacity + _bind_rows selection, eligible() skip reasons in defined order, hold-once for uncovered, _retry_capacity_held with fresh rows, defined capacity_reason precedence, notice via _codex_available, reconcile_dead via executed_by",
+  "spec": "Goal T-1403, wave 2, plan label B2b-v2. Respec of B2b T-1506 after spec review T-1525 request_changes; filed as a fix round of T-1506 (constraints.fix_round_for) so its merge stamps T-1506 and the dependents (E6v2 T-1507 and the daemon.py chain behind it) become ready; T-1506 never executed, so this branch cuts from goal/T-1403 (spawn.base_for falls through when task/T-1506 does not exist). Every T-1525 item is answered below (R1-R8).\n\nDepends on B2a T-1504 (MERGED into goal/T-1403 with fix round T-1519): executor.codex_rows(pool), executor.fallback_mode(pool, now=None), executor.claude_row_free(pool, row, now=None, headroom=None), executor.executed_by(field, tier, cfg), Pool.row_covers(ex, complexity), Pool.claude_has_headroom(), capacity.snapshot(..., claude_free=None) with keys executors[row]['free'], 'claude_free_total', 'claude_workers_free', and the bounded claude_capacity requeue in executor._exhausted (pipeline.claude_capacity_requeues / claude_capacity_until; hold_reason 'claude_capacity: no Claude row free after N requeues' and 'no executor row covers complexity N'). Use those symbols; never re-implement them. Scope is daemon.py and tests/test_daemon.py only.\n\nFacts (goal/T-1403 daemon.py): _codex_available(pool) is true when ANY enabled execute row is not cooling; _fallback_mode(pool) = not _codex_available and on_exhausted == 'fallback_claude'. free_slots(pool) outside fallback mode sums max_parallel - running over every enabled non-cooling execute row, Claude rows uncapped. dispatch(pool): slots = free_slots(pool); fallback = _fallback_mode(pool); capacity_reason computed BEFORE eligible(); retry_held is a local list comprehension (hold_reason == 'budget', no dispatched_at); candidates = queued execute + retry_held; candidate_ids = eligible(pool, candidates) (list of ids, no bus writes); selected = _first_come_order(candidate_ids, slots) or the scheduler wave; later `held_ids = {t['id'] for t in retry_held}` tags budget retries in the decision row. The tick notifies 'Executor (Codex) cooling' when not pool.codex_available() and pool.codex.cooling(). reconcile_dead posts executed_by = t.get('executor') or 'claude:<tier>'.\n\nChange:\n1. One clock (R6). dispatch() takes now = time.time() once at entry and passes it to every helper below; a helper called with now=None (callers outside dispatch) reads time.time() itself once. daemon._cooling_at(ex, now) -> bool is `ex.cooldown_until > now`; no helper in this spec calls ex.cooling() when now is given.\n2. Predicates via module attribute. `from . import executor`; daemon calls executor.codex_rows(pool) and executor.fallback_mode(pool, now=now) through the module (never `from .executor import ...`). _fallback_mode(pool, now=None) is a one-line alias; _codex_available(pool, now=None) returns True iff some row in executor.codex_rows(pool) is not cooling at now. The legacy Pool.codex cooldown field is not read or written by any new predicate (R7).\n3. claude_freedom(pool, now) -> dict[row_id, int] computed ONCE per dispatch() call: headroom = pool.claude_has_headroom() (the only account read of the tick); free = executor.claude_row_free(pool, row, now=now, headroom=headroom) per enabled Claude execute row. Every helper below takes claude_free as a required parameter when called from dispatch; only the public wrappers free_slots(pool, claude_free=None, now=None) and eligible(..., claude_free=None) compute it when given None (documented convenience; never used inside dispatch) (R8).\n4. row_capacity(pool, now, claude_free) -> dict[row_id, int]: enabled codex execute rows not cooling at now -> max_parallel - running (floor 0); enabled Claude execute rows -> claude_free[row]; everything else absent. claude_cap(pool) = max(0, [limits].max_parallel_claude_workers (default 4) - running_claude_workers(pool) - inflight_claude_dispatches()).\n5. free_slots(pool, claude_free=None, now=None) outside fallback mode = sum(codex entries of row_capacity) + min(sum(Claude entries), claude_cap(pool)); fallback mode unchanged. Docstring records: (a) inflight_claude_dispatches() also counts a Codex-bound dispatch for one tick (under-report, never over-dispatch); (b) the cap counts Claude workers of every role (machine-wide ceiling); (c) rollback: revert this merge together with B2a's, because the hold strings 'no executor row covers' and 'claude_capacity:' are written by B2a's _exhausted and read here; tasks still held under them after a revert are cleared with `orchestrator retry <id>`.\n6. Per-row binding (R2). New helper _bind_rows(pool, ordered_ids, tasks_by_id, remaining, claude_left, skip_reasons) -> list of ids: walks ordered_ids; for each task, covering = [row ids r in remaining with pool.row_covers(pool.executors[r], complexity) and remaining[r] > 0] (in fallback mode the single pseudo-row 'claude' with remaining claude_left when fallback_tier(complexity) is not None); picks the covering row with the largest remaining (ties: codex rows before Claude rows, then id order), decrements it, and for a Claude row also decrements claude_left (skip with reason 'claude_capacity' when claude_left is 0); a task with no covering row with capacity is skipped with reason 'row_capacity' and skip_reasons[id] = that reason. dispatch() applies _bind_rows to the ordered selection (both the _first_come_order path and the scheduler wave path) BEFORE dispatching, so no tick dispatches more tasks to a row kind than row_capacity allows. Residual mismatch (pick_executor choosing a different covering row than the binding decremented) is documented as absorbed by executor._exhausted's bounded requeue and pinned by a test that over-dispatch across two ticks never exceeds the row's free count by more than the number of covering rows.\n7. eligible(pool, candidates, *, depth_tick=None, claude_free=None, now=None, skip_reasons=None) keeps returning a list of ids with no bus writes. Order of checks (R3), each recorded in skip_reasons when the dict is passed: existing checks in their current order (stale, bus.ready, dispatched_at, spec review, fallback tier...) with reason strings named from the existing code; then 'claude_capacity_backoff' (pipeline.claude_capacity_until > now); then 'uncovered' (no enabled execute row covers the complexity via pool.row_covers, unless fallback mode routes it); then 'claude_capacity' (every covering row is a Claude row with claude_free[row] == 0). A task with unmerged dependencies or a pending spec review is therefore never marked 'uncovered'.\n8. Hold-once in dispatch(), directly after eligible(): for each candidate of THIS call that is queued, has no pipeline.dispatched_at, and has skip_reasons[id] == 'uncovered': exactly one bus.update(status='held', hold_reason=f'no executor row covers complexity {n}') plus one decision_log row; a task already held with that reason is never re-held; _retry_capacity_held output is excluded.\n9. _retry_capacity_held(pool, now, claude_free) -> list of FRESH task dicts (bus.get after the update) (R4): scans held execute tasks; (a) hold_reason starting 'claude_capacity:' is requeued (status queued; pipeline claude_capacity_requeues 0, claude_capacity_until removed, claude_capacity_retried_at = now) only when at least one enabled Claude row covering the task has claude_free[row] > 0 and at most once per task per [daemon].claude_capacity_retry_s (default 300) measured against pipeline.claude_capacity_retried_at; (b) hold_reason starting 'no executor row covers' is requeued the same rate-limited way when an enabled row now covers the complexity and (for a Claude row) claude_free[row] > 0. Otherwise nothing is written. dispatch() appends the result to candidates after the budget list and includes those ids in held_ids so the decision row tags them like budget retries (intended, stated in the docstring).\n10. capacity_reason precedence (R1, R5), computed AFTER eligible() and _bind_rows: 'account_capacity' if fallback; else 'claude_capacity' if any skip reason is 'claude_capacity' or 'row_capacity' and no candidate was dispatched this tick; else 'cooldown' if the enabled execute-row set is non-empty and every enabled execute row is cooling at now (Claude rows at 0 for headroom, budget or saturation are NOT cooldown); else 'executor_capacity' (including an empty enabled set, as today). The tick decision row gains 'skip_reasons' {id: reason}, 'claude_free' and 'row_capacity' dicts.\n11. Codex cooling notice: fires only when daemon._codex_available(pool, now) is False and executor.codex_rows(pool) is non-empty and pool.codex.cooling() (legacy field, unchanged) holds.\n12. reconcile_dead posts executed_by = executor.executed_by(t.get('executor'), t.get('tier'), pool.cfg if pool else pool_config()); other dispatch paths keep 'codex:<id>'.\n13. Tolerance test: dispatch() on a bus holding a task already held 'claude_capacity: ...' runs without error when _retry_capacity_held is patched to return [] (the post-revert shape) (T-1525 rollback item).\n\nTests that assert the old behaviour (SPEC RULE): tests/test_daemon.py free_slots/fallback tests run on the harness pool.toml (codex rows kept, Claude rows stripped by tests/_harness.py): pass unchanged or update to the new contract, never weaken the cap. New tests build Claude rows by hand (provider 'claude', max_parallel 3 and 2); 'three running' needs running bus tasks with executor 'claude:sonnet'/'claude:opus'; patch Pool.claude_has_headroom by name. The 'no Codex cooling notice' test sets pool.codex.cooldown_until = time.time() + 600 with every codex row disabled. tests/test_daemon.py::test_dispatch_worker_posts_codex_done pins executed_by 'codex:astra': must stay. Tests calling eligible()/free_slots() positionally keep working (new parameters keyword-only).\n\nOut of scope: executor.py, capacity.py, pool.py (B2a), spawn.py (B4b), mcp.py (B3). Work on the task branch cut from goal/T-1403. Commit first, then run tests/test_daemon.py in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number.",
+  "inputs": [
+    "T-1528"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_claude_only_pool_never_enters_fallback_and_caps_free_slots: passes: with every codex row disabled and enabled claude:sonnet (max_parallel 3) and claude:opus (max_parallel 2) rows, _fallback_mode(pool) is False, free_slots(pool) == min(5, max_parallel_claude_workers - running Claude workers - in-flight dispatches) (4 with the shipped cap and nothing running, 1 with three running execute tasks whose executor is claude:sonnet/claude:opus), one running review task with executor claude:sonnet lowers it by exactly 1, and a tick with every codex row disabled and pool.codex.cooldown_until in the future sends no 'Codex cooling' notice",
+    "tests/test_daemon.py::test_mixed_pool_free_slots_sums_codex_and_capped_claude_slots: passes: with one enabled non-cooling codex row (max_parallel 2, running 1) plus the two Claude rows, free_slots(pool) == 1 + min(5, cap - running Claude workers - in-flight dispatches); one in-flight Codex-bound dispatch lowers the Claude term by exactly 1; capacity.snapshot(..., claude_free=claude_freedom(pool, now))['claude_free_total'] equals the Claude term",
+    "tests/test_daemon.py::test_bind_rows_never_overfills_a_row: passes: with claude:opus free 2 covering complexity 7 and four queued complexity-7 tasks, one tick dispatches exactly 2, the other two get skip reason 'row_capacity' and keep no dispatched_at; a codex-only task (complexity 2, only a codex row covers it) is never charged to a Claude row; across two ticks with executor.start stubbed to pick the other covering row, the over-dispatch into the opus row never exceeds the number of covering rows and every excess requeue stays bounded by claude_capacity_max_requeues",
+    "tests/test_daemon.py::test_eligible_skip_reason_order_and_hold_once: passes: a task with unmerged depends_on is skipped with the existing not-ready reason and is never held 'no executor row covers' even when no row covers its complexity; a complexity-3 task whose only covering Claude row is cooling while claude:opus has free parallelism is skipped with reason 'claude_capacity' and its dispatched_at stays absent across three ticks; a task whose complexity no enabled row covers is held once with hold_reason 'no executor row covers complexity N' and one decision_log row and is not re-held on the next tick; a task with pipeline.claude_capacity_until in the future is skipped with reason 'claude_capacity_backoff'",
+    "tests/test_daemon.py::test_capacity_reason_precedence: passes: the decision row reports 'claude_capacity' when a candidate was skipped for claude_capacity or row_capacity and nothing was dispatched (claude:opus free, so free_slots > 0); 'cooldown' only when every enabled execute row is cooling at now; 'executor_capacity' with an empty enabled set and when Claude rows are at 0 for headroom (Pool.claude_has_headroom patched False) with nothing skipped; 'account_capacity' in fallback mode; Pool.claude_has_headroom is called exactly once per dispatch() call",
+    "tests/test_daemon.py::test_retry_capacity_held_requeues_rate_limited_and_returns_fresh_rows: passes: _retry_capacity_held on a task held 'claude_capacity: ...' with a covering Claude row free returns a fresh dict with status queued, pipeline.claude_capacity_requeues 0, no claude_capacity_until and claude_capacity_retried_at set; with no covering row free nothing is written; a second call inside claude_capacity_retry_s returns [] and writes nothing; a task held 'no executor row covers complexity 9' is requeued once a covering enabled row with free parallelism exists; the tick's decision row tags the requeued id like a budget retry",
+    "tests/test_daemon.py::test_one_clock_per_tick: passes: with time.time patched to raise after dispatch() reads it once, a tick with a codex row whose cooldown_until is between the tick's now and real time treats the row consistently in free_slots, eligible and row_capacity (all computed with the tick's now)",
+    "tests/test_daemon.py::test_patching_executor_codex_rows_flips_daemon_and_executor: passes: with executor.codex_rows patched to return [] daemon._fallback_mode(pool) is False and executor._exhausted takes the no-codex-row path; patched to one cooling row with on_exhausted fallback_claude both take the legacy path; daemon.executor is the module object; the cooling notice fires only when codex_rows is non-empty, _codex_available is False and pool.codex.cooling() holds",
+    "tests/test_daemon.py::test_reconcile_dead_posts_executed_by_from_row_provider: passes: reconcile_dead's orphan re-gate posts executed_by through executor.executed_by (patched to a sentinel the posted value carries)",
+    "tests/test_daemon.py::test_dispatch_tolerates_capacity_holds_without_helper: passes: with _retry_capacity_held patched to return [] a tick over a bus holding a task 'claude_capacity: no Claude row free after 20 requeues' completes without error and leaves it held",
+    "tests/test_daemon.py::test_dispatch_worker_posts_codex_done: still passes with executed_by 'codex:astra'",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1530",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 0,
+        "issue": "Item 6: _bind_rows picks the covering row with the largest remaining count, then skips with 'claude_capacity' if claude_left is 0. The order is ambiguous. If a Claude row has the largest remaining but claude_left is 0, the task is skipped even though a smaller codex row covers it. Claude rows must be dropped from the covering set when claude_left == 0 before the pick. The spec also gives two skip reasons for the no-capacity case ('claude_capacity' and 'row_capacity') without saying when each applies.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 0,
+        "issue": "test_one_clock_per_tick patches time.time to raise after dispatch() reads it once. Bus writes, decision_log, hold updates and pipeline timestamps probably call time.time() internally, so the test will fail or be flaky for reasons unrelated to the clock. The spec should say what is patched (for example daemon.time.time only, with a call counter) and which helpers are allowed to read real time.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 0,
+        "issue": "Item 9: every retry resets claude_capacity_requeues to 0, so the bound in B2a's _exhausted (20 requeues) becomes 20 requeues per claude_capacity_retry_s forever. A task that can never run can cycle held, queued and held indefinitely. Nothing caps total retries or lifetime. Add a lifetime counter or an overall give-up condition.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 0,
+        "issue": "Item 8: 'uncovered' is computed from enabled rows via row_covers. Disabling a row in pool.toml, or a transient config reload, permanently holds queued tasks and writes a decision_log row each. Recovery depends on the retry path in item 9(b), which is itself rate-limited. The spec does not say whether row_covers ignores cooling and capacity (it should), and it has no test for a task going held and then requeued when a row is re-enabled.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 0,
+        "issue": "Items 4 and 5 may double count. claude_row_free from B2a may already subtract running or in-flight work per row, while claude_cap also subtracts running_claude_workers and inflight_claude_dispatches. Within one tick, _bind_rows decrements claude_left and remaining separately. The spec does not state that claude_free excludes in-flight work, and the acceptance numbers (4, 1) do not discriminate between the two readings.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 0,
+        "issue": "Item 12 uses pool.cfg if pool else pool_config(). The spec does not confirm that Pool exposes .cfg, or that executor.executed_by accepts that argument shape. Item 10 adds new capacity_reason values and decision-row keys ('skip_reasons', 'claude_free', 'row_capacity') that out-of-scope readers (mcp.py status, scorecard, spawn.py) may parse. This is hidden coupling that is not checked.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 0,
+        "issue": "The over-dispatch acceptance clause ('never exceeds the number of covering rows', 'every excess requeue stays bounded') is vague. It needs concrete numbers, such as opus free 2 and two covering rows giving a maximum of 4 started tasks, plus the exact pipeline counter asserted.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 0,
+        "issue": "Item 10: a skipped 'claude_capacity' or 'row_capacity' task yields capacity_reason 'claude_capacity' only when nothing was dispatched. When some tasks were dispatched and others skipped, the reason falls through to 'executor_capacity' or 'cooldown' and hides the saturation. Say whether that is intended.",
+        "severity": "low"
+      }
+    ],
+    "suggested_spec_changes": [
+      "In _bind_rows, state that Claude rows are excluded from covering when claude_left == 0 before the largest-remaining pick. Define exactly when 'claude_capacity' versus 'row_capacity' is recorded.",
+      "State that claude_row_free excludes in-flight dispatches, or give an example with numbers showing the cap and the per-row free count are not subtracted twice.",
+      "Add a lifetime bound or a counter that is not reset for the item 9 requeue loop.",
+      "Specify how test_one_clock_per_tick patches the clock (daemon.time only, with a call counter) so the bus and decision_log are unaffected.",
+      "State that row_covers ignores cooling and free capacity, and add a test that a re-enabled row clears an 'uncovered' hold.",
+      "Confirm Pool.cfg exists, or use the existing accessor.",
+      "List the readers of the decision-row capacity_reason and the new keys (mcp.py status, scorecard) and confirm they tolerate the new values.",
+      "Quantify the over-dispatch bound in the test with concrete counts.",
+      "Add the rollback test for the revert shape: a task held with 'claude_capacity:' and no _retry_capacity_held, and the manual 'orchestrator retry <id>' path."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790898787.3542268,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 16568,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790898787.372697,
+      "packet_meta": {
+        "chars": 15829,
+        "est_tokens": 3957,
+        "presented_tokens": 3957,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7748a65725d05422dd527b24ba2150ed7c7f61dd299c856207483b4a545036e3"
+          },
+          "spec": {
+            "chars": 10151,
+            "est_tokens": 2537,
+            "sha256": "5f3a8fd360a8203f74f8705542ad5edf01c29d8cd84a7bc71b63be5e5be2e6e8"
+          },
+          "acceptance": {
+            "chars": 5049,
+            "est_tokens": 1262,
+            "sha256": "3f9347510abfdbd7c15a932993c4574ed9f74c82d72a12d38366d181875f63a3"
+          },
+          "scope": {
+            "chars": 57,
+            "est_tokens": 14,
+            "sha256": "08c79cbcf272b94b95d941323ff06e3ab81da408aa35ae7001d12ac62c23ad8a"
+          },
+          "depends_on": {
+            "chars": 338,
+            "est_tokens": 84,
+            "sha256": "dcec428c9b4a55ec704b71028cbb9e63f7f9cae706cd97ddb5ab2c819a071dfc"
+          },
+          "existing tests": {
+            "chars": 137,
+            "est_tokens": 34,
+            "sha256": "aaebec4f17ceb909bc1297a67c4d1b76f58e1805f739e585acea41925c838294"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "5de322698400",
+        "version": "5de322698400",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1528 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 16568,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790898789.210526,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1530",
+      "claimed_at": 1790898789.2099252
+    },
+    {
+      "ts": 1790898789.21206,
+      "account": "A"
+    },
+    {
+      "ts": 1790898797.799125,
+      "pid": 61810,
+      "account": "A"
+    },
+    {
+      "ts": 1790898826.393794,
+      "packet_meta": {
+        "chars": 15829,
+        "est_tokens": 3957,
+        "presented_tokens": 3957,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7748a65725d05422dd527b24ba2150ed7c7f61dd299c856207483b4a545036e3"
+          },
+          "spec": {
+            "chars": 10151,
+            "est_tokens": 2537,
+            "sha256": "5f3a8fd360a8203f74f8705542ad5edf01c29d8cd84a7bc71b63be5e5be2e6e8"
+          },
+          "acceptance": {
+            "chars": 5049,
+            "est_tokens": 1262,
+            "sha256": "3f9347510abfdbd7c15a932993c4574ed9f74c82d72a12d38366d181875f63a3"
+          },
+          "scope": {
+            "chars": 57,
+            "est_tokens": 14,
+            "sha256": "08c79cbcf272b94b95d941323ff06e3ab81da408aa35ae7001d12ac62c23ad8a"
+          },
+          "depends_on": {
+            "chars": 338,
+            "est_tokens": 84,
+            "sha256": "dcec428c9b4a55ec704b71028cbb9e63f7f9cae706cd97ddb5ab2c819a071dfc"
+          },
+          "existing tests": {
+            "chars": 137,
+            "est_tokens": 34,
+            "sha256": "aaebec4f17ceb909bc1297a67c4d1b76f58e1805f739e585acea41925c838294"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "5de322698400",
+        "version": "5de322698400",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1528 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 16568,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "27dd29f2-2d2c-4e96-871a-66e7fe1c1587"
+      }
+    },
+    {
+      "ts": 1790898826.416629,
+      "packet_meta": {
+        "chars": 15829,
+        "est_tokens": 3957,
+        "presented_tokens": 3957,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7748a65725d05422dd527b24ba2150ed7c7f61dd299c856207483b4a545036e3"
+          },
+          "spec": {
+            "chars": 10151,
+            "est_tokens": 2537,
+            "sha256": "5f3a8fd360a8203f74f8705542ad5edf01c29d8cd84a7bc71b63be5e5be2e6e8"
+          },
+          "acceptance": {
+            "chars": 5049,
+            "est_tokens": 1262,
+            "sha256": "3f9347510abfdbd7c15a932993c4574ed9f74c82d72a12d38366d181875f63a3"
+          },
+          "scope": {
+            "chars": 57,
+            "est_tokens": 14,
+            "sha256": "08c79cbcf272b94b95d941323ff06e3ab81da408aa35ae7001d12ac62c23ad8a"
+          },
+          "depends_on": {
+            "chars": 338,
+            "est_tokens": 84,
+            "sha256": "dcec428c9b4a55ec704b71028cbb9e63f7f9cae706cd97ddb5ab2c819a071dfc"
+          },
+          "existing tests": {
+            "chars": 137,
+            "est_tokens": 34,
+            "sha256": "aaebec4f17ceb909bc1297a67c4d1b76f58e1805f739e585acea41925c838294"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "5de322698400",
+        "version": "5de322698400",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1528 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 16568,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "27dd29f2-2d2c-4e96-871a-66e7fe1c1587",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790898827.0227258,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 0,
+            "issue": "Item 6: _bind_rows picks the covering row with the largest remaining count, then skips with 'claude_capacity' if claude_left is 0. The order is ambiguous. If a Claude row has the largest remaining but claude_left is 0, the task is skipped even though a smaller codex row covers it. Claude rows must be dropped from the covering set when claude_left == 0 before the pick. The spec also gives two skip reasons for the no-capacity case ('claude_capacity' and 'row_capacity') without saying when each applies.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 0,
+            "issue": "test_one_clock_per_tick patches time.time to raise after dispatch() reads it once. Bus writes, decision_log, hold updates and pipeline timestamps probably call time.time() internally, so the test will fail or be flaky for reasons unrelated to the clock. The spec should say what is patched (for example daemon.time.time only, with a call counter) and which helpers are allowed to read real time.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 0,
+            "issue": "Item 9: every retry resets claude_capacity_requeues to 0, so the bound in B2a's _exhausted (20 requeues) becomes 20 requeues per claude_capacity_retry_s forever. A task that can never run can cycle held, queued and held indefinitely. Nothing caps total retries or lifetime. Add a lifetime counter or an overall give-up condition.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 0,
+            "issue": "Item 8: 'uncovered' is computed from enabled rows via row_covers. Disabling a row in pool.toml, or a transient config reload, permanently holds queued tasks and writes a decision_log row each. Recovery depends on the retry path in item 9(b), which is itself rate-limited. The spec does not say whether row_covers ignores cooling and capacity (it should), and it has no test for a task going held and then requeued when a row is re-enabled.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 0,
+            "issue": "Items 4 and 5 may double count. claude_row_free from B2a may already subtract running or in-flight work per row, while claude_cap also subtracts running_claude_workers and inflight_claude_dispatches. Within one tick, _bind_rows decrements claude_left and remaining separately. The spec does not state that claude_free excludes in-flight work, and the acceptance numbers (4, 1) do not discriminate between the two readings.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 0,
+            "issue": "Item 12 uses pool.cfg if pool else pool_config(). The spec does not confirm that Pool exposes .cfg, or that executor.executed_by accepts that argument shape. Item 10 adds new capacity_reason values and decision-row keys ('skip_reasons', 'claude_free', 'row_capacity') that out-of-scope readers (mcp.py status, scorecard, spawn.py) may parse. This is hidden coupling that is not checked.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 0,
+            "issue": "The over-dispatch acceptance clause ('never exceeds the number of covering rows', 'every excess requeue stays bounded') is vague. It needs concrete numbers, such as opus free 2 and two covering rows giving a maximum of 4 started tasks, plus the exact pipeline counter asserted.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 0,
+            "issue": "Item 10: a skipped 'claude_capacity' or 'row_capacity' task yields capacity_reason 'claude_capacity' only when nothing was dispatched. When some tasks were dispatched and others skipped, the reason falls through to 'executor_capacity' or 'cooldown' and hides the saturation. Say whether that is intended.",
+            "severity": "low"
+          }
+        ],
+        "suggested_spec_changes": [
+          "In _bind_rows, state that Claude rows are excluded from covering when claude_left == 0 before the largest-remaining pick. Define exactly when 'claude_capacity' versus 'row_capacity' is recorded.",
+          "State that claude_row_free excludes in-flight dispatches, or give an example with numbers showing the cap and the per-row free count are not subtracted twice.",
+          "Add a lifetime bound or a counter that is not reset for the item 9 requeue loop.",
+          "Specify how test_one_clock_per_tick patches the clock (daemon.time only, with a call counter) so the bus and decision_log are unaffected.",
+          "State that row_covers ignores cooling and free capacity, and add a test that a re-enabled row clears an 'uncovered' hold.",
+          "Confirm Pool.cfg exists, or use the existing accessor.",
+          "List the readers of the decision-row capacity_reason and the new keys (mcp.py status, scorecard) and confirm they tolerate the new values.",
+          "Quantify the over-dispatch bound in the test with concrete counts.",
+          "Add the rollback test for the revert shape: a task held with 'claude_capacity:' and no _retry_capacity_held, and the manual 'orchestrator retry <id>' path."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790898827.023905,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 0,
+          "issue": "Item 6: _bind_rows picks the covering row with the largest remaining count, then skips with 'claude_capacity' if claude_left is 0. The order is ambiguous. If a Claude row has the largest remaining but claude_left is 0, the task is skipped even though a smaller codex row covers it. Claude rows must be dropped from the covering set when claude_left == 0 before the pick. The spec also gives two skip reasons for the no-capacity case ('claude_capacity' and 'row_capacity') without saying when each applies.",
+          "severity": "high"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "issue": "test_one_clock_per_tick patches time.time to raise after dispatch() reads it once. Bus writes, decision_log, hold updates and pipeline timestamps probably call time.time() internally, so the test will fail or be flaky for reasons unrelated to the clock. The spec should say what is patched (for example daemon.time.time only, with a call counter) and which helpers are allowed to read real time.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 0,
+          "issue": "Item 9: every retry resets claude_capacity_requeues to 0, so the bound in B2a's _exhausted (20 requeues) becomes 20 requeues per claude_capacity_retry_s forever. A task that can never run can cycle held, queued and held indefinitely. Nothing caps total retries or lifetime. Add a lifetime counter or an overall give-up condition.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 0,
+          "issue": "Item 8: 'uncovered' is computed from enabled rows via row_covers. Disabling a row in pool.toml, or a transient config reload, permanently holds queued tasks and writes a decision_log row each. Recovery depends on the retry path in item 9(b), which is itself rate-limited. The spec does not say whether row_covers ignores cooling and capacity (it should), and it has no test for a task going held and then requeued when a row is re-enabled.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 0,
+          "issue": "Items 4 and 5 may double count. claude_row_free from B2a may already subtract running or in-flight work per row, while claude_cap also subtracts running_claude_workers and inflight_claude_dispatches. Within one tick, _bind_rows decrements claude_left and remaining separately. The spec does not state that claude_free excludes in-flight work, and the acceptance numbers (4, 1) do not discriminate between the two readings.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 0,
+          "issue": "Item 12 uses pool.cfg if pool else pool_config(). The spec does not confirm that Pool exposes .cfg, or that executor.executed_by accepts that argument shape. Item 10 adds new capacity_reason values and decision-row keys ('skip_reasons', 'claude_free', 'row_capacity') that out-of-scope readers (mcp.py status, scorecard, spawn.py) may parse. This is hidden coupling that is not checked.",
+          "severity": "low"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "issue": "The over-dispatch acceptance clause ('never exceeds the number of covering rows', 'every excess requeue stays bounded') is vague. It needs concrete numbers, such as opus free 2 and two covering rows giving a maximum of 4 started tasks, plus the exact pipeline counter asserted.",
+          "severity": "low"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 0,
+          "issue": "Item 10: a skipped 'claude_capacity' or 'row_capacity' task yields capacity_reason 'claude_capacity' only when nothing was dispatched. When some tasks were dispatched and others skipped, the reason falls through to 'executor_capacity' or 'cooldown' and hides the saturation. Say whether that is intended.",
+          "severity": "low"
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 15829,
+    "est_tokens": 3957,
+    "presented_tokens": 3957,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "7748a65725d05422dd527b24ba2150ed7c7f61dd299c856207483b4a545036e3"
+      },
+      "spec": {
+        "chars": 10151,
+        "est_tokens": 2537,
+        "sha256": "5f3a8fd360a8203f74f8705542ad5edf01c29d8cd84a7bc71b63be5e5be2e6e8"
+      },
+      "acceptance": {
+        "chars": 5049,
+        "est_tokens": 1262,
+        "sha256": "3f9347510abfdbd7c15a932993c4574ed9f74c82d72a12d38366d181875f63a3"
+      },
+      "scope": {
+        "chars": 57,
+        "est_tokens": 14,
+        "sha256": "08c79cbcf272b94b95d941323ff06e3ab81da408aa35ae7001d12ac62c23ad8a"
+      },
+      "depends_on": {
+        "chars": 338,
+        "est_tokens": 84,
+        "sha256": "dcec428c9b4a55ec704b71028cbb9e63f7f9cae706cd97ddb5ab2c819a071dfc"
+      },
+      "existing tests": {
+        "chars": 137,
+        "est_tokens": 34,
+        "sha256": "aaebec4f17ceb909bc1297a67c4d1b76f58e1805f739e585acea41925c838294"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "5de322698400",
+    "version": "5de322698400",
+    "candidate_known": false,
+    "base": "247723642f7a",
+    "sources": "task@T-1528 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 16568,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "27dd29f2-2d2c-4e96-871a-66e7fe1c1587",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790898789.2099252,
+  "account": "A",
+  "pid": 61810,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 0,
+      "issue": "Item 6: _bind_rows picks the covering row with the largest remaining count, then skips with 'claude_capacity' if claude_left is 0. The order is ambiguous. If a Claude row has the largest remaining but claude_left is 0, the task is skipped even though a smaller codex row covers it. Claude rows must be dropped from the covering set when claude_left == 0 before the pick. The spec also gives two skip reasons for the no-capacity case ('claude_capacity' and 'row_capacity') without saying when each applies.",
+      "severity": "high"
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "issue": "test_one_clock_per_tick patches time.time to raise after dispatch() reads it once. Bus writes, decision_log, hold updates and pipeline timestamps probably call time.time() internally, so the test will fail or be flaky for reasons unrelated to the clock. The spec should say what is patched (for example daemon.time.time only, with a call counter) and which helpers are allowed to read real time.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 0,
+      "issue": "Item 9: every retry resets claude_capacity_requeues to 0, so the bound in B2a's _exhausted (20 requeues) becomes 20 requeues per claude_capacity_retry_s forever. A task that can never run can cycle held, queued and held indefinitely. Nothing caps total retries or lifetime. Add a lifetime counter or an overall give-up condition.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 0,
+      "issue": "Item 8: 'uncovered' is computed from enabled rows via row_covers. Disabling a row in pool.toml, or a transient config reload, permanently holds queued tasks and writes a decision_log row each. Recovery depends on the retry path in item 9(b), which is itself rate-limited. The spec does not say whether row_covers ignores cooling and capacity (it should), and it has no test for a task going held and then requeued when a row is re-enabled.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 0,
+      "issue": "Items 4 and 5 may double count. claude_row_free from B2a may already subtract running or in-flight work per row, while claude_cap also subtracts running_claude_workers and inflight_claude_dispatches. Within one tick, _bind_rows decrements claude_left and remaining separately. The spec does not state that claude_free excludes in-flight work, and the acceptance numbers (4, 1) do not discriminate between the two readings.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 0,
+      "issue": "Item 12 uses pool.cfg if pool else pool_config(). The spec does not confirm that Pool exposes .cfg, or that executor.executed_by accepts that argument shape. Item 10 adds new capacity_reason values and decision-row keys ('skip_reasons', 'claude_free', 'row_capacity') that out-of-scope readers (mcp.py status, scorecard, spawn.py) may parse. This is hidden coupling that is not checked.",
+      "severity": "low"
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "issue": "The over-dispatch acceptance clause ('never exceeds the number of covering rows', 'every excess requeue stays bounded') is vague. It needs concrete numbers, such as opus free 2 and two covering rows giving a maximum of 4 started tasks, plus the exact pipeline counter asserted.",
+      "severity": "low"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 0,
+      "issue": "Item 10: a skipped 'claude_capacity' or 'row_capacity' task yields capacity_reason 'claude_capacity' only when nothing was dispatched. When some tasks were dispatched and others skipped, the reason falls through to 'executor_capacity' or 'cooldown' and hides the saturation. Say whether that is intended.",
+      "severity": "low"
+    }
+  ]
+}

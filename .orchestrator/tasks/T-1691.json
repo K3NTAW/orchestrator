@@ -1,0 +1,2394 @@
+{
+  "id": "T-1691",
+  "created_at": 1791322403.8570912,
+  "parent": "T-1667",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "v2 review packets for fix rounds cover the whole lineage diff; fix-only approvals do not count for the merge",
+  "spec": "Reviews of fix rounds must cover the whole change, not only the fix commit.\n\nEvidence 2026-10-06: the watchdog (T-1679 -> fix T-1682) and auto-merge (T-1678 -> fixes T-1681, T-1683) each reached\n\"approved\" through reviews of a fix round only (T-1684, T-1685, T-1686); each review saw just the fix's diff (a test or\none prompt line) and said so, while ~700-900 lines of security-path code had never been reviewed. Independent full-diff\nreviews then found 3 high-severity defects in each. A review spec that told the reviewer to read the full diff was\nignored because the packet showed only the fix diff.\n\nChange orchestrator/spawn.py review_packet() (~line 1082) and whatever computes the diff range for a review of a task:\n1. For a review whose input task has constraints.fix_round_for (follow the chain to the root execute task), the packet's\n   diff is the whole lineage: from the merge-base with the goal branch (or origin/main when there is no goal branch) to\n   the fix's head, i.e. everything that will land, not the fix commit alone. Keep the fix-only diff as a second, labelled\n   section (\"this round's change\") when it fits.\n2. If the lineage diff exceeds the packet budget, include the file list with per-file stats and the instruction to read\n   the rest with `git diff <base>..<head> -- <file>`, naming the exact range; never silently truncate to the fix diff.\n3. The daemon's review gate counts only reviews whose packet covered the lineage: stamp pipeline.review_range =\n   \"<base>..<head>\" on the review task and, in merge_reviewed (daemon.py), ignore an approval whose review_range base is\n   not the lineage base. Older reviews without the stamp count as today.\nTests in tests/test_spawn.py and tests/test_daemon.py: test_fix_round_review_packet_covers_lineage,\ntest_lineage_diff_over_budget_lists_files_and_range, test_merge_ignores_fix_only_approval,\ntest_plain_task_review_unchanged.\n\n\nAMENDMENTS v2 from spec review T-1690 (final; sent to the builder without another spec review round; the post-gate\nsecurity review still applies). Where they differ from the text above, these win.\nA1 Root cause: scoped_diff() ends with `-- *src[\"scope\"]`, and a fix round's scope is narrow (one test, one prompt), so\n   the packet filtered the lineage down to the fix's files. For a lineage review the path filter is the UNION of the\n   scopes of every task in the chain (root execute task plus all fix rounds); if any scope is \"**\" or empty, no filter.\nA2 No silent cut: for lineage reviews do not apply the [:40000] slice before building the packet. Build first a numstat\n   file list (path, +/-) for the whole range, which always goes in; then hunks file by file within the packet budget;\n   every file not shown in full is listed with the exact command `git diff <base>..<head> -- <file>`. New helper; leave\n   bounded_diff for plain reviews.\nA3 Ignored fix-only approval: merge_reviewed does not hold with \"review state unknown\"; it opens exactly one lineage\n   review (through _open_reviews with lineage=True) and waits; only if that review fails or is held does the task hold,\n   with the reason naming it.\nA4 Stamping: _open_reviews stamps the review task at creation with lineage=True, review_base=<sha> and\n   reviewed_sha=<head> (same moment reviewed_sha is stamped today); base = merge-base(goal/<parent> if it exists else\n   origin/main, head). The packet builder reads these stamps and never recomputes them.\nA5 Counting: an approval counts for a task with a fix_round chain only if the review has lineage=True and its\n   reviewed_sha equals the task's current reviewed_sha. The base is not recomputed or compared.\nA6 Chain failures (missing ancestor KeyError, cycle via a visited set, root without worktree, git merge-base failure):\n   fall back to base = merge-base(origin/main, head) with no path filter and label the packet \"lineage unresolved;\n   reviewing the whole branch\". Never fall back to a fix-only diff.\nExtra tests: test_lineage_filter_is_union_of_chain_scopes, test_lineage_packet_numstat_always_present,\ntest_ignored_fix_only_approval_opens_lineage_review, test_stamp_at_open_reviews, test_chain_failure_reviews_whole_branch.\n",
+  "inputs": [],
+  "acceptance": [
+    "the four named tests exist and pass",
+    "a review of a fix round shows origin/goal base..fix head, with the fix-only diff as a labelled extra section"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "high-risk",
+    "respec_for": "T-1689",
+    "note": "c5 on purpose: spec review T-1690 folded; post-gate security review still runs"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1691",
+  "codex_thread": null,
+  "result": {
+    "summary": "I made the change and committed it on `task/T-1691` as `8f2b3e2`. The working tree is clean. All the new tests pass. Two tests elsewhere in `test_spawn.py` error, and they error the same way on the base commit.\n\n**What changed**\n- **Review packet** (`orchestrator/spawn.py`): when a review task is stamped `lineage`, the packet uses the stamped base and head and does not work them out again.\n  - **Main diff:** it shows the whole change, `base..head`, limited to files in the scopes of the root task and every fix round. If any of those scopes is empty or `**`, there is no file filter.\n  - **Budget:** a per-file `+/-` list for the whole range always goes in. Full diffs then go in file by file until the budget is used. Every file not shown in full gets the exact `git diff <base>..<head> -- <file>` command, so nothing is cut silently.\n  - **Fix-only diff:** it appears as a separate section headed \"this round's change\", from `task/<fixed task>...head`. If it doesn't fit, the section gives the command to read it instead.\n  - **Broken chain** (missing ancestor, cycle, or the unresolved stamp): the packet is labelled \"lineage unresolved; reviewing the whole branch\" and has no file filter.\n  - Plain reviews still use `scoped_diff` and `bounded_diff` as before.\n- **Daemon** (`orchestrator/daemon.py`):\n  - **Stamping:** `_open_reviews` stamps each review of a fix round when it is created with `lineage=True`, `review_base`, `reviewed_sha` and `pipeline.review_range`. The base is the merge-base of the goal branch (or `origin/main`) with the fix head.\n  - **Fallback:** if the chain is broken, the root has no worktree, or the merge-base fails, the base falls back to the merge-base with `origin/main`, then `main`, then the repo's first commit. The review is also stamped `lineage_unresolved`.\n  - **Merge gate:** for a fix round, `merge_reviewed` only counts approvals from lineage reviews whose `reviewed_sha` matches. If only fix-only approvals exist, it opens exactly one lineage review, sets `reviews_expected=1`, and waits. If that review fails or is held, the task is held and the reason names that review.\n  - Two choices I made beyond the spec:\n    - A fix-only review that asks for changes still holds the task. Only approvals are ignored.\n    - Reviews of plain tasks without the stamp count as before.\n\n**Files changed:** `orchestrator/spawn.py`, `orchestrator/daemon.py`, `tests/test_spawn.py`, `tests/test_daemon.py`.\n\n**Tests added**\n- In `test_spawn.py` (`LineageReviewPacket`): `test_fix_round_review_packet_covers_lineage`, `test_lineage_diff_over_budget_lists_files_and_range`, `test_plain_task_review_unchanged`, `test_lineage_filter_is_union_of_chain_scopes`, `test_lineage_packet_numstat_always_present`.\n- In `test_daemon.py`: `test_merge_ignores_fix_only_approval`, `test_ignored_fix_only_approval_opens_lineage_review`, `test_stamp_at_open_reviews`, `test_chain_failure_reviews_whole_branch`, and one extra, `test_lineage_review_approval_merges`.\n\n**Test failures**",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791322419.25681,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767
+      }
+    },
+    {
+      "ts": 1791322686.912698,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417
+      }
+    },
+    {
+      "ts": 1791322686.9153411,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417
+      }
+    },
+    {
+      "ts": 1791322701.865435,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7496,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791322701.874629,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291
+      }
+    },
+    {
+      "ts": 1791322945.120803,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        }
+      }
+    },
+    {
+      "ts": 1791322945.5067441,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1791322945.517615,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791322948.887427,
+      "executor": "claude:opus"
+    },
+    {
+      "ts": 1791322956.288018,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7496,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791322956.298538,
+      "packet_meta": {
+        "chars": 6617,
+        "est_tokens": 1654,
+        "presented_tokens": 1654,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "d7e4631cc03f434f749286237d499607cc0c359c726c24d35131e158da864848"
+          },
+          "objective": {
+            "chars": 4299,
+            "est_tokens": 1074,
+            "sha256": "26079ab20ed5aeb6e91003c9b3d79187a0401f468af7c4d253bbd87c155e2d5d"
+          },
+          "acceptance": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+          },
+          "write_scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "dae47ebb0b0a65ee6ef5195ece88ec9cb96d55bf83941a8e2a22253ef5be4821"
+          },
+          "read_scope": {
+            "chars": 1378,
+            "est_tokens": 344,
+            "sha256": "e954e12adc7c2a56cb8e67791f76f615fe37a686b65bb8fc78ef8d2709e612cd"
+          },
+          "constraints": {
+            "chars": 228,
+            "est_tokens": 57,
+            "sha256": "5b00bfc488dd56bd87913c46eba4502942daead7e805c1ce1b5e4d3063cd0ddf"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "949149b7d8e3",
+        "version": "949149b7d8e3",
+        "candidate_known": true,
+        "base": "247fe58bae3d",
+        "sources": "pool.toml@b9bca20e78ae gotchas@e5d0a632d2ff memory@notes over cap by 1817 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "e5d0a632d2ff",
+        "candidate_tokens": 3776,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 28344,
+        "routed_reduction_ratio": 0.43666615313511015,
+        "routed_hidden": 51,
+        "routed_ambiguous": 88,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "6576adce8e5e",
+          "37c254b43610",
+          "bca2a6da85fd",
+          "5e9bcae7ed92",
+          "63407adb9b84",
+          "9467fb8c20b0",
+          "10357d124edf",
+          "7277b9b594ab",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "d0e646881f9e",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "d80d1256695d",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "28a564cd538d",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "64b680375800",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "18f9ce631e61",
+          "ce80308dc309",
+          "051786ba0165",
+          "991c7a091cb9",
+          "db5df1195cb4",
+          "fd88fce6688c",
+          "55e8c42797cc",
+          "b4baa08f67ed",
+          "188950523280",
+          "3700e33e38dd",
+          "810a7498ca0f",
+          "ef2a6f8fbba6",
+          "79797e99034d",
+          "4b4b12743a05",
+          "2eae3c2d74c4",
+          "2091ec7061d7",
+          "cb8d259ff3c8",
+          "5b9bb25ec23c",
+          "88504a4aee3c",
+          "d54b07af3b62",
+          "b141d5b98859",
+          "aa8588ac00b7",
+          "27e3d479e418",
+          "1336f8df6f94",
+          "84818b720d4e",
+          "8c51011b54a5",
+          "32a73d2b77ef",
+          "0da74424ba2b",
+          "f6dac7a88aa2",
+          "3a6ff3f4dab0",
+          "f4b42e59e5ff",
+          "2f87295b9e34",
+          "93094cfc443f",
+          "b26dd627a509",
+          "62c565ed60b9",
+          "2a459fab6526",
+          "7f28c7b5df9e",
+          "a536f28fed9e",
+          "e4c630cc87b3",
+          "e146114ba8ec",
+          "d876d051610f",
+          "f5f8de2fdaa8",
+          "7f65565c4e40",
+          "66ab1306ccfc",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "f5e9df567728",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "248975d5c496",
+          "669cef77d8ef",
+          "0148c8d2026d",
+          "021add6ffb89",
+          "0331f61415c0",
+          "03d9db5b76a4",
+          "04de65c255cf",
+          "05df0bc9ef62",
+          "06250f5b2bf9",
+          "0784c689df19",
+          "09585e885a2c",
+          "0a3ca7410102",
+          "0bbc287aecf4",
+          "0d238bb278d4",
+          "0d5efa94f9ca",
+          "0fcd075d9f57",
+          "1073188aac14",
+          "11f75475460f",
+          "12b4301edd3e",
+          "13abf2cf46f6",
+          "15359a72a0a5",
+          "158dd9947c80",
+          "16285184ccd9",
+          "1807a69e7663",
+          "18df6b59f1b8",
+          "1a17ff32a904",
+          "1a7a7f5dc41a",
+          "1ab87a10d407",
+          "1c510a428e02",
+          "1d0cc9ab8559",
+          "1dd317c8d9b9",
+          "1df251b67771",
+          "1f7cd86722f6",
+          "2380174927fc",
+          "23e771b7caa4",
+          "25e6db5cf579",
+          "260f2103255f",
+          "270a093d49c3",
+          "29862065763a",
+          "2a874b8ed171",
+          "2b71081a619f",
+          "2c3608269bcd",
+          "2db2764f9bd8",
+          "2db518b45b7a",
+          "2f544c8da367",
+          "2fda1602f756",
+          "3037c6d26ebe",
+          "31f918ec7b61",
+          "32c8fc2ba755",
+          "347b2365cf0d",
+          "34b6b61ecc58",
+          "34c966b7b621",
+          "34f30d64c6aa",
+          "36dd90fbb604",
+          "36f0d96529d8",
+          "36fba3c5b5ac",
+          "376d59216a0a",
+          "386984bd9daf",
+          "3953665afea9",
+          "3bef63a0226d",
+          "3ca6fc77d0d0",
+          "3d576cc180d1",
+          "3d9de6ae8904",
+          "3db1b12c3605",
+          "3db57e23f967",
+          "3e677b524cec",
+          "3e787c244ee0",
+          "3fc77651746c",
+          "4180c7586cb1",
+          "418f23dce663",
+          "42758e20cbaf",
+          "427a8e2bd836",
+          "42be67d41407",
+          "4394c9ea5626",
+          "43ed90a1ad4e",
+          "453b6e50c221",
+          "4748dac32cb6",
+          "4840989d4fad",
+          "4a226dc6afc3",
+          "4ca2eec9fe74",
+          "4cf8b290c178",
+          "4e7c92225364",
+          "51355537f5ea",
+          "52a59c2d8b66",
+          "52f5acceef24",
+          "5650c5639689",
+          "5693a275ea2c",
+          "575022ff3493",
+          "5777308171e4",
+          "5783dcfcf0b6",
+          "5b27613653f6",
+          "5b27f397c201",
+          "5b7245db391a",
+          "5d279e520eff",
+          "5dfb7da66de0",
+          "60094942b7f7",
+          "61d4a8ade48d",
+          "6215f26cae57",
+          "622b3821c7d5"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7496,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791322958.045609,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1691",
+      "claimed_at": 1791322958.045179
+    },
+    {
+      "ts": 1791322958.047335,
+      "account": "B"
+    },
+    {
+      "ts": 1791322962.649058,
+      "pid": 47493,
+      "account": "B"
+    },
+    {
+      "ts": 1791323406.7335072,
+      "packet_meta": {
+        "chars": 6617,
+        "est_tokens": 1654,
+        "presented_tokens": 1654,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "d7e4631cc03f434f749286237d499607cc0c359c726c24d35131e158da864848"
+          },
+          "objective": {
+            "chars": 4299,
+            "est_tokens": 1074,
+            "sha256": "26079ab20ed5aeb6e91003c9b3d79187a0401f468af7c4d253bbd87c155e2d5d"
+          },
+          "acceptance": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+          },
+          "write_scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "dae47ebb0b0a65ee6ef5195ece88ec9cb96d55bf83941a8e2a22253ef5be4821"
+          },
+          "read_scope": {
+            "chars": 1378,
+            "est_tokens": 344,
+            "sha256": "e954e12adc7c2a56cb8e67791f76f615fe37a686b65bb8fc78ef8d2709e612cd"
+          },
+          "constraints": {
+            "chars": 228,
+            "est_tokens": 57,
+            "sha256": "5b00bfc488dd56bd87913c46eba4502942daead7e805c1ce1b5e4d3063cd0ddf"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "949149b7d8e3",
+        "version": "949149b7d8e3",
+        "candidate_known": true,
+        "base": "247fe58bae3d",
+        "sources": "pool.toml@b9bca20e78ae gotchas@e5d0a632d2ff memory@notes over cap by 1817 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "e5d0a632d2ff",
+        "candidate_tokens": 3776,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 28344,
+        "routed_reduction_ratio": 0.43666615313511015,
+        "routed_hidden": 51,
+        "routed_ambiguous": 88,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "6576adce8e5e",
+          "37c254b43610",
+          "bca2a6da85fd",
+          "5e9bcae7ed92",
+          "63407adb9b84",
+          "9467fb8c20b0",
+          "10357d124edf",
+          "7277b9b594ab",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "d0e646881f9e",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "d80d1256695d",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "28a564cd538d",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "64b680375800",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "18f9ce631e61",
+          "ce80308dc309",
+          "051786ba0165",
+          "991c7a091cb9",
+          "db5df1195cb4",
+          "fd88fce6688c",
+          "55e8c42797cc",
+          "b4baa08f67ed",
+          "188950523280",
+          "3700e33e38dd",
+          "810a7498ca0f",
+          "ef2a6f8fbba6",
+          "79797e99034d",
+          "4b4b12743a05",
+          "2eae3c2d74c4",
+          "2091ec7061d7",
+          "cb8d259ff3c8",
+          "5b9bb25ec23c",
+          "88504a4aee3c",
+          "d54b07af3b62",
+          "b141d5b98859",
+          "aa8588ac00b7",
+          "27e3d479e418",
+          "1336f8df6f94",
+          "84818b720d4e",
+          "8c51011b54a5",
+          "32a73d2b77ef",
+          "0da74424ba2b",
+          "f6dac7a88aa2",
+          "3a6ff3f4dab0",
+          "f4b42e59e5ff",
+          "2f87295b9e34",
+          "93094cfc443f",
+          "b26dd627a509",
+          "62c565ed60b9",
+          "2a459fab6526",
+          "7f28c7b5df9e",
+          "a536f28fed9e",
+          "e4c630cc87b3",
+          "e146114ba8ec",
+          "d876d051610f",
+          "f5f8de2fdaa8",
+          "7f65565c4e40",
+          "66ab1306ccfc",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "f5e9df567728",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "248975d5c496",
+          "669cef77d8ef",
+          "0148c8d2026d",
+          "021add6ffb89",
+          "0331f61415c0",
+          "03d9db5b76a4",
+          "04de65c255cf",
+          "05df0bc9ef62",
+          "06250f5b2bf9",
+          "0784c689df19",
+          "09585e885a2c",
+          "0a3ca7410102",
+          "0bbc287aecf4",
+          "0d238bb278d4",
+          "0d5efa94f9ca",
+          "0fcd075d9f57",
+          "1073188aac14",
+          "11f75475460f",
+          "12b4301edd3e",
+          "13abf2cf46f6",
+          "15359a72a0a5",
+          "158dd9947c80",
+          "16285184ccd9",
+          "1807a69e7663",
+          "18df6b59f1b8",
+          "1a17ff32a904",
+          "1a7a7f5dc41a",
+          "1ab87a10d407",
+          "1c510a428e02",
+          "1d0cc9ab8559",
+          "1dd317c8d9b9",
+          "1df251b67771",
+          "1f7cd86722f6",
+          "2380174927fc",
+          "23e771b7caa4",
+          "25e6db5cf579",
+          "260f2103255f",
+          "270a093d49c3",
+          "29862065763a",
+          "2a874b8ed171",
+          "2b71081a619f",
+          "2c3608269bcd",
+          "2db2764f9bd8",
+          "2db518b45b7a",
+          "2f544c8da367",
+          "2fda1602f756",
+          "3037c6d26ebe",
+          "31f918ec7b61",
+          "32c8fc2ba755",
+          "347b2365cf0d",
+          "34b6b61ecc58",
+          "34c966b7b621",
+          "34f30d64c6aa",
+          "36dd90fbb604",
+          "36f0d96529d8",
+          "36fba3c5b5ac",
+          "376d59216a0a",
+          "386984bd9daf",
+          "3953665afea9",
+          "3bef63a0226d",
+          "3ca6fc77d0d0",
+          "3d576cc180d1",
+          "3d9de6ae8904",
+          "3db1b12c3605",
+          "3db57e23f967",
+          "3e677b524cec",
+          "3e787c244ee0",
+          "3fc77651746c",
+          "4180c7586cb1",
+          "418f23dce663",
+          "42758e20cbaf",
+          "427a8e2bd836",
+          "42be67d41407",
+          "4394c9ea5626",
+          "43ed90a1ad4e",
+          "453b6e50c221",
+          "4748dac32cb6",
+          "4840989d4fad",
+          "4a226dc6afc3",
+          "4ca2eec9fe74",
+          "4cf8b290c178",
+          "4e7c92225364",
+          "51355537f5ea",
+          "52a59c2d8b66",
+          "52f5acceef24",
+          "5650c5639689",
+          "5693a275ea2c",
+          "575022ff3493",
+          "5777308171e4",
+          "5783dcfcf0b6",
+          "5b27613653f6",
+          "5b27f397c201",
+          "5b7245db391a",
+          "5d279e520eff",
+          "5dfb7da66de0",
+          "60094942b7f7",
+          "61d4a8ade48d",
+          "6215f26cae57",
+          "622b3821c7d5"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7496,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "c5d18d82-d358-4a1d-bf60-a022776f8d3d"
+      }
+    },
+    {
+      "ts": 1791323406.763225,
+      "packet_meta": {
+        "chars": 6617,
+        "est_tokens": 1654,
+        "presented_tokens": 1654,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "d7e4631cc03f434f749286237d499607cc0c359c726c24d35131e158da864848"
+          },
+          "objective": {
+            "chars": 4299,
+            "est_tokens": 1074,
+            "sha256": "26079ab20ed5aeb6e91003c9b3d79187a0401f468af7c4d253bbd87c155e2d5d"
+          },
+          "acceptance": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+          },
+          "write_scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "dae47ebb0b0a65ee6ef5195ece88ec9cb96d55bf83941a8e2a22253ef5be4821"
+          },
+          "read_scope": {
+            "chars": 1378,
+            "est_tokens": 344,
+            "sha256": "e954e12adc7c2a56cb8e67791f76f615fe37a686b65bb8fc78ef8d2709e612cd"
+          },
+          "constraints": {
+            "chars": 228,
+            "est_tokens": 57,
+            "sha256": "5b00bfc488dd56bd87913c46eba4502942daead7e805c1ce1b5e4d3063cd0ddf"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "949149b7d8e3",
+        "version": "949149b7d8e3",
+        "candidate_known": true,
+        "base": "247fe58bae3d",
+        "sources": "pool.toml@b9bca20e78ae gotchas@e5d0a632d2ff memory@notes over cap by 1817 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "e5d0a632d2ff",
+        "candidate_tokens": 3776,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 28344,
+        "routed_reduction_ratio": 0.43666615313511015,
+        "routed_hidden": 51,
+        "routed_ambiguous": 88,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "6576adce8e5e",
+          "37c254b43610",
+          "bca2a6da85fd",
+          "5e9bcae7ed92",
+          "63407adb9b84",
+          "9467fb8c20b0",
+          "10357d124edf",
+          "7277b9b594ab",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "d0e646881f9e",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "d80d1256695d",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "28a564cd538d",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "64b680375800",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "18f9ce631e61",
+          "ce80308dc309",
+          "051786ba0165",
+          "991c7a091cb9",
+          "db5df1195cb4",
+          "fd88fce6688c",
+          "55e8c42797cc",
+          "b4baa08f67ed",
+          "188950523280",
+          "3700e33e38dd",
+          "810a7498ca0f",
+          "ef2a6f8fbba6",
+          "79797e99034d",
+          "4b4b12743a05",
+          "2eae3c2d74c4",
+          "2091ec7061d7",
+          "cb8d259ff3c8",
+          "5b9bb25ec23c",
+          "88504a4aee3c",
+          "d54b07af3b62",
+          "b141d5b98859",
+          "aa8588ac00b7",
+          "27e3d479e418",
+          "1336f8df6f94",
+          "84818b720d4e",
+          "8c51011b54a5",
+          "32a73d2b77ef",
+          "0da74424ba2b",
+          "f6dac7a88aa2",
+          "3a6ff3f4dab0",
+          "f4b42e59e5ff",
+          "2f87295b9e34",
+          "93094cfc443f",
+          "b26dd627a509",
+          "62c565ed60b9",
+          "2a459fab6526",
+          "7f28c7b5df9e",
+          "a536f28fed9e",
+          "e4c630cc87b3",
+          "e146114ba8ec",
+          "d876d051610f",
+          "f5f8de2fdaa8",
+          "7f65565c4e40",
+          "66ab1306ccfc",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "f5e9df567728",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "248975d5c496",
+          "669cef77d8ef",
+          "0148c8d2026d",
+          "021add6ffb89",
+          "0331f61415c0",
+          "03d9db5b76a4",
+          "04de65c255cf",
+          "05df0bc9ef62",
+          "06250f5b2bf9",
+          "0784c689df19",
+          "09585e885a2c",
+          "0a3ca7410102",
+          "0bbc287aecf4",
+          "0d238bb278d4",
+          "0d5efa94f9ca",
+          "0fcd075d9f57",
+          "1073188aac14",
+          "11f75475460f",
+          "12b4301edd3e",
+          "13abf2cf46f6",
+          "15359a72a0a5",
+          "158dd9947c80",
+          "16285184ccd9",
+          "1807a69e7663",
+          "18df6b59f1b8",
+          "1a17ff32a904",
+          "1a7a7f5dc41a",
+          "1ab87a10d407",
+          "1c510a428e02",
+          "1d0cc9ab8559",
+          "1dd317c8d9b9",
+          "1df251b67771",
+          "1f7cd86722f6",
+          "2380174927fc",
+          "23e771b7caa4",
+          "25e6db5cf579",
+          "260f2103255f",
+          "270a093d49c3",
+          "29862065763a",
+          "2a874b8ed171",
+          "2b71081a619f",
+          "2c3608269bcd",
+          "2db2764f9bd8",
+          "2db518b45b7a",
+          "2f544c8da367",
+          "2fda1602f756",
+          "3037c6d26ebe",
+          "31f918ec7b61",
+          "32c8fc2ba755",
+          "347b2365cf0d",
+          "34b6b61ecc58",
+          "34c966b7b621",
+          "34f30d64c6aa",
+          "36dd90fbb604",
+          "36f0d96529d8",
+          "36fba3c5b5ac",
+          "376d59216a0a",
+          "386984bd9daf",
+          "3953665afea9",
+          "3bef63a0226d",
+          "3ca6fc77d0d0",
+          "3d576cc180d1",
+          "3d9de6ae8904",
+          "3db1b12c3605",
+          "3db57e23f967",
+          "3e677b524cec",
+          "3e787c244ee0",
+          "3fc77651746c",
+          "4180c7586cb1",
+          "418f23dce663",
+          "42758e20cbaf",
+          "427a8e2bd836",
+          "42be67d41407",
+          "4394c9ea5626",
+          "43ed90a1ad4e",
+          "453b6e50c221",
+          "4748dac32cb6",
+          "4840989d4fad",
+          "4a226dc6afc3",
+          "4ca2eec9fe74",
+          "4cf8b290c178",
+          "4e7c92225364",
+          "51355537f5ea",
+          "52a59c2d8b66",
+          "52f5acceef24",
+          "5650c5639689",
+          "5693a275ea2c",
+          "575022ff3493",
+          "5777308171e4",
+          "5783dcfcf0b6",
+          "5b27613653f6",
+          "5b27f397c201",
+          "5b7245db391a",
+          "5d279e520eff",
+          "5dfb7da66de0",
+          "60094942b7f7",
+          "61d4a8ade48d",
+          "6215f26cae57",
+          "622b3821c7d5"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7496,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "c5d18d82-d358-4a1d-bf60-a022776f8d3d",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791323407.764679,
+      "status": "done",
+      "result": {
+        "summary": "I made the change and committed it on `task/T-1691` as `8f2b3e2`. The working tree is clean. All the new tests pass. Two tests elsewhere in `test_spawn.py` error, and they error the same way on the base commit.\n\n**What changed**\n- **Review packet** (`orchestrator/spawn.py`): when a review task is stamped `lineage`, the packet uses the stamped base and head and does not work them out again.\n  - **Main diff:** it shows the whole change, `base..head`, limited to files in the scopes of the root task and every fix round. If any of those scopes is empty or `**`, there is no file filter.\n  - **Budget:** a per-file `+/-` list for the whole range always goes in. Full diffs then go in file by file until the budget is used. Every file not shown in full gets the exact `git diff <base>..<head> -- <file>` command, so nothing is cut silently.\n  - **Fix-only diff:** it appears as a separate section headed \"this round's change\", from `task/<fixed task>...head`. If it doesn't fit, the section gives the command to read it instead.\n  - **Broken chain** (missing ancestor, cycle, or the unresolved stamp): the packet is labelled \"lineage unresolved; reviewing the whole branch\" and has no file filter.\n  - Plain reviews still use `scoped_diff` and `bounded_diff` as before.\n- **Daemon** (`orchestrator/daemon.py`):\n  - **Stamping:** `_open_reviews` stamps each review of a fix round when it is created with `lineage=True`, `review_base`, `reviewed_sha` and `pipeline.review_range`. The base is the merge-base of the goal branch (or `origin/main`) with the fix head.\n  - **Fallback:** if the chain is broken, the root has no worktree, or the merge-base fails, the base falls back to the merge-base with `origin/main`, then `main`, then the repo's first commit. The review is also stamped `lineage_unresolved`.\n  - **Merge gate:** for a fix round, `merge_reviewed` only counts approvals from lineage reviews whose `reviewed_sha` matches. If only fix-only approvals exist, it opens exactly one lineage review, sets `reviews_expected=1`, and waits. If that review fails or is held, the task is held and the reason names that review.\n  - Two choices I made beyond the spec:\n    - A fix-only review that asks for changes still holds the task. Only approvals are ignored.\n    - Reviews of plain tasks without the stamp count as before.\n\n**Files changed:** `orchestrator/spawn.py`, `orchestrator/daemon.py`, `tests/test_spawn.py`, `tests/test_daemon.py`.\n\n**Tests added**\n- In `test_spawn.py` (`LineageReviewPacket`): `test_fix_round_review_packet_covers_lineage`, `test_lineage_diff_over_budget_lists_files_and_range`, `test_plain_task_review_unchanged`, `test_lineage_filter_is_union_of_chain_scopes`, `test_lineage_packet_numstat_always_present`.\n- In `test_daemon.py`: `test_merge_ignores_fix_only_approval`, `test_ignored_fix_only_approval_opens_lineage_review`, `test_stamp_at_open_reviews`, `test_chain_failure_reviews_whole_branch`, and one extra, `test_lineage_review_approval_merges`.\n\n**Test failures**",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791323527.2274811,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791323754.300722,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1791323755.263368,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        }
+      }
+    },
+    {
+      "ts": 1791323755.568584,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        },
+        "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+      }
+    },
+    {
+      "ts": 1791323755.5806851,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        },
+        "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223",
+        "gated_at_done": 1791323755.5802538
+      }
+    },
+    {
+      "ts": 1791323802.64974,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791323903.173169,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        },
+        "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223",
+        "gated_at_done": 1791323755.5802538,
+        "merged_at": 1791323903.172823,
+        "merged_at_lease": 1791324803.172823
+      }
+    },
+    {
+      "ts": 1791324125.882022,
+      "status": "done",
+      "merged_into": "goal/T-1667",
+      "sha": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+      "merged_at": 1791324125.88071,
+      "changed_files": [
+        "orchestrator/daemon.py",
+        "orchestrator/spawn.py",
+        "tests/test_daemon.py",
+        "tests/test_spawn.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        },
+        "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223",
+        "gated_at_done": 1791323755.5802538,
+        "merged_at": 1791323903.172823,
+        "merged_at_lease": 1791324803.172823
+      }
+    },
+    {
+      "ts": 1791324127.516593,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        },
+        "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223",
+        "gated_at_done": 1791323755.5802538,
+        "merged_at": 1791323903.172823,
+        "merged_at_lease": 1791324803.172823,
+        "accepted_at": 1791324127.5158038
+      }
+    },
+    {
+      "ts": 1791324177.0598028,
+      "pipeline": {
+        "first_ready_at": 1791322419.256767,
+        "dispatched_at": 1791322686.912417,
+        "dispatched_at_lease": 1791323586.912417,
+        "dispatched_at_done": 1791322701.8745291,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791322945.120372
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791323754.300429,
+        "gated_at_lease": 1791324654.300429,
+        "first_green_at": 1791323754.299215,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1691",
+          "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+          "moved_count": 11,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791323755.2628632,
+          "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+        },
+        "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223",
+        "gated_at_done": 1791323755.5802538,
+        "merged_at": 1791323903.172823,
+        "merged_at_lease": 1791324803.172823,
+        "accepted_at": 1791324127.5158038,
+        "merged_at_done": 1791324177.059498
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791322419.256767,
+    "dispatched_at": 1791322686.912417,
+    "dispatched_at_lease": 1791323586.912417,
+    "dispatched_at_done": 1791322701.8745291,
+    "handoff": {
+      "baseline": "claude:opus",
+      "selected": "claude:opus",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791322945.120372
+    },
+    "jev_route": {
+      "baseline": "opus",
+      "hypothetical": "claude:opus",
+      "key": "d7249c18e00e03c0bd33fb2032b3fbfbb9266d90",
+      "adjustment": {
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "skills_used": [],
+    "gate_attempts": 1,
+    "gated_at": 1791323754.300429,
+    "gated_at_lease": 1791324654.300429,
+    "first_green_at": 1791323754.299215,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1691",
+      "goal_head": "82479c7929637f60e2c4017213d648bd683dadc0",
+      "moved_count": 11,
+      "stale_paths": [
+        "orchestrator/claude_cli.py",
+        "orchestrator/cli.py",
+        "orchestrator/daemon.py",
+        "orchestrator/goals.py",
+        "orchestrator/machine.py",
+        "orchestrator/planner_shadow.py",
+        "orchestrator/spawn.py",
+        "orchestrator/watchdog.py",
+        "tests/_harness.py",
+        "tests/test_spawn.py",
+        "tests/test_watchdog.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [
+          "orchestrator/daemon.py",
+          "orchestrator/spawn.py",
+          "tests/test_spawn.py"
+        ],
+        "changed_files_moved": [
+          "orchestrator/daemon.py",
+          "orchestrator/spawn.py",
+          "tests/test_spawn.py"
+        ],
+        "tests_changed": [
+          "tests/test_spawn.py"
+        ],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": [
+          "T-1687"
+        ]
+      },
+      "risk": "high",
+      "risk_reasons": [
+        "scoped_files_changed",
+        "changed_files_moved",
+        "tests_changed",
+        "overlapping_merge"
+      ],
+      "graph": "stale",
+      "severity": "high",
+      "severity_reasons": [
+        "write_scope"
+      ],
+      "checked_at": 1791323755.2628632,
+      "head": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223"
+    },
+    "reviewed_sha": "8f2b3e215efdb87d1080cbd4bf81cd5d6f26d223",
+    "gated_at_done": 1791323755.5802538,
+    "merged_at": 1791323903.172823,
+    "merged_at_lease": 1791324803.172823,
+    "accepted_at": 1791324127.5158038,
+    "merged_at_done": 1791324177.059498
+  },
+  "packet_meta": {
+    "chars": 6617,
+    "est_tokens": 1654,
+    "presented_tokens": 1654,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "d7e4631cc03f434f749286237d499607cc0c359c726c24d35131e158da864848"
+      },
+      "objective": {
+        "chars": 4299,
+        "est_tokens": 1074,
+        "sha256": "26079ab20ed5aeb6e91003c9b3d79187a0401f468af7c4d253bbd87c155e2d5d"
+      },
+      "acceptance": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+      },
+      "write_scope": {
+        "chars": 109,
+        "est_tokens": 27,
+        "sha256": "dae47ebb0b0a65ee6ef5195ece88ec9cb96d55bf83941a8e2a22253ef5be4821"
+      },
+      "read_scope": {
+        "chars": 1378,
+        "est_tokens": 344,
+        "sha256": "e954e12adc7c2a56cb8e67791f76f615fe37a686b65bb8fc78ef8d2709e612cd"
+      },
+      "constraints": {
+        "chars": 228,
+        "est_tokens": 57,
+        "sha256": "5b00bfc488dd56bd87913c46eba4502942daead7e805c1ce1b5e4d3063cd0ddf"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "949149b7d8e3",
+    "version": "949149b7d8e3",
+    "candidate_known": true,
+    "base": "247fe58bae3d",
+    "sources": "pool.toml@b9bca20e78ae gotchas@e5d0a632d2ff memory@notes over cap by 1817 chars: acceptance kept whole routed=shadow",
+    "policy_version": "b9bca20e78ae",
+    "gotchas": "e5d0a632d2ff",
+    "candidate_tokens": 3776,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 28344,
+    "routed_reduction_ratio": 0.43666615313511015,
+    "routed_hidden": 51,
+    "routed_ambiguous": 88,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "6576adce8e5e",
+      "37c254b43610",
+      "bca2a6da85fd",
+      "5e9bcae7ed92",
+      "63407adb9b84",
+      "9467fb8c20b0",
+      "10357d124edf",
+      "7277b9b594ab",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "1e8bb14425a8",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "2ccea77faf96",
+      "e13b05dcafb4",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "25ee5f8920dc",
+      "26adf6a241ea",
+      "718b545b1eca",
+      "5b872ee10528",
+      "622de2bd3ec8",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "d0e646881f9e",
+      "b676757c3fa9",
+      "84ae4852296a",
+      "d80d1256695d",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "48de25429ecb",
+      "d500754708e5",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "041199286363",
+      "acfaa314d8bc",
+      "28a564cd538d",
+      "0f1d68687edd",
+      "3ec2adada116",
+      "64b680375800",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "18f9ce631e61",
+      "ce80308dc309",
+      "051786ba0165",
+      "991c7a091cb9",
+      "db5df1195cb4",
+      "fd88fce6688c",
+      "55e8c42797cc",
+      "b4baa08f67ed",
+      "188950523280",
+      "3700e33e38dd",
+      "810a7498ca0f",
+      "ef2a6f8fbba6",
+      "79797e99034d",
+      "4b4b12743a05",
+      "2eae3c2d74c4",
+      "2091ec7061d7",
+      "cb8d259ff3c8",
+      "5b9bb25ec23c",
+      "88504a4aee3c",
+      "d54b07af3b62",
+      "b141d5b98859",
+      "aa8588ac00b7",
+      "27e3d479e418",
+      "1336f8df6f94",
+      "84818b720d4e",
+      "8c51011b54a5",
+      "32a73d2b77ef",
+      "0da74424ba2b",
+      "f6dac7a88aa2",
+      "3a6ff3f4dab0",
+      "f4b42e59e5ff",
+      "2f87295b9e34",
+      "93094cfc443f",
+      "b26dd627a509",
+      "62c565ed60b9",
+      "2a459fab6526",
+      "7f28c7b5df9e",
+      "a536f28fed9e",
+      "e4c630cc87b3",
+      "e146114ba8ec",
+      "d876d051610f",
+      "f5f8de2fdaa8",
+      "7f65565c4e40",
+      "66ab1306ccfc",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "f5e9df567728",
+      "d02e6bc9902a",
+      "bb8ef90a30f4",
+      "461132b06b06",
+      "248975d5c496",
+      "669cef77d8ef",
+      "0148c8d2026d",
+      "021add6ffb89",
+      "0331f61415c0",
+      "03d9db5b76a4",
+      "04de65c255cf",
+      "05df0bc9ef62",
+      "06250f5b2bf9",
+      "0784c689df19",
+      "09585e885a2c",
+      "0a3ca7410102",
+      "0bbc287aecf4",
+      "0d238bb278d4",
+      "0d5efa94f9ca",
+      "0fcd075d9f57",
+      "1073188aac14",
+      "11f75475460f",
+      "12b4301edd3e",
+      "13abf2cf46f6",
+      "15359a72a0a5",
+      "158dd9947c80",
+      "16285184ccd9",
+      "1807a69e7663",
+      "18df6b59f1b8",
+      "1a17ff32a904",
+      "1a7a7f5dc41a",
+      "1ab87a10d407",
+      "1c510a428e02",
+      "1d0cc9ab8559",
+      "1dd317c8d9b9",
+      "1df251b67771",
+      "1f7cd86722f6",
+      "2380174927fc",
+      "23e771b7caa4",
+      "25e6db5cf579",
+      "260f2103255f",
+      "270a093d49c3",
+      "29862065763a",
+      "2a874b8ed171",
+      "2b71081a619f",
+      "2c3608269bcd",
+      "2db2764f9bd8",
+      "2db518b45b7a",
+      "2f544c8da367",
+      "2fda1602f756",
+      "3037c6d26ebe",
+      "31f918ec7b61",
+      "32c8fc2ba755",
+      "347b2365cf0d",
+      "34b6b61ecc58",
+      "34c966b7b621",
+      "34f30d64c6aa",
+      "36dd90fbb604",
+      "36f0d96529d8",
+      "36fba3c5b5ac",
+      "376d59216a0a",
+      "386984bd9daf",
+      "3953665afea9",
+      "3bef63a0226d",
+      "3ca6fc77d0d0",
+      "3d576cc180d1",
+      "3d9de6ae8904",
+      "3db1b12c3605",
+      "3db57e23f967",
+      "3e677b524cec",
+      "3e787c244ee0",
+      "3fc77651746c",
+      "4180c7586cb1",
+      "418f23dce663",
+      "42758e20cbaf",
+      "427a8e2bd836",
+      "42be67d41407",
+      "4394c9ea5626",
+      "43ed90a1ad4e",
+      "453b6e50c221",
+      "4748dac32cb6",
+      "4840989d4fad",
+      "4a226dc6afc3",
+      "4ca2eec9fe74",
+      "4cf8b290c178",
+      "4e7c92225364",
+      "51355537f5ea",
+      "52a59c2d8b66",
+      "52f5acceef24",
+      "5650c5639689",
+      "5693a275ea2c",
+      "575022ff3493",
+      "5777308171e4",
+      "5783dcfcf0b6",
+      "5b27613653f6",
+      "5b27f397c201",
+      "5b7245db391a",
+      "5d279e520eff",
+      "5dfb7da66de0",
+      "60094942b7f7",
+      "61d4a8ade48d",
+      "6215f26cae57",
+      "622b3821c7d5"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 7496,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 471,
+    "instruction_tokens_modular": 411,
+    "role": "execute",
+    "tool_tokens_disclosed": 5995,
+    "tool_tokens_minimal": 5995,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_selected_l0": 25,
+    "skill_tokens_selected_l2": 62,
+    "skill_routing_mode": "shadow",
+    "session_id": "c5d18d82-d358-4a1d-bf60-a022776f8d3d",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:opus",
+  "claimed_at": 1791322958.045179,
+  "account": "B",
+  "pid": 47493,
+  "review_verdict": "approve",
+  "merged_into": "goal/T-1667",
+  "sha": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+  "merged_at": 1791324125.88071,
+  "changed_files": [
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_spawn.py"
+  ]
+}

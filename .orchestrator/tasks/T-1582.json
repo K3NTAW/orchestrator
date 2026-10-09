@@ -1,0 +1,57 @@
+{
+  "id": "T-1582",
+  "created_at": 1790956413.096482,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "M-sync: merge origin/main (408738b) into goal/T-1403 and resolve the bus_mcp.py conflict so the wave-2 PR is mergeable",
+  "spec": "Goal T-1403, plan label M-sync. goal/T-1403 (78f8c88, 26 commits ahead of origin/main) does not contain origin/main 408738b (PRs 35, 36, 37 merged after the goal branch forked), and `git merge-tree` reports exactly one conflict: orchestrator/bus_mcp.py, the bus_create_task tool body. origin/main's side (T-1517, PR 37) returns a compact echo: `created = bus.create_task(...); echo = bus._compact_row(created); echo.update({\"acceptance_count\": len(acceptance), \"scope_count\": len(scope), \"spec_chars\": len(spec)}); return echo` with the docstring 'Planner only. Create a task; rejected without acceptance criteria and scope paths.' The goal side (T-1438, E8) changed only the docstring to 'Planner only. Create a task; depends_on accepts task ids or plan labels of siblings.' and returns bus.create_task(...) directly.\n\nDo, in the task worktree (cut from goal/T-1403):\n1. `git merge --no-ff origin/main` (fetch first; origin/main must be 408738b or its descendant) with the commit message 'M-sync: merge origin/main into goal/T-1403 (wave-2 PR)'. Resolve orchestrator/bus_mcp.py by keeping origin/main's compact-echo body and combining the docstrings: 'Planner only. Create a task; rejected without acceptance criteria and scope paths; depends_on accepts task ids or plan labels of siblings.' Every other file auto-merges; do not edit anything else and do not rebase (the branch history must stay intact: 26 task commits are referenced by bus records).\n2. Confirm both sides' behaviour after the merge by running tests/test_bus.py, tests/test_pool.py, tests/test_cli.py and tests/test_planner_context.py in the foreground; fix nothing beyond the conflict unless a test fails only because of the merge, and say so in the result.\n3. Commit the merge; the result names the merge commit sha. Do not run the full gate; the daemon does.\n\nNote for the Planner (not the executor): the merge queue rebases task branches, which would flatten this merge commit, so after the gate and the security review approve, the Planner fast-forwards goal/T-1403 to the merge commit by hand (`git branch -f goal/T-1403 <merge sha>`, goal/T-1403 is not checked out anywhere) and pushes it; a 'merge rebase_conflict' or 'failed rebase_conflict' outcome from the daemon for this task is expected and harmless.\n\nScope: every file origin/main changed since the fork plus bus_mcp.py (listed in scope); out of scope: any other file. Rollback: `git branch -f goal/T-1403 78f8c88` (the pre-sync head).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_bus.py::test_bus_create_task_echoes_compact_row: passes after the merge (origin/main's compact echo kept in orchestrator/bus_mcp.py bus_create_task)",
+    "tests/test_bus.py::test_create_task_resolves_plan_label_depends_on: passes after the merge (the goal branch's plan-label depends_on resolution kept)",
+    "tests/test_pool.py::test_planner_account_pin_honoured: passes after the merge, or if no test by that name exists on origin/main, every test in tests/test_pool.py passes",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    ".claude/hooks/planner-prompt.sh",
+    ".orchestrator/pool.toml",
+    ".orchestrator/prompts/planner.md",
+    "CLAUDE.md",
+    "README.md",
+    "orchestrator/bus.py",
+    "orchestrator/bus_mcp.py",
+    "orchestrator/cli.py",
+    "orchestrator/handover.py",
+    "orchestrator/planner_context.py",
+    "orchestrator/pool.py",
+    "tests/test_bus.py",
+    "tests/test_cli.py",
+    "tests/test_planner_context.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1800,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "M-sync"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790956458.4551418,
+      "status": "superseded",
+      "hold_reason": "superseded: acceptance named tests/test_pool.py::test_planner_account_pin_honoured, which does not exist (the gate would hold on it); re-filed with test_pick_planner_honours_pinned_account"
+    }
+  ],
+  "hold_reason": "superseded: acceptance named tests/test_pool.py::test_planner_account_pin_honoured, which does not exist (the gate would hold on it); re-filed with test_pick_planner_honours_pinned_account"
+}

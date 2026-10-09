@@ -1,0 +1,1408 @@
+{
+  "id": "T-1659",
+  "created_at": 1791240685.639582,
+  "parent": "T-1658",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "Automatic context handover from the planner-context hook (once per 100k band, one-line notice)",
+  "spec": "Make the context handover automatic. Code: orchestrator/planner_context.py hook_message() (line ~133) and the\n`planner-context --hook` CLI path (orchestrator/cli.py:192), called by .claude/hooks/planner-prompt.sh on every user message.\n\nToday: once context_tokens >= [planner].handover_context_tokens it returns \"Planner context is N tokens (threshold T); write\nthe checkpoint: uv run orchestrator handover --reason context --session-id <id>; then keep working ...\" on EVERY message,\nand the Planner has to run the command itself.\n\nChange:\n1. When the threshold is crossed and a session id is known, hook_message runs the handover itself (call the same function\n   `orchestrator handover --reason context --session-id <id>` uses, in-process; no subprocess to claude). Bound it: at most\n   once per session per 100k-token band above the threshold (state in .orchestrator/handover_state.json or the existing\n   handover state file; read how handover.py stores state). A failure is caught and reported in one line, never raised.\n2. The message becomes one short line, printed only on the message where the handover ran:\n   \"Context N tokens: handover checkpoint written to .orchestrator/plan.md (auto).\" Nothing on the other messages.\n   Keep the plan.md size warning as today.\n3. No change to .claude/hooks (protected); everything happens in the Python the hook already calls. Keep the 3 s alarm\n   in planner-prompt.sh in mind: the handover must finish well within it, or run it in a detached background process\n   (subprocess.Popen of `uv run orchestrator handover ...` with start_new_session=True, stdout/stderr to\n   .orchestrator/runs/handover-<ts>.log) and print \"handover started (auto)\". Pick one and justify it in the commit message.\nTests in tests/test_planner_context.py (create if absent, unittest style of tests/test_handover.py if it exists):\ntest_hook_runs_handover_once_per_band, test_hook_silent_below_threshold, test_hook_silent_after_handover_in_same_band,\ntest_hook_reports_failure_without_raising.\n",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_context.py: the four named tests exist and pass",
+    "No change under .claude/hooks",
+    "handover runs at most once per session per 100k band"
+  ],
+  "scope": [
+    "orchestrator/planner_context.py",
+    "orchestrator/cli.py",
+    "orchestrator/handover.py",
+    "tests/test_planner_context.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1659",
+  "codex_thread": null,
+  "result": {
+    "summary": "The hook now runs the context handover itself, but the full gate will be red until someone updates one test in `tests/test_cli.py`, which is outside my write scope.\n\n**What changed**\n- When context is over `[planner].handover_context_tokens` and the session id is known, `hook_message` starts `uv run orchestrator handover --reason context --session-id <id>` as a detached process. Its output goes to `.orchestrator/runs/handover-<ts>.log`.\n- It runs at most once per session per 100k-token band above the threshold. The last band per session is stored in `.orchestrator/handover_state.json` under `auto_handover_bands`, and the existing keys in that file are kept.\n- Message: `Context N tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.` It appears only on the message where the handover starts; later messages in the same band print nothing.\n- A failure prints one line, `Context N tokens: auto handover failed (<Exc>: <msg>).`, and never raises. The band is recorded before the attempt, so a persistent failure (like `uv` missing) is reported once per band and not on every message.\n- With no session id, the old manual instruction stays. The plan.md size warning is unchanged. Nothing under `.claude/hooks` changed, and `cli.py`/`handover.py` needed no edits. The old `_last_handover` \"handover written HH:MM\" path is gone.\n- I chose the detached process over running in-process because `handover.write()` makes network calls to Jev, up to `MAX_JEV_REQUESTS` times its timeout. That can go past the 3 s alarm in `planner-prompt.sh`. The commit message explains this.\n\n**Commits:** two on `task/T-1659`, both starting with `T-1659`. Revert with `git revert` on both.\n\n**Files changed**\n- `orchestrator/planner_context.py`\n- `tests/test_planner_context.py`: adds the four named tests and a `setUp` that mocks `Popen`. Five existing tests that expected the manual message for a known session id now expect the automatic one.\n\n**Test output (failures only)**\n- `test_planner_context` and `test_handover`: 39 tests, OK.\n- `tests/test_cli.py` (out of scope, not edited):\n  ```\n  FAIL: test_handover_cli_forwards_session_id\n  AssertionError: 'write the checkpoint' not found in 'Context 310000 tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.\\n'\n  ```\n  This test checks the old behaviour that this task deliberately replaces. It also doesn't mock `subprocess.Popen`, so it now starts a real detached `uv run orchestrator handover` in its temp dir, which most likely just fails there. It needs a follow-up with `tests/test_cli.py` in scope: mock `orchestrator.planner_context.subprocess.Popen` and assert the \"handover started (auto)\" line.",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791240780.717247,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209
+      }
+    },
+    {
+      "ts": 1791240780.7203891,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335
+      }
+    },
+    {
+      "ts": 1791240780.721311,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335
+      }
+    },
+    {
+      "ts": 1791240785.560866,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5825,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791240785.564914,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735
+      }
+    },
+    {
+      "ts": 1791241011.617026,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        }
+      }
+    },
+    {
+      "ts": 1791241012.1013691,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1791241012.110816,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791241017.25711,
+      "executor": "claude:opus"
+    },
+    {
+      "ts": 1791241020.157098,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5825,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791241020.171328,
+      "packet_meta": {
+        "chars": 4946,
+        "est_tokens": 1236,
+        "presented_tokens": 1236,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "32ec2ab894d456c7dc5b4c85bdf637ba26a1dd21ff217aee4809b57f350e3521"
+          },
+          "objective": {
+            "chars": 2139,
+            "est_tokens": 534,
+            "sha256": "6904c1ee9f1614ff6d888f0cd639be0418bb91febe76326228c4152414e7d206"
+          },
+          "acceptance": {
+            "chars": 170,
+            "est_tokens": 42,
+            "sha256": "06d77125a880a5e7e99a3d5f7d315ce5fd2441b76bbb102edbac89daaaed4539"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "71d6772f8859ce825f58e571573dd20db86539ab4b54a556e31d42945d866449"
+          },
+          "write_scope": {
+            "chars": 130,
+            "est_tokens": 32,
+            "sha256": "de5c993b6b8c5b023fafc7dea99b1334ad1fbe73be08333b86de6c4dee6b97fd"
+          },
+          "read_scope": {
+            "chars": 1397,
+            "est_tokens": 349,
+            "sha256": "cae227f46ee40a319ce47fd2b066be8412717c9a4fcf875dd17c30104b5d61cb"
+          },
+          "constraints": {
+            "chars": 122,
+            "est_tokens": 30,
+            "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+          },
+          "relevant_tests": {
+            "chars": 568,
+            "est_tokens": 142,
+            "sha256": "7334cc27437fda577a68a439ca49460f12a6e39c26a0395e0eebd0b788068867"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "ad17112a2445",
+        "version": "ad17112a2445",
+        "candidate_known": true,
+        "base": "1accb371c18a",
+        "sources": "pool.toml@b9bca20e78ae gotchas@db9c0a5e155e memory@notes over cap by 146 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "db9c0a5e155e",
+        "candidate_tokens": 2673,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 13173,
+        "routed_reduction_ratio": 0.9493369847218218,
+        "routed_hidden": 7,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59b1bcbc3720",
+          "d4e00cbaa66a",
+          "60c6a77b3565",
+          "72fc79cb6b69",
+          "83ad6434ad7e",
+          "cb01c9405ae6",
+          "5e19da895fe0",
+          "49ee251b448b",
+          "0a383be5d0e6",
+          "504365aa02ad",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "622de2bd3ec8",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "ea32efdc0fe3",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "b9201efbf5a6",
+          "0fcd075d9f57",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "7657bd5d45a9",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "df7350a0e379",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "6b025e857fc0",
+          "ad3a08aab497",
+          "ddc03830f4e8",
+          "d2a392b414f7",
+          "ed81df7b8cb6",
+          "d7488c777d14",
+          "ea902def03fa",
+          "5d0f60ec89b1",
+          "27ddd4430938",
+          "7bf2b75d41b7",
+          "ca28acdaf253",
+          "97f3b60c13f8",
+          "b2100dc1f60d",
+          "86918a5daa8b",
+          "dd66e06e20c5",
+          "15a7e1325567",
+          "a6d88dced774",
+          "c64fe2d17be4",
+          "f76c41422d45",
+          "a0a365485332",
+          "493bcdb15b34",
+          "f2966ffbf040",
+          "8f938ad31ca7",
+          "aa3d656d857c",
+          "bd26aefc1e38",
+          "e4bf55dd242c",
+          "0a4a690acab6",
+          "4af89d373a3c",
+          "5a8679975caa",
+          "3dc1e8ce911b",
+          "6b948d00df37",
+          "bb8fee2c5eb2",
+          "0dd1e2c3830a",
+          "55d55ab2c37c",
+          "e1f55ae2b248",
+          "a821cbb69052"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5825,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791241021.813063,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1659",
+      "claimed_at": 1791241021.812672
+    },
+    {
+      "ts": 1791241021.8143349,
+      "account": "B"
+    },
+    {
+      "ts": 1791241027.556214,
+      "pid": 35042,
+      "account": "B"
+    },
+    {
+      "ts": 1791241143.018147,
+      "packet_meta": {
+        "chars": 4946,
+        "est_tokens": 1236,
+        "presented_tokens": 1236,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "32ec2ab894d456c7dc5b4c85bdf637ba26a1dd21ff217aee4809b57f350e3521"
+          },
+          "objective": {
+            "chars": 2139,
+            "est_tokens": 534,
+            "sha256": "6904c1ee9f1614ff6d888f0cd639be0418bb91febe76326228c4152414e7d206"
+          },
+          "acceptance": {
+            "chars": 170,
+            "est_tokens": 42,
+            "sha256": "06d77125a880a5e7e99a3d5f7d315ce5fd2441b76bbb102edbac89daaaed4539"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "71d6772f8859ce825f58e571573dd20db86539ab4b54a556e31d42945d866449"
+          },
+          "write_scope": {
+            "chars": 130,
+            "est_tokens": 32,
+            "sha256": "de5c993b6b8c5b023fafc7dea99b1334ad1fbe73be08333b86de6c4dee6b97fd"
+          },
+          "read_scope": {
+            "chars": 1397,
+            "est_tokens": 349,
+            "sha256": "cae227f46ee40a319ce47fd2b066be8412717c9a4fcf875dd17c30104b5d61cb"
+          },
+          "constraints": {
+            "chars": 122,
+            "est_tokens": 30,
+            "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+          },
+          "relevant_tests": {
+            "chars": 568,
+            "est_tokens": 142,
+            "sha256": "7334cc27437fda577a68a439ca49460f12a6e39c26a0395e0eebd0b788068867"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "ad17112a2445",
+        "version": "ad17112a2445",
+        "candidate_known": true,
+        "base": "1accb371c18a",
+        "sources": "pool.toml@b9bca20e78ae gotchas@db9c0a5e155e memory@notes over cap by 146 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "db9c0a5e155e",
+        "candidate_tokens": 2673,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 13173,
+        "routed_reduction_ratio": 0.9493369847218218,
+        "routed_hidden": 7,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59b1bcbc3720",
+          "d4e00cbaa66a",
+          "60c6a77b3565",
+          "72fc79cb6b69",
+          "83ad6434ad7e",
+          "cb01c9405ae6",
+          "5e19da895fe0",
+          "49ee251b448b",
+          "0a383be5d0e6",
+          "504365aa02ad",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "622de2bd3ec8",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "ea32efdc0fe3",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "b9201efbf5a6",
+          "0fcd075d9f57",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "7657bd5d45a9",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "df7350a0e379",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "6b025e857fc0",
+          "ad3a08aab497",
+          "ddc03830f4e8",
+          "d2a392b414f7",
+          "ed81df7b8cb6",
+          "d7488c777d14",
+          "ea902def03fa",
+          "5d0f60ec89b1",
+          "27ddd4430938",
+          "7bf2b75d41b7",
+          "ca28acdaf253",
+          "97f3b60c13f8",
+          "b2100dc1f60d",
+          "86918a5daa8b",
+          "dd66e06e20c5",
+          "15a7e1325567",
+          "a6d88dced774",
+          "c64fe2d17be4",
+          "f76c41422d45",
+          "a0a365485332",
+          "493bcdb15b34",
+          "f2966ffbf040",
+          "8f938ad31ca7",
+          "aa3d656d857c",
+          "bd26aefc1e38",
+          "e4bf55dd242c",
+          "0a4a690acab6",
+          "4af89d373a3c",
+          "5a8679975caa",
+          "3dc1e8ce911b",
+          "6b948d00df37",
+          "bb8fee2c5eb2",
+          "0dd1e2c3830a",
+          "55d55ab2c37c",
+          "e1f55ae2b248",
+          "a821cbb69052"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5825,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "3e81de98-b1aa-4904-89be-c38975c80de1"
+      }
+    },
+    {
+      "ts": 1791241143.044779,
+      "packet_meta": {
+        "chars": 4946,
+        "est_tokens": 1236,
+        "presented_tokens": 1236,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "32ec2ab894d456c7dc5b4c85bdf637ba26a1dd21ff217aee4809b57f350e3521"
+          },
+          "objective": {
+            "chars": 2139,
+            "est_tokens": 534,
+            "sha256": "6904c1ee9f1614ff6d888f0cd639be0418bb91febe76326228c4152414e7d206"
+          },
+          "acceptance": {
+            "chars": 170,
+            "est_tokens": 42,
+            "sha256": "06d77125a880a5e7e99a3d5f7d315ce5fd2441b76bbb102edbac89daaaed4539"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "71d6772f8859ce825f58e571573dd20db86539ab4b54a556e31d42945d866449"
+          },
+          "write_scope": {
+            "chars": 130,
+            "est_tokens": 32,
+            "sha256": "de5c993b6b8c5b023fafc7dea99b1334ad1fbe73be08333b86de6c4dee6b97fd"
+          },
+          "read_scope": {
+            "chars": 1397,
+            "est_tokens": 349,
+            "sha256": "cae227f46ee40a319ce47fd2b066be8412717c9a4fcf875dd17c30104b5d61cb"
+          },
+          "constraints": {
+            "chars": 122,
+            "est_tokens": 30,
+            "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+          },
+          "relevant_tests": {
+            "chars": 568,
+            "est_tokens": 142,
+            "sha256": "7334cc27437fda577a68a439ca49460f12a6e39c26a0395e0eebd0b788068867"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "ad17112a2445",
+        "version": "ad17112a2445",
+        "candidate_known": true,
+        "base": "1accb371c18a",
+        "sources": "pool.toml@b9bca20e78ae gotchas@db9c0a5e155e memory@notes over cap by 146 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "db9c0a5e155e",
+        "candidate_tokens": 2673,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 13173,
+        "routed_reduction_ratio": 0.9493369847218218,
+        "routed_hidden": 7,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59b1bcbc3720",
+          "d4e00cbaa66a",
+          "60c6a77b3565",
+          "72fc79cb6b69",
+          "83ad6434ad7e",
+          "cb01c9405ae6",
+          "5e19da895fe0",
+          "49ee251b448b",
+          "0a383be5d0e6",
+          "504365aa02ad",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "622de2bd3ec8",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "ea32efdc0fe3",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "b9201efbf5a6",
+          "0fcd075d9f57",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "7657bd5d45a9",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "df7350a0e379",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "6b025e857fc0",
+          "ad3a08aab497",
+          "ddc03830f4e8",
+          "d2a392b414f7",
+          "ed81df7b8cb6",
+          "d7488c777d14",
+          "ea902def03fa",
+          "5d0f60ec89b1",
+          "27ddd4430938",
+          "7bf2b75d41b7",
+          "ca28acdaf253",
+          "97f3b60c13f8",
+          "b2100dc1f60d",
+          "86918a5daa8b",
+          "dd66e06e20c5",
+          "15a7e1325567",
+          "a6d88dced774",
+          "c64fe2d17be4",
+          "f76c41422d45",
+          "a0a365485332",
+          "493bcdb15b34",
+          "f2966ffbf040",
+          "8f938ad31ca7",
+          "aa3d656d857c",
+          "bd26aefc1e38",
+          "e4bf55dd242c",
+          "0a4a690acab6",
+          "4af89d373a3c",
+          "5a8679975caa",
+          "3dc1e8ce911b",
+          "6b948d00df37",
+          "bb8fee2c5eb2",
+          "0dd1e2c3830a",
+          "55d55ab2c37c",
+          "e1f55ae2b248",
+          "a821cbb69052"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5825,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "3e81de98-b1aa-4904-89be-c38975c80de1",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791241143.723222,
+      "status": "done",
+      "result": {
+        "summary": "The hook now runs the context handover itself, but the full gate will be red until someone updates one test in `tests/test_cli.py`, which is outside my write scope.\n\n**What changed**\n- When context is over `[planner].handover_context_tokens` and the session id is known, `hook_message` starts `uv run orchestrator handover --reason context --session-id <id>` as a detached process. Its output goes to `.orchestrator/runs/handover-<ts>.log`.\n- It runs at most once per session per 100k-token band above the threshold. The last band per session is stored in `.orchestrator/handover_state.json` under `auto_handover_bands`, and the existing keys in that file are kept.\n- Message: `Context N tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.` It appears only on the message where the handover starts; later messages in the same band print nothing.\n- A failure prints one line, `Context N tokens: auto handover failed (<Exc>: <msg>).`, and never raises. The band is recorded before the attempt, so a persistent failure (like `uv` missing) is reported once per band and not on every message.\n- With no session id, the old manual instruction stays. The plan.md size warning is unchanged. Nothing under `.claude/hooks` changed, and `cli.py`/`handover.py` needed no edits. The old `_last_handover` \"handover written HH:MM\" path is gone.\n- I chose the detached process over running in-process because `handover.write()` makes network calls to Jev, up to `MAX_JEV_REQUESTS` times its timeout. That can go past the 3 s alarm in `planner-prompt.sh`. The commit message explains this.\n\n**Commits:** two on `task/T-1659`, both starting with `T-1659`. Revert with `git revert` on both.\n\n**Files changed**\n- `orchestrator/planner_context.py`\n- `tests/test_planner_context.py`: adds the four named tests and a `setUp` that mocks `Popen`. Five existing tests that expected the manual message for a known session id now expect the automatic one.\n\n**Test output (failures only)**\n- `test_planner_context` and `test_handover`: 39 tests, OK.\n- `tests/test_cli.py` (out of scope, not edited):\n  ```\n  FAIL: test_handover_cli_forwards_session_id\n  AssertionError: 'write the checkpoint' not found in 'Context 310000 tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.\\n'\n  ```\n  This test checks the old behaviour that this task deliberately replaces. It also doesn't mock `subprocess.Popen`, so it now starts a real detached `uv run orchestrator handover` in its temp dir, which most likely just fails there. It needs a follow-up with `tests/test_cli.py` in scope: mock `orchestrator.planner_context.subprocess.Popen` and assert the \"handover started (auto)\" line.",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791241219.567504,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791241395.306247,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791241395.3059998,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_cli_forwards_session_id (test_cli.Cli.test_handover_cli_forwards_session_id)\nTraceback (most recent call last):\nAssertionError: 'write the checkpoint' not found in 'Context 310000 tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.\\n'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1659/.orchestrator/runs/tests/T-1659-20261006-010315.log\n"
+      }
+    },
+    {
+      "ts": 1791241399.568436,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_cli_forwards_session_id (test_cli.Cli.test_handover_cli_forwards_session_id)\nTraceback (most recent call last):\nAssertionError: 'write the checkpoint' not found in 'Context 310000 tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.\\n'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1659/.orchestrator/runs/tests/T-1659-20261006-010315.log\n",
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1791241399.696178,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_cli_forwards_session_id (test_cli.Cli.test_handover_cli_forwards_session_id)\nTraceback (most recent call last):\nAssertionError: 'write the checkpoint' not found in 'Context 310000 tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.\\n'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1659/.orchestrator/runs/tests/T-1659-20261006-010315.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_cli.Cli.test_handover_cli_forwards_session_id"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1791241399.6978931,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791241395.3059998,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1791241401.607828,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791241395.3059998,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791241395.306247"
+      }
+    },
+    {
+      "ts": 1791242164.597367,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791241395.3059998,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791241395.306247",
+        "first_green_at": 1791242164.59291,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1791242624.354284,
+      "status": "done",
+      "merged_into": "goal/T-1658",
+      "merged_via": "fix round T-1663 52e2f5de67acc7d77a55872b2987d4659559ee4c",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1791240780.717209,
+        "dispatched_at": 1791240780.720335,
+        "dispatched_at_lease": 1791241680.720335,
+        "dispatched_at_done": 1791240785.564735,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791241011.616714
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791241395.3059998,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791241395.306247",
+        "first_green_at": 1791242164.59291,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1791242624.35187
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791240780.717209,
+    "dispatched_at": 1791240780.720335,
+    "dispatched_at_lease": 1791241680.720335,
+    "dispatched_at_done": 1791240785.564735,
+    "handoff": {
+      "baseline": "claude:opus",
+      "selected": "claude:opus",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791241011.616714
+    },
+    "jev_route": {
+      "baseline": "opus",
+      "hypothetical": "claude:opus",
+      "key": "6db5b3d1de6b5a2a7106e29e10b5e4a4cb90d066",
+      "adjustment": {
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "skills_used": [],
+    "gate_attempts": 1,
+    "gated_at": 1791241395.3059998,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1791241395.306247",
+    "first_green_at": 1791242164.59291,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1791242624.35187
+  },
+  "packet_meta": {
+    "chars": 4946,
+    "est_tokens": 1236,
+    "presented_tokens": 1236,
+    "sections": {
+      "_preamble": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "32ec2ab894d456c7dc5b4c85bdf637ba26a1dd21ff217aee4809b57f350e3521"
+      },
+      "objective": {
+        "chars": 2139,
+        "est_tokens": 534,
+        "sha256": "6904c1ee9f1614ff6d888f0cd639be0418bb91febe76326228c4152414e7d206"
+      },
+      "acceptance": {
+        "chars": 170,
+        "est_tokens": 42,
+        "sha256": "06d77125a880a5e7e99a3d5f7d315ce5fd2441b76bbb102edbac89daaaed4539"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "71d6772f8859ce825f58e571573dd20db86539ab4b54a556e31d42945d866449"
+      },
+      "write_scope": {
+        "chars": 130,
+        "est_tokens": 32,
+        "sha256": "de5c993b6b8c5b023fafc7dea99b1334ad1fbe73be08333b86de6c4dee6b97fd"
+      },
+      "read_scope": {
+        "chars": 1397,
+        "est_tokens": 349,
+        "sha256": "cae227f46ee40a319ce47fd2b066be8412717c9a4fcf875dd17c30104b5d61cb"
+      },
+      "constraints": {
+        "chars": 122,
+        "est_tokens": 30,
+        "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+      },
+      "relevant_tests": {
+        "chars": 568,
+        "est_tokens": 142,
+        "sha256": "7334cc27437fda577a68a439ca49460f12a6e39c26a0395e0eebd0b788068867"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "ad17112a2445",
+    "version": "ad17112a2445",
+    "candidate_known": true,
+    "base": "1accb371c18a",
+    "sources": "pool.toml@b9bca20e78ae gotchas@db9c0a5e155e memory@notes over cap by 146 chars: acceptance kept whole routed=shadow",
+    "policy_version": "b9bca20e78ae",
+    "gotchas": "db9c0a5e155e",
+    "candidate_tokens": 2673,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 13173,
+    "routed_reduction_ratio": 0.9493369847218218,
+    "routed_hidden": 7,
+    "routed_ambiguous": 18,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "59b1bcbc3720",
+      "d4e00cbaa66a",
+      "60c6a77b3565",
+      "72fc79cb6b69",
+      "83ad6434ad7e",
+      "cb01c9405ae6",
+      "5e19da895fe0",
+      "49ee251b448b",
+      "0a383be5d0e6",
+      "504365aa02ad",
+      "a9e3c482cf6d",
+      "36fba3c5b5ac",
+      "65c4d2b5db00",
+      "2380174927fc",
+      "ab047a2d7f21",
+      "df10911c0fd4",
+      "270a093d49c3",
+      "9d078ea9fe66",
+      "0768ddd89e7e",
+      "622de2bd3ec8",
+      "2b71081a619f",
+      "e374e3dd1e88",
+      "6b0c3088acb2",
+      "b839fab17283",
+      "ea32efdc0fe3",
+      "e42e3e70122c",
+      "a595cbbe1665",
+      "1c510a428e02",
+      "48de25429ecb",
+      "d500754708e5",
+      "b9201efbf5a6",
+      "0fcd075d9f57",
+      "d39ac091b005",
+      "d0b9e72fe363",
+      "7657bd5d45a9",
+      "00db509188f0",
+      "041199286363",
+      "c4bd4333eab1",
+      "7566baf004f8",
+      "4180c7586cb1",
+      "05df0bc9ef62",
+      "df7350a0e379",
+      "647c5393915d",
+      "63602ead1a37",
+      "e91c30e2df13",
+      "6b6a2d72145e",
+      "cf6515afcb5a",
+      "0f1d68687edd",
+      "3ec2adada116",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "6b025e857fc0",
+      "ad3a08aab497",
+      "ddc03830f4e8",
+      "d2a392b414f7",
+      "ed81df7b8cb6",
+      "d7488c777d14",
+      "ea902def03fa",
+      "5d0f60ec89b1",
+      "27ddd4430938",
+      "7bf2b75d41b7",
+      "ca28acdaf253",
+      "97f3b60c13f8",
+      "b2100dc1f60d",
+      "86918a5daa8b",
+      "dd66e06e20c5",
+      "15a7e1325567",
+      "a6d88dced774",
+      "c64fe2d17be4",
+      "f76c41422d45",
+      "a0a365485332",
+      "493bcdb15b34",
+      "f2966ffbf040",
+      "8f938ad31ca7",
+      "aa3d656d857c",
+      "bd26aefc1e38",
+      "e4bf55dd242c",
+      "0a4a690acab6",
+      "4af89d373a3c",
+      "5a8679975caa",
+      "3dc1e8ce911b",
+      "6b948d00df37",
+      "bb8fee2c5eb2",
+      "0dd1e2c3830a",
+      "55d55ab2c37c",
+      "e1f55ae2b248",
+      "a821cbb69052"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 5825,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 471,
+    "instruction_tokens_modular": 411,
+    "role": "execute",
+    "tool_tokens_disclosed": 5995,
+    "tool_tokens_minimal": 5995,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_selected_l0": 25,
+    "skill_tokens_selected_l2": 62,
+    "skill_routing_mode": "shadow",
+    "session_id": "3e81de98-b1aa-4904-89be-c38975c80de1",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:opus",
+  "claimed_at": 1791241021.812672,
+  "account": "B",
+  "pid": 35042,
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_cli_forwards_session_id (test_cli.Cli.test_handover_cli_forwards_session_id)\nTraceback (most recent call last):\nAssertionError: 'write the checkpoint' not found in 'Context 310000 tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md.\\n'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1659/.orchestrator/runs/tests/T-1659-20261006-010315.log\n",
+    "flaky_runs": [
+      {
+        "ids": [
+          "test_cli.Cli.test_handover_cli_forwards_session_id"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-1658",
+  "merged_via": "fix round T-1663 52e2f5de67acc7d77a55872b2987d4659559ee4c"
+}

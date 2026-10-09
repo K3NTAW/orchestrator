@@ -1,0 +1,1262 @@
+{
+  "id": "T-1504",
+  "created_at": 1790894223.4577038,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 5,
+  "title": "B2a: shared executor predicates and a pure capacity snapshot: executor.codex_rows / fallback_mode / claude_row_free / executed_by, Pool.row_covers + claude_has_headroom extracted, bounded claude_capacity requeue in _exhausted, snapshot takes injected claude_free and derives 'fallback' from executor.fallback_mode",
+  "spec": "Goal T-1403, wave 2, plan label B2a. First half of the SPLIT of B2v4 T-1488 (superseded after spec review T-1500, round 4). B2a is the pure, library-side half: executor.py, pool.py, capacity.py and their tests. daemon.py is NOT in scope; B2b (the daemon dispatch half) depends on this task and consumes every symbol named here, so the names and signatures below are a contract and must land exactly as written.\n\nFacts (goal/T-1403, unchanged since main 355583c):\n- executor._exhausted(pool, t, run=None, tier=None): routed = tier is not None; when not routed it reads pool.cfg[\"codex\"][\"on_exhausted\"] (KeyError without a [codex] table) and holds 'codex unavailable; policy=...' when no fallback tier applies. The claude_capacity requeue shape already exists there (status queued, pipeline.hold_note 'claude_capacity', dispatched_at popped, return {'status': 'claude_capacity', 'reason': ...}).\n- pool.eligible_executors(role, complexity, task=None) computes in_band (claude_split pairing when both Claude rows are enabled, else complexity_min..complexity_max), drops disabled, cooling, saturated and over-budget rows (ex.daily_budget_tasks and ex.day_tasks >= ex.daily_budget_tasks) and, for Claude rows, requires self.pick('execute') is not None. pool.executor_identity(field, cfg) resolves a row id or a 'claude:<tier>' label to (provider, ...).\n- capacity.snapshot(pool, running_claude=0, inflight_claude=0, now=None) is documented read-only; it returns {'executors': {id: {free, cooling_s, enabled, roles, complexity, day_tasks_left, weight}}, 'claude_workers_free', 'accounts', 'fallback', 'ts'}; 'fallback' today is 'every enabled execute row cooling'. capacity.admit uses per-row 'free' outside fallback and 'claude_workers_free' only for the fallback pseudo-executor 'claude'.\n\nChange (every helper below is pure unless it says it writes to the bus):\n1. executor.codex_rows(pool) -> list[Executor]: enabled rows with 'execute' in roles and provider 'codex' (reads pool.executors only). executor.fallback_mode(pool, now=None) -> bool: codex_rows(pool) is non-empty AND every row in it is cooling at now (row.cooldown_until > now; now = time.time() only when None) AND pool.cfg.get('codex', {}).get('on_exhausted', 'hold') == 'fallback_claude'. A Claude-only pool is never in fallback mode. executor never imports daemon at module level (the existing in-function `from . import daemon` in _exhausted is replaced, see 4).\n2. pool.py EXTRACTS two helpers with no behaviour change (tests/test_pool.py passes unchanged): Pool.row_covers(self, ex, complexity) -> bool is the in_band logic eligible_executors applies today (claude_split pairing when both Claude rows are enabled, else the row's own band); Pool.claude_has_headroom(self) -> bool is the `self.pick('execute') is not None` check eligible_executors applies to Claude rows. eligible_executors calls both. 'covers' in this spec and in B2b means pool.row_covers.\n3. executor.claude_row_free(pool, row, now=None, headroom=None) -> int: free parallelism of a Claude execute row: 0 when the row is disabled, cooling at now, saturated (max_parallel - running <= 0), over its day budget (row.daily_budget_tasks and row.day_tasks >= row.daily_budget_tasks, read from the stored counters, never roll_day), or when headroom is False; else max_parallel - running. headroom None means 'unknown, assume True' (documented: the daemon passes pool.claude_has_headroom() computed ONCE per tick; this helper never calls pick() and never calls time.time() when now is given).\n4. executor._exhausted bounded requeue. policy = pool.cfg.get('codex', {}).get('on_exhausted', 'hold') (no KeyError without [codex]). A NEW branch gated on `not routed and not codex_rows(pool)` placed BEFORE the tier-None 'codex unavailable' hold:\n   (a) if any enabled Claude execute row covers t['complexity'] (pool.row_covers, band only): requeue exactly like today's claude_capacity shape PLUS pipeline.claude_capacity_until = now + pool.cfg.get('daemon', {}).get('claude_capacity_backoff_s', 60) and pipeline.claude_capacity_requeues = (previous or 0) + 1; return {'status': 'claude_capacity', 'reason': 'no claude row free'}. When the incremented count exceeds pool.cfg.get('daemon', {}).get('claude_capacity_max_requeues', 20): bus.update(status='held', hold_reason=f'claude_capacity: no Claude row free after {n} requeues') and return {'status': 'held', 'hold_reason': ...}.\n   (b) else: bus.update(status='held', hold_reason=f'no executor row covers complexity {t[\"complexity\"]}') and return {'status': 'held', 'hold_reason': ...}. The held payloads are built without `pol` and without pool.status()['codex'].\n   With an enabled codex row the legacy path (fallback tier, the 'codex unavailable' hold, and the existing unbounded Claude requeue on cap / no account) is UNCHANGED and stays unbounded; its docstring says so (T-1500 #9 accepted). The existing `from . import daemon` for running_claude_workers inside the legacy branch stays as it is (function-level import, legacy path only).\n5. Counter reset: on a successful claim in executor.start (the point where the task is marked running with an executor), pipeline.claude_capacity_requeues and pipeline.claude_capacity_until are popped from the task's pipeline in the same bus.update, so the bound counts consecutive requeues only (T-1500 #3). Say in the docstring that daemon.retry_held handling of 'claude_capacity:' holds (B2b) resets them too.\n6. executor.executed_by(field, tier, cfg) -> str, pure: identity = pool.executor_identity(field, cfg); provider codex -> 'codex:<field>'; provider claude -> field; otherwise a string starting 'codex:' or 'claude:' -> itself; a bare string without ':' (stale codex id such as 'astra') -> 'codex:<field>'; None/empty -> 'claude:<tier or sonnet>'. B2b wires daemon.reconcile_dead to it; this task only adds and tests the helper.\n7. capacity.snapshot(pool, running_claude=0, inflight_claude=0, now=None, claude_free=None): stays pure and now-driven. (i) 'fallback' is executor.fallback_mode(pool, now=now) (import executor inside capacity; executor must not import capacity). (ii) New keyword claude_free: dict[row_id, int] | None. When given, for every Claude execute row (provider claude) executors[row_id]['free'] = claude_free.get(row_id, 0) (clamped at 0). When None, 'free' for Claude rows is derived from the snapshot's own fields exactly as today (max_parallel - running) and account headroom is assumed (documented in the docstring). Codex rows are unchanged. (iii) New top-level key 'claude_free_total' = sum of 'free' over Claude execute rows after (ii), clamped by min(sum, claude_workers_free). 'claude_workers_free' keeps its meaning (max_parallel_claude_workers - running_claude - inflight_claude, floor 0). These three keys ('executors'[row]['free'], 'claude_free_total', 'claude_workers_free') are the contract B2b's free_slots must agree with; pin them in the tests. admit() and eligible_executors_from_snapshot are unchanged except that they now see the injected per-row 'free'. (iv) capacity._reason: 'cooldown' is returned when every row that counts (codex rows via executor.codex_rows semantics, Claude rows via 'free' == 0 with cooling_s > 0) is at 0; a Claude-only pool with every row cooling reports 'cooldown' with fallback False.\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract, never weaken):\n- tests/test_executor.py claude_pool(policy='fallback_claude') builds cfg['executors'] = [claude:opus] only. Add with_codex_row=False: True appends one enabled, cooling codex row; pass True in test_complexity_nine_fallback_still_held, test_claude_dispatch_below_cap_dispatches and test_claude_dispatch_requeues_at_worker_cap (legacy path, unchanged behaviour). Any other test in tests/test_executor.py that reaches _exhausted on a Claude-only pool and expects the 'codex unavailable' hold is updated to the new contract and listed in the result.\n- tests/test_capacity.py pins today's 'fallback' and reasons: keep every codex assertion; update only Claude-row counting and the fallback flag for Claude-only pools.\n- tests/test_pool.py passes unchanged.\n\nRollback: `git revert` of this task's merge commit alone is clean as long as B2b has not merged; after B2b, revert both merges together (B2b's docstring repeats this). Tasks held 'no executor row covers' or 'claude_capacity:' after a revert are cleared with `orchestrator retry <id>`. Out of scope: daemon.py (B2b), spawn.py (B4b), mcp.py/tool_catalog.py (B3).\n\nWork on the task branch cut from goal/T-1403. Commit first, then run tests/test_executor.py tests/test_capacity.py tests/test_pool.py in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_executor.py::test_codex_rows_and_fallback_mode_predicates: passes: codex_rows(pool) lists only enabled execute rows with provider codex; fallback_mode(pool, now=now) is False for a Claude-only pool even with every Claude row cooling and no [codex] table, True with one enabled codex row cooling at now and on_exhausted fallback_claude, False when that row is not cooling or the policy is hold; neither calls time.time when now is given (patched to raise)",
+    "tests/test_executor.py::test_claude_row_free_counts_free_parallelism: passes: claude_row_free(pool, row, now=now, headroom=True) is max_parallel - running; 0 when the row is disabled, cooling at now, saturated, over daily_budget_tasks (stored counters, roll_day not called), or headroom=False; headroom=None behaves like True; time.time and Pool.pick are patched to raise and are not called",
+    "tests/test_executor.py::test_no_codex_row_requeues_bounded_or_holds_visibly: passes: executor.start on a pool whose executors are only Claude rows, pick_executor returning None and pool.cfg without a [codex] table, (a) leaves a complexity-5 task queued with pipeline.hold_note 'claude_capacity', pipeline.claude_capacity_until in the future, claude_capacity_requeues 1, no dispatched_at and no hold_reason and returns status 'claude_capacity' when an enabled claude row's band covers 5; (b) holds a task whose complexity no enabled row covers with hold_reason 'no executor row covers complexity N' and returns status 'held'; (c) after claude_capacity_max_requeues requeues the task is held with hold_reason starting 'claude_capacity:'; the held payloads have no 'pol' key and the branch runs before the tier-None hold (a pool without [codex] never raises)",
+    "tests/test_executor.py::test_successful_claim_resets_claude_capacity_counters: passes: a task carrying pipeline.claude_capacity_requeues 7 and claude_capacity_until that executor.start successfully claims (stubbed worker) has neither key in its pipeline afterwards",
+    "tests/test_executor.py::test_executed_by_from_row_provider: passes: executed_by('astra', 'sonnet', cfg) == 'codex:astra' for a codex row id and for a bare id absent from cfg, 'claude:opus' for the claude:opus row id and for the label 'claude:opus', 'codex:x' for 'codex:x', and 'claude:sonnet' for None with tier sonnet",
+    "tests/test_pool.py::test_row_covers_and_claude_has_headroom_extracted: passes: Pool.row_covers matches eligible_executors' in_band decision for a paired Claude pool (split boundary inclusive on the sonnet side) and for a single row; Pool.claude_has_headroom() is False when pick('execute') returns None and True otherwise; every existing tests/test_pool.py test passes unchanged",
+    "tests/test_capacity.py::test_snapshot_fallback_flag_and_pure_claude_free: passes: with every codex row disabled and every Claude row cooling, snapshot(pool, 0, 0, now=now)['fallback'] is False and executor.fallback_mode(pool, now=now) is False (same predicate: patching executor.fallback_mode flips the key); with one enabled cooling codex row and on_exhausted fallback_claude both are True; snapshot(..., claude_free={'claude:sonnet': 2, 'claude:opus': 0}) reports executors['claude:sonnet']['free'] == 2, executors['claude:opus']['free'] == 0 and claude_free_total == min(2, claude_workers_free) without calling Pool.claude_has_headroom or Pool.pick (patched to raise); with claude_free=None Claude rows report max_parallel - running as before; a Claude-only pool with every row cooling gets reason 'cooldown' from capacity._reason while fallback is False",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/pool.py",
+    "orchestrator/capacity.py",
+    "tests/test_executor.py",
+    "tests/test_pool.py",
+    "tests/test_capacity.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B2a",
+    "respec_for": "T-1488"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1504",
+  "codex_thread": "01a0f9a1-da4f-7230-af7e-686f36837d52",
+  "result": {
+    "summary": "Implemented and committed T-1504.\n\n- Added executor predicates, bounded Claude requeues, identity normalization, pool helpers, and pure capacity snapshots.\n- Updated scoped tests/fixtures.\n- `.claude/hooks/tests-green.sh .` passed.\n- Commits: `8f626ea`, `492c538`, `8ac5900`\n- Worktree clean.\n\nFiles changed: `orchestrator/{executor,pool,capacity}.py`, `tests/test_{executor,pool,capacity}.py`\n\nFailures-only test output: empty.",
+    "executed_by": "codex:luna",
+    "thread": "01a0f9a1-da4f-7230-af7e-686f36837d52",
+    "usage": {
+      "input_tokens": 2608655,
+      "cached_input_tokens": 2514176,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 12144,
+      "reasoning_output_tokens": 4004,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790894364.821082,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023
+      }
+    },
+    {
+      "ts": 1790894364.822958,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897
+      }
+    },
+    {
+      "ts": 1790894364.823968,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897
+      }
+    },
+    {
+      "ts": 1790894370.5083032,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 15256,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790894370.511654,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481
+      }
+    },
+    {
+      "ts": 1790894526.100367,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        }
+      }
+    },
+    {
+      "ts": 1790894527.531334,
+      "packet_meta": {
+        "chars": 14377,
+        "est_tokens": 3594,
+        "presented_tokens": 3594,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "5a460e7ad347d09c7c1c65bd364cbd593727dfb806186ab79e6daf8b4a7d6cce"
+          },
+          "objective": {
+            "chars": 9195,
+            "est_tokens": 2298,
+            "sha256": "fe3eb53059bde2f5cadccad210e205985aa117251a4e7c8d7a7918335a54ef10"
+          },
+          "acceptance": {
+            "chars": 3615,
+            "est_tokens": 903,
+            "sha256": "abadd321094a1107ec2cef4d610bf76520a3dd604ad23b52aa794a61ba6b7336"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "7928f6ac7dbea25d9243ba8d3908b3e11631b2f681944981554bab0b6514366d"
+          },
+          "read_scope": {
+            "chars": 767,
+            "est_tokens": 191,
+            "sha256": "f350283a2dc3e857878a444bc1eb2dc9e64c560b4be1554b7a11eb50a9a61315"
+          },
+          "constraints": {
+            "chars": 197,
+            "est_tokens": 49,
+            "sha256": "eb668e3bc381f9e0ae7d7cc3842ad65c5a27d06b9073787d7137ce11650bb9fd"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "13a290c101d7",
+        "version": "13a290c101d7",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@a8842da1d3ee gotchas@fce94e7bc0bf memory@notes over cap by 9577 chars: acceptance kept whole routed=shadow",
+        "policy_version": "a8842da1d3ee",
+        "gotchas": "fce94e7bc0bf",
+        "candidate_tokens": 5277,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 18975,
+        "routed_reduction_ratio": 0.9156492785793563,
+        "routed_hidden": 38,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "699e0984829a",
+          "ac14b9c75e9a",
+          "010a666619ae",
+          "995d9729d7cf",
+          "f5b95ec8835b",
+          "d307f455b4a6",
+          "02bf8e5bf1e5",
+          "c40a565415b8",
+          "957e2c408f68",
+          "a86ed277ecd4",
+          "a5df6f9a2718",
+          "19a54a47a3d3",
+          "74e6353e40fa",
+          "7bd0bd8acaed",
+          "d9ce61a8d9e6",
+          "1317474945b8",
+          "504365aa02ad",
+          "c8dceba3616f",
+          "65c4d2b5db00",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "e374e3dd1e88",
+          "d2cb7b81717c",
+          "d5139aa32546",
+          "d39ac091b005",
+          "041199286363",
+          "df7350a0e379",
+          "28a564cd538d",
+          "3ec2adada116",
+          "4e7c92225364",
+          "5893a1c64463",
+          "ce80308dc309",
+          "051786ba0165",
+          "38af91078410",
+          "a6a908e3f7de",
+          "38db6415babc",
+          "98a6d88ee4fd",
+          "c45e5e890581",
+          "a09975634c7e",
+          "ba6fcab51de6",
+          "2c470b4f2429",
+          "241706054c81",
+          "18b295c3397b",
+          "7481084b1253",
+          "40551a0bbdb7",
+          "4660588c0ca9",
+          "6df4a4058c2b",
+          "35cccb9def6e",
+          "2b190a81fc7d",
+          "1093faadb553",
+          "54b32c3ecc4f",
+          "8f06ac08f0c2",
+          "54aa1d8128b0",
+          "170f8e533093",
+          "5d9a0428ddbe",
+          "1f540971239c",
+          "357c60a3de8c",
+          "3ffc316c9240",
+          "7c4c9dd4200e",
+          "2bb2935d7f9f",
+          "37d5e3aaa113",
+          "ba25ab73cf08",
+          "82dbf3b7ed1f",
+          "3037c6d26ebe",
+          "6a49d600f8e4",
+          "41ce01651b7c",
+          "dae158373008",
+          "ec08dd48b4b0",
+          "039b5f4ee527",
+          "2f05e1be2d36",
+          "dcb88ebf18a5",
+          "c297d4ffb1a7",
+          "271ca802fd19",
+          "75e1ab1d6806",
+          "584f4a33bddf",
+          "69e517a30725",
+          "634612bda00c"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 15256,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790894527.5330482,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1504",
+      "claimed_at": 1790894527.532844
+    },
+    {
+      "ts": 1790894527.534334,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1790894971.196172,
+      "codex_thread": "01a0f9a1-da4f-7230-af7e-686f36837d52",
+      "codex_thread_head": "8ac5900e4696dd26c71cf82e5da7b90c7130a07b"
+    },
+    {
+      "ts": 1790894971.198308,
+      "packet_meta": {
+        "chars": 14377,
+        "est_tokens": 3594,
+        "presented_tokens": 3594,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "5a460e7ad347d09c7c1c65bd364cbd593727dfb806186ab79e6daf8b4a7d6cce"
+          },
+          "objective": {
+            "chars": 9195,
+            "est_tokens": 2298,
+            "sha256": "fe3eb53059bde2f5cadccad210e205985aa117251a4e7c8d7a7918335a54ef10"
+          },
+          "acceptance": {
+            "chars": 3615,
+            "est_tokens": 903,
+            "sha256": "abadd321094a1107ec2cef4d610bf76520a3dd604ad23b52aa794a61ba6b7336"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "7928f6ac7dbea25d9243ba8d3908b3e11631b2f681944981554bab0b6514366d"
+          },
+          "read_scope": {
+            "chars": 767,
+            "est_tokens": 191,
+            "sha256": "f350283a2dc3e857878a444bc1eb2dc9e64c560b4be1554b7a11eb50a9a61315"
+          },
+          "constraints": {
+            "chars": 197,
+            "est_tokens": 49,
+            "sha256": "eb668e3bc381f9e0ae7d7cc3842ad65c5a27d06b9073787d7137ce11650bb9fd"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "13a290c101d7",
+        "version": "13a290c101d7",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@a8842da1d3ee gotchas@fce94e7bc0bf memory@notes over cap by 9577 chars: acceptance kept whole routed=shadow",
+        "policy_version": "a8842da1d3ee",
+        "gotchas": "fce94e7bc0bf",
+        "candidate_tokens": 5277,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 18975,
+        "routed_reduction_ratio": 0.9156492785793563,
+        "routed_hidden": 38,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "699e0984829a",
+          "ac14b9c75e9a",
+          "010a666619ae",
+          "995d9729d7cf",
+          "f5b95ec8835b",
+          "d307f455b4a6",
+          "02bf8e5bf1e5",
+          "c40a565415b8",
+          "957e2c408f68",
+          "a86ed277ecd4",
+          "a5df6f9a2718",
+          "19a54a47a3d3",
+          "74e6353e40fa",
+          "7bd0bd8acaed",
+          "d9ce61a8d9e6",
+          "1317474945b8",
+          "504365aa02ad",
+          "c8dceba3616f",
+          "65c4d2b5db00",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "e374e3dd1e88",
+          "d2cb7b81717c",
+          "d5139aa32546",
+          "d39ac091b005",
+          "041199286363",
+          "df7350a0e379",
+          "28a564cd538d",
+          "3ec2adada116",
+          "4e7c92225364",
+          "5893a1c64463",
+          "ce80308dc309",
+          "051786ba0165",
+          "38af91078410",
+          "a6a908e3f7de",
+          "38db6415babc",
+          "98a6d88ee4fd",
+          "c45e5e890581",
+          "a09975634c7e",
+          "ba6fcab51de6",
+          "2c470b4f2429",
+          "241706054c81",
+          "18b295c3397b",
+          "7481084b1253",
+          "40551a0bbdb7",
+          "4660588c0ca9",
+          "6df4a4058c2b",
+          "35cccb9def6e",
+          "2b190a81fc7d",
+          "1093faadb553",
+          "54b32c3ecc4f",
+          "8f06ac08f0c2",
+          "54aa1d8128b0",
+          "170f8e533093",
+          "5d9a0428ddbe",
+          "1f540971239c",
+          "357c60a3de8c",
+          "3ffc316c9240",
+          "7c4c9dd4200e",
+          "2bb2935d7f9f",
+          "37d5e3aaa113",
+          "ba25ab73cf08",
+          "82dbf3b7ed1f",
+          "3037c6d26ebe",
+          "6a49d600f8e4",
+          "41ce01651b7c",
+          "dae158373008",
+          "ec08dd48b4b0",
+          "039b5f4ee527",
+          "2f05e1be2d36",
+          "dcb88ebf18a5",
+          "c297d4ffb1a7",
+          "271ca802fd19",
+          "75e1ab1d6806",
+          "584f4a33bddf",
+          "69e517a30725",
+          "634612bda00c"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 15256,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790894971.6654668,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790894971.669003,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed T-1504.\n\n- Added executor predicates, bounded Claude requeues, identity normalization, pool helpers, and pure capacity snapshots.\n- Updated scoped tests/fixtures.\n- `.claude/hooks/tests-green.sh .` passed.\n- Commits: `8f626ea`, `492c538`, `8ac5900`\n- Worktree clean.\n\nFiles changed: `orchestrator/{executor,pool,capacity}.py`, `tests/test_{executor,pool,capacity}.py`\n\nFailures-only test output: empty.",
+        "executed_by": "codex:luna",
+        "thread": "01a0f9a1-da4f-7230-af7e-686f36837d52",
+        "usage": {
+          "input_tokens": 2608655,
+          "cached_input_tokens": 2514176,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 12144,
+          "reasoning_output_tokens": 4004,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790895030.205791,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790895030.371858,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790895030.371669,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_rows_and_fallback_mode_predicates (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_claude_row_free_counts_free_parallelism (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_no_codex_row_requeues_bounded_or_holds_visibly (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_successful_claim_resets_claude_capacity_counters (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_executed_by_from_row_provider (missing: test not defined)",
+          "FAILED tests/test_pool.py::test_row_covers_and_claude_has_headroom_extracted (missing: test not defined)",
+          "FAILED tests/test_capacity.py::test_snapshot_fallback_flag_and_pure_claude_free (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_rows_and_fallback_mode_predicates"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_claude_row_free_counts_free_parallelism"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_no_codex_row_requeues_bounded_or_holds_visibly"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_successful_claim_resets_claude_capacity_counters"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_executed_by_from_row_provider"
+          ],
+          [
+            "tests/test_pool.py",
+            "test_row_covers_and_claude_has_headroom_extracted"
+          ],
+          [
+            "tests/test_capacity.py",
+            "test_snapshot_fallback_flag_and_pure_claude_free"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1790895033.127054,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_rows_and_fallback_mode_predicates (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_claude_row_free_counts_free_parallelism (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_no_codex_row_requeues_bounded_or_holds_visibly (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_successful_claim_resets_claude_capacity_counters (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_executed_by_from_row_provider (missing: test not defined)",
+          "FAILED tests/test_pool.py::test_row_covers_and_claude_has_headroom_extracted (missing: test not defined)",
+          "FAILED tests/test_capacity.py::test_snapshot_fallback_flag_and_pure_claude_free (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_rows_and_fallback_mode_predicates"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_claude_row_free_counts_free_parallelism"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_no_codex_row_requeues_bounded_or_holds_visibly"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_successful_claim_resets_claude_capacity_counters"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_executed_by_from_row_provider"
+          ],
+          [
+            "tests/test_pool.py",
+            "test_row_covers_and_claude_has_headroom_extracted"
+          ],
+          [
+            "tests/test_capacity.py",
+            "test_snapshot_fallback_flag_and_pure_claude_free"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_executor.py::test_codex_rows_and_fallback_mode_predicates",
+              "tests/test_executor.py::test_claude_row_free_counts_free_parallelism",
+              "tests/test_executor.py::test_no_codex_row_requeues_bounded_or_holds_visibly",
+              "tests/test_executor.py::test_successful_claim_resets_claude_capacity_counters",
+              "tests/test_executor.py::test_executed_by_from_row_provider",
+              "tests/test_pool.py::test_row_covers_and_claude_has_headroom_extracted",
+              "tests/test_capacity.py::test_snapshot_fallback_flag_and_pure_claude_free"
+            ],
+            "returncode": 1,
+            "output": "one/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_pool (unittest.loader._FailedTest.test_pool)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_pool\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_pool.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_snapshot_fallback_flag_and_pure_claude_free (unittest.loader._FailedTest.test_snapshot_fallback_flag_and_pure_claude_free)\n----------------------------------------------------------------------\nAttributeError: module 'tests.test_capacity' has no attribute 'test_snapshot_fallback_flag_and_pure_claude_free'\n\n----------------------------------------------------------------------\nRan 7 tests in 0.000s\n\nFAILED (errors=7)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790895033.128862,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790895030.371669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790895034.482649,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790895030.371669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790895030.371858": true
+        }
+      }
+    },
+    {
+      "ts": 1790895959.1254752,
+      "codex_thread": "01a0f9a1-da4f-7230-af7e-686f36837d52",
+      "codex_thread_head": "8429574067b66743a85bb9fee87382c0be62cdae"
+    },
+    {
+      "ts": 1790895959.4574342,
+      "rounds": 1
+    },
+    {
+      "ts": 1790896152.1955352,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790895030.371669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790895030.371858": true
+        },
+        "first_green_at": 1790896152.193173,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790896766.534592,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1519 2d745ec7d67582139d723e7f86fc974ea5904b8a",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790894364.821023,
+        "dispatched_at": 1790894364.822897,
+        "dispatched_at_lease": 1790895264.822897,
+        "dispatched_at_done": 1790894370.511481,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790894526.100072
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790895030.371669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790895030.371858": true
+        },
+        "first_green_at": 1790896152.193173,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790896766.532452
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790894364.821023,
+    "dispatched_at": 1790894364.822897,
+    "dispatched_at_lease": 1790895264.822897,
+    "dispatched_at_done": 1790894370.511481,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790894526.100072
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "39c1c99dab4462a1516f3c7b405d0f427614e241",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790895030.371669,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_skipped": {
+      "1790895030.371858": true
+    },
+    "first_green_at": 1790896152.193173,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790896766.532452
+  },
+  "packet_meta": {
+    "chars": 14377,
+    "est_tokens": 3594,
+    "presented_tokens": 3594,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "5a460e7ad347d09c7c1c65bd364cbd593727dfb806186ab79e6daf8b4a7d6cce"
+      },
+      "objective": {
+        "chars": 9195,
+        "est_tokens": 2298,
+        "sha256": "fe3eb53059bde2f5cadccad210e205985aa117251a4e7c8d7a7918335a54ef10"
+      },
+      "acceptance": {
+        "chars": 3615,
+        "est_tokens": 903,
+        "sha256": "abadd321094a1107ec2cef4d610bf76520a3dd604ad23b52aa794a61ba6b7336"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+      },
+      "write_scope": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "7928f6ac7dbea25d9243ba8d3908b3e11631b2f681944981554bab0b6514366d"
+      },
+      "read_scope": {
+        "chars": 767,
+        "est_tokens": 191,
+        "sha256": "f350283a2dc3e857878a444bc1eb2dc9e64c560b4be1554b7a11eb50a9a61315"
+      },
+      "constraints": {
+        "chars": 197,
+        "est_tokens": 49,
+        "sha256": "eb668e3bc381f9e0ae7d7cc3842ad65c5a27d06b9073787d7137ce11650bb9fd"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "13a290c101d7",
+    "version": "13a290c101d7",
+    "candidate_known": true,
+    "base": "355583cf1c12",
+    "sources": "pool.toml@a8842da1d3ee gotchas@fce94e7bc0bf memory@notes over cap by 9577 chars: acceptance kept whole routed=shadow",
+    "policy_version": "a8842da1d3ee",
+    "gotchas": "fce94e7bc0bf",
+    "candidate_tokens": 5277,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 18975,
+    "routed_reduction_ratio": 0.9156492785793563,
+    "routed_hidden": 38,
+    "routed_ambiguous": 18,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "699e0984829a",
+      "ac14b9c75e9a",
+      "010a666619ae",
+      "995d9729d7cf",
+      "f5b95ec8835b",
+      "d307f455b4a6",
+      "02bf8e5bf1e5",
+      "c40a565415b8",
+      "957e2c408f68",
+      "a86ed277ecd4",
+      "a5df6f9a2718",
+      "19a54a47a3d3",
+      "74e6353e40fa",
+      "7bd0bd8acaed",
+      "d9ce61a8d9e6",
+      "1317474945b8",
+      "504365aa02ad",
+      "c8dceba3616f",
+      "65c4d2b5db00",
+      "2ccea77faf96",
+      "e13b05dcafb4",
+      "0fb2f39963fc",
+      "9d078ea9fe66",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "25ee5f8920dc",
+      "e374e3dd1e88",
+      "d2cb7b81717c",
+      "d5139aa32546",
+      "d39ac091b005",
+      "041199286363",
+      "df7350a0e379",
+      "28a564cd538d",
+      "3ec2adada116",
+      "4e7c92225364",
+      "5893a1c64463",
+      "ce80308dc309",
+      "051786ba0165",
+      "38af91078410",
+      "a6a908e3f7de",
+      "38db6415babc",
+      "98a6d88ee4fd",
+      "c45e5e890581",
+      "a09975634c7e",
+      "ba6fcab51de6",
+      "2c470b4f2429",
+      "241706054c81",
+      "18b295c3397b",
+      "7481084b1253",
+      "40551a0bbdb7",
+      "4660588c0ca9",
+      "6df4a4058c2b",
+      "35cccb9def6e",
+      "2b190a81fc7d",
+      "1093faadb553",
+      "54b32c3ecc4f",
+      "8f06ac08f0c2",
+      "54aa1d8128b0",
+      "170f8e533093",
+      "5d9a0428ddbe",
+      "1f540971239c",
+      "357c60a3de8c",
+      "3ffc316c9240",
+      "7c4c9dd4200e",
+      "2bb2935d7f9f",
+      "37d5e3aaa113",
+      "ba25ab73cf08",
+      "82dbf3b7ed1f",
+      "3037c6d26ebe",
+      "6a49d600f8e4",
+      "41ce01651b7c",
+      "dae158373008",
+      "ec08dd48b4b0",
+      "039b5f4ee527",
+      "2f05e1be2d36",
+      "dcb88ebf18a5",
+      "c297d4ffb1a7",
+      "271ca802fd19",
+      "75e1ab1d6806",
+      "584f4a33bddf",
+      "69e517a30725",
+      "634612bda00c"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 15256,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 411,
+    "instruction_tokens_modular": 411,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790894527.532844,
+  "rounds": 1,
+  "executor": "luna",
+  "codex_thread_head": "8429574067b66743a85bb9fee87382c0be62cdae",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_executor.py::test_codex_rows_and_fallback_mode_predicates (missing: test not defined)",
+      "FAILED tests/test_executor.py::test_claude_row_free_counts_free_parallelism (missing: test not defined)",
+      "FAILED tests/test_executor.py::test_no_codex_row_requeues_bounded_or_holds_visibly (missing: test not defined)",
+      "FAILED tests/test_executor.py::test_successful_claim_resets_claude_capacity_counters (missing: test not defined)",
+      "FAILED tests/test_executor.py::test_executed_by_from_row_provider (missing: test not defined)",
+      "FAILED tests/test_pool.py::test_row_covers_and_claude_has_headroom_extracted (missing: test not defined)",
+      "FAILED tests/test_capacity.py::test_snapshot_fallback_flag_and_pure_claude_free (missing: test not defined)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_executor.py",
+        "test_codex_rows_and_fallback_mode_predicates"
+      ],
+      [
+        "tests/test_executor.py",
+        "test_claude_row_free_counts_free_parallelism"
+      ],
+      [
+        "tests/test_executor.py",
+        "test_no_codex_row_requeues_bounded_or_holds_visibly"
+      ],
+      [
+        "tests/test_executor.py",
+        "test_successful_claim_resets_claude_capacity_counters"
+      ],
+      [
+        "tests/test_executor.py",
+        "test_executed_by_from_row_provider"
+      ],
+      [
+        "tests/test_pool.py",
+        "test_row_covers_and_claude_has_headroom_extracted"
+      ],
+      [
+        "tests/test_capacity.py",
+        "test_snapshot_fallback_flag_and_pure_claude_free"
+      ]
+    ],
+    "flaky_runs": [
+      {
+        "ids": [
+          "tests/test_executor.py::test_codex_rows_and_fallback_mode_predicates",
+          "tests/test_executor.py::test_claude_row_free_counts_free_parallelism",
+          "tests/test_executor.py::test_no_codex_row_requeues_bounded_or_holds_visibly",
+          "tests/test_executor.py::test_successful_claim_resets_claude_capacity_counters",
+          "tests/test_executor.py::test_executed_by_from_row_provider",
+          "tests/test_pool.py::test_row_covers_and_claude_has_headroom_extracted",
+          "tests/test_capacity.py::test_snapshot_fallback_flag_and_pure_claude_free"
+        ],
+        "returncode": 1,
+        "output": "one/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_pool (unittest.loader._FailedTest.test_pool)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_pool\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1504/tests/test_pool.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_snapshot_fallback_flag_and_pure_claude_free (unittest.loader._FailedTest.test_snapshot_fallback_flag_and_pure_claude_free)\n----------------------------------------------------------------------\nAttributeError: module 'tests.test_capacity' has no attribute 'test_snapshot_fallback_flag_and_pure_claude_free'\n\n----------------------------------------------------------------------\nRan 7 tests in 0.000s\n\nFAILED (errors=7)\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1519 2d745ec7d67582139d723e7f86fc974ea5904b8a"
+}

@@ -24,7 +24,7 @@ PR 38 open (see human decisions). Landed items, open wave 3 T-1640/T-1650, parke
 ## Backlog
 Carried items from the T-1334 plan live in plan-log.md, section Backlog.
 
-## Auto-handover 2026-10-09T09:42:37+02:00 — goal decision
+## Auto-handover 2026-10-09T13:17:25+02:00 — daemon tick
 
 [planner].handover_context_tokens is the configured handover threshold.
 ### T-1403 GOAL: full-Claude orchestrator: Opus 5.5 and Sonnet 5.5 executors, Codex kept but off; reliable efficient Claude workers; subagents; wide parallel across three…
@@ -36,19 +36,17 @@ Carried items from the T-1334 plan live in plan-log.md, section Backlog.
 - other (superseded): T-1405 Claude-only pool config: codex rows off, claude:sonnet row (1-5), claude:opus 6-10, models.sonnet claude-sonnet-5-5, T-1410 Execute and fix-delta prompts: commit first, focused tests in the foreground, never background, full gate is the daemon's, T-1413 fix round 1: New orchestrator/machine.py: machine-wide leases and account usage ledger shared by every repo, T-1414 gate._run treats PermissionError from os.killpg like ProcessLookupError (macOS EPERM on a zombie-only process group), T-1434 Remove the Codex gates: fallback mode only with an enabled codex row, requeue not hold without one, free_slots caps Claude rows by max_parallel_claude_workers,…, T-1435 Execute result derived from git state in spawn.run_worker: commits+clean -> done; dirty in scope -> one commit-now resume then auto-commit; out-of-scope dirt o…, T-1441 Acceptance gate: every acceptance path that looks like a test file (any language) must exist and be in the task diff, T-1443 next_wave decision point: when every filed execute task of an open goal is merged or superseded and its plan still lists unfiled labels, launch a headless Plan…, … and 55 more
 ### T-1703 GOAL: follow-ups from the final T-1667 verification (next_goal close detection, CLI shutdown, stale post-merge gate)
 - other (superseded): T-1704 T-1667 verification follow-ups V1-V4 (next_goal after model close, enabled_at reset, CLI shutdown joins ship, stale post-merge gate)
-### T-1745 GOAL: a daemon restart never strands a queued task behind a stale dispatch stamp
-- done (not merged): T-1747 review: Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again
-- merged: T-1746 Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again (sha=6a11de85)
-- other (superseded): T-1748 fix round 1: Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again
+### T-1749 GOAL: [gate].max_parallel holds across every gate path (no two full gates at once)
+- done (not merged): T-1750 Two full gates ran at once in luna-inbox despite [gate].max_parallel = 1 (default): one on the gated_at lease path, one background run, T-1751 review: Two full gates ran at once in luna-inbox despite [gate].max_parallel = 1 (default): one on the gated_at lease path, one background run
 
-Worktrees: wt/T-0299, wt/T-0707, wt/T-0823, wt/T-0857, wt/T-0921, wt/T-1392, wt/T-1394, wt/T-1396, wt/T-1397, wt/T-1398, wt/T-1399, wt/T-1400, wt/T-1402, wt/T-1405, wt/T-1410, … and 149 more
+Worktrees: wt/T-0299, wt/T-0707, wt/T-0823, wt/T-0857, wt/T-0921, wt/T-1392, wt/T-1394, wt/T-1396, wt/T-1397, wt/T-1398, wt/T-1399, wt/T-1400, wt/T-1402, wt/T-1405, wt/T-1410, … and 151 more
 
 Last events:
-- 2026-10-09T09:37:43+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
-- 2026-10-09T09:37:43+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
-- 2026-10-09T09:37:46+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
-- 2026-10-09T09:37:46+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
-- 2026-10-09T09:40:14+02:00 T-1748 update {"status": "superseded", "hold_reason": "T-1746 merged into goal/T-1745 (6a11de8
+- 2026-10-09T13:04:15+02:00 T-1751 update {"status": "done", "result": {"summary": "Every gate start path now takes a slot
+- 2026-10-09T13:04:15+02:00 T-1751 update {"review_verdict": "approve"}
+- 2026-10-09T13:04:15+02:00 T-1751 update {"review_facts": {"verdict": "approve", "findings_count": 3, "findings_by_severi
+- 2026-10-09T13:04:15+02:00 T-1750 update {"review_verdict": "approve"}
+- 2026-10-09T13:05:12+02:00 T-1750 update {"pipeline": {"first_ready_at": 1791541291.243548, "handoff": {"baseline": "clau
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
 
@@ -57,3 +55,5 @@ Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks b
 2026-10-09: no learnings — goal: T-1661
 
 2026-10-09: no learnings — goal: T-1742
+
+2026-10-09: no learnings — goal: T-1749

@@ -1,0 +1,247 @@
+{
+  "id": "T-1443",
+  "created_at": 1790872035.775224,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "next_wave decision point: when every filed execute task of an open goal is merged or superseded and its plan still lists unfiled labels, launch a headless Planner to file the next wave",
+  "spec": "Goal T-1403, plan label E12 (new, human 2026-10-01). Wave 1 of T-1403 finished 2026-10-01 09:30 and\nnothing happened for 8.5 h: no decision point covers 'filed work done, plan has more waves'.\n\nFacts (main 355583c):\n- orchestrator/planner_runs.py:168-210 decision_points() yields scouts_done, held and closable only. closable\n  needs every execute child merged_into (205); T-1403 has superseded execute children (T-1405, T-1410, T-1413,\n  T-1414, no merged_into), so even closable never fired.\n- tick() (1545-1590) routes each point through build_ctx() (1009-1071) and decision.route()\n  (orchestrator/decision.py:39-161, unknown kinds -> escalate 'unknown:kind'), then run_group() (1254-1447).\n  run() (452-454) and run_group() (1283-1291) already skip when _session_attached() (213-233) is true.\n- daemon.py:1929-1934 calls planner_runs.reconcile()/tick() only when [planner].autonomous is true (the live\n  pool.toml has it false; the harness forces false). Leave that gate as is.\n- _claim() decision_requested map (257-258) and _condition_resolved() (588-616, default True) are per kind.\n- Plan text lives in STATE/plan.md: section '## GOAL <goal id> ...' up to the next line starting with '## '. Wave\n  lines start with 'Wave <n>' (e.g. 'Wave 2: B1 claude_split(cfg, card) ... | B2 ...; then B3 ...'); additions are\n  bullets '- E3 (wave 3, ...) ...'. Filed children carry constraints.plan_label (T-1403: A1..A8, A3b, A1v2, A6v2,\n  E1, E2).\n\nChange:\n1. planner_runs.unfiled_labels(goal_id, children) -> sorted list: labels = tokens matching\n   (?<![\\w./:-])[A-Z]\\d{1,2}[a-z]?(?:v\\d+)?(?![\\w/:-]) on wave lines (^\\s*(?:[-*]\\s*)?Wave \\d+\\b) of the goal's\n   section, plus the leading label of bullets matching ^\\s*[-*]\\s*<label>\\s*\\(wave \\d+. Minus labels on a line\n   starting 'Dropped:' in that section. Minus filed labels: a label is filed when a child's plan_label equals it\n   or equals it followed by a lowercase letter or v<digits> (E11 -> E11a, A1 -> A1v2). No plan.md or no section\n   -> []. Plan text is data: it only yields labels, never reaches a prompt except as these label tokens.\n2. decision_points(): for a goal with execute children, every execute child merged_into or status 'superseded', no\n   child of any role queued or running, no execute child held, and unfiled_labels non-empty -> yield\n   (goal_id, 'next_wave', f\"{goal_id}:{sha256(','.join(labels))[:12]}\") unless _blocked; in that case do NOT\n   yield closable for the goal. With no unfiled labels, closable behaves exactly as today.\n3. build_ctx(): for next_wave add unfiled_labels and goal_complexity. _claim decision_requested: 'file the next\n   wave from plan.md'. _condition_resolved for next_wave: goal done, or the goal's current unfiled set hashes to a\n   different key than the record's payload_key.\n4. decision.route(): kind next_wave -> required unfiled_labels (list); empty -> none 'no_unfiled_work'; else\n   escalate 'next_wave_unfiled' (planner_router still picks the tier). Add unfiled_labels to the evidence fields.\n5. .orchestrator/prompts/planner-decision.md: one sentence: a next_wave decision means every filed execute task\n   of the goal is merged or superseded while plan.md still lists unfiled labels; file the next wave from plan.md\n   (SPEC RULE, depends_on by plan label) or record under 'Needs the human' why not, and list labels that will\n   never be filed on a 'Dropped:' line.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_planner_runs.py::test_closable_requires_every_execute_child_merged\n(~97-104) and test_decision_points_scouts_done_held_closable (~125) write no plan.md, so they must pass unchanged;\ntests/test_decision.py::test_disabled_routes_everything_to_escalate (~113-119) and the unknown-field table (~104-111)\nmust pass unchanged. Run tests/test_planner_runs.py, tests/test_planner_runs_packets.py,\ntests/test_planner_runs_routing.py, tests/test_decision.py and tests/test_planner_taxonomy.py (next_wave classifies\nas decision_type 'other'; do not edit planner_taxonomy.py).\n\nDepends on E9 (planner_runs.py, tests/test_planner_runs.py). The human decides when [planner].autonomous goes true.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_runs.py::test_next_wave_point_when_filed_work_resolved_and_plan_lists_unfiled_labels: passes: with STATE/plan.md holding a '## GOAL <id>' section whose wave lines name A1, A2, B1 and children plan_label A1 (merged) and A2 (superseded), decision_points() yields (goal, 'next_wave', key) and not closable; nothing is yielded while any child is queued/running or an execute child is held, or once B1 is filed (or listed on a 'Dropped:' line); tick() records a skip and launches nothing while _session_attached() is true",
+    "tests/test_decision.py::test_next_wave_routes_escalate_or_none: passes: decision.route on kind next_wave returns escalate 'next_wave_unfiled' with unfiled_labels in the evidence when the list is non-empty, none 'no_unfiled_work' when empty, and escalate 'unknown:unfiled_labels' when the field is missing",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_decision.py"
+  ],
+  "depends_on": [
+    "T-1439"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "E12",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790873467.932228,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642
+      }
+    },
+    {
+      "ts": 1790873468.4170098,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790873468.4169579,
+        "spec_review_at_lease": 1790874368.4169579
+      }
+    },
+    {
+      "ts": 1790873468.427259,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790873468.4169579,
+        "spec_review_at_lease": 1790874368.4169579,
+        "spec_review_at_done": 1790873468.427146
+      }
+    },
+    {
+      "ts": 1790874984.6340458,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642
+      }
+    },
+    {
+      "ts": 1790874984.6358259,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790874984.6357791,
+        "spec_review_at_lease": 1790875884.6357791
+      }
+    },
+    {
+      "ts": 1790874984.644972,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790874984.6357791,
+        "spec_review_at_lease": 1790875884.6357791,
+        "spec_review_at_done": 1790874984.644898
+      }
+    },
+    {
+      "ts": 1790875069.1501482,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Line numbers in the spec (168-210, 1545-1590, 257-258, 588-616) do not match this worktree. decision_points() is at about 190-244, _claim's decision_requested map at about 260, _condition_resolved at about 626, build_ctx's closable branch at about 1104. The base is older than 'main 355583c', so insertion points must be located by symbol.",
+          "severity": "low",
+          "line": 190
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Superseded execute children never satisfy closable, and the spec leaves that alone. A goal whose children are all merged or superseded, with no unfiled labels and at least one superseded child, still never reaches closable. That is the original T-1403 stall once plan.md is fully filed or dropped. The next_wave condition accepts 'merged_into or superseded', but closable still needs every child merged_into.",
+          "severity": "med",
+          "line": 241
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The next_wave key is a hash of the label set only. If the Planner decides not to file and records 'Needs the human', the record stays blocked and never re-fires. That is intended, but the Planner can also file part of the wave and merge it. The leftover labels then hash to a new key and fire again, which is correct. If the Planner files nothing and the labels change only because plan.md was edited, a new Planner launches with no attempt cap. _condition_resolved says a changed hash counts as resolved, but nothing ties that to attempts or notify dedup.",
+          "severity": "med",
+          "line": 243
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Hidden coupling outside scope. planner_runs treats every non-'held' kind as goal-keyed in _decision_task (~330), _observed_outcome (~631), reconcile/jev (~1000), and the closable-specific branches in build_ctx and tick (~1570-1575). The 'unchanged_state' route and _record_running (~333) copy the point to evidence as [goal_id, payload_key]. The spec does not say next_wave must skip the closable-only gate_state and routine paths, or that _observed_outcome returns None for it. The decision packet kind mapping in planner_packet.py _KIND_FALLBACK has no next_wave entry. That file is out of scope, so the resulting decision type and prompt text fall to 'other'/'decide' with no explanation of the kind.",
+          "severity": "med",
+          "line": 330
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "unfiled_labels reads plan.md, which is mutable and may be stale or injected. The tokens are label-shaped only, but the regex permits false positives from prose on wave lines, for example 'B1' or 'E12' inside commentary, or a label like 'A1' inside a path-like string that slips through the lookarounds. A false positive creates a permanent next_wave that blocks closable. The 'Dropped:' escape hatch needs a Planner write to plan.md, which is blocked outside .orchestrator/ only for source files, so it works. Add a test where a wave line contains a label-shaped token in prose.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Reading plan.md and matching 'queued or running' on children make the behaviour depend on _session_attached() and the autonomous gate. Both are unchanged. The acceptance test asserts that tick() records a skip while attached, but does not assert that an already-blocked or already-resolved record launches nothing. tick() also calls build_ctx and decision.route before the attached check at ~1283, so the new plan.md read runs on every tick for every goal, including goals with no plan section. Cost is small, but the file read should be wrapped so a missing or unreadable plan.md or a decode error yields [] and does not raise.",
+          "severity": "low",
+          "line": 1509
+        },
+        {
+          "path": "orchestrator/decision.py",
+          "issue": "'unknown:unfiled_labels' is the existing 'unknown(required)' path, but the field check must accept the empty list as present. The spec says empty -> none 'no_unfiled_work', so 'missing' must test for key absence, not falsiness. Also decide whether next_wave honours the disabled and unchanged_state short-circuits above line 95 (the spec says test_disabled_routes_everything_to_escalate must pass unchanged, so it must).",
+          "severity": "low",
+          "line": 109
+        },
+        {
+          "path": ".orchestrator/prompts/planner-decision.md",
+          "issue": "The new sentence says to 'file the next wave from plan.md (SPEC RULE, depends_on by plan label)'. Nothing in the packet gives the Planner the unfiled labels except the evidence list, and the prompt's only data path is the packet. Confirm unfiled_labels reaches the rendered packet, otherwise the Planner works from plan.md alone. Also rollback is unstated. State that reverting the commit removes the kind, and that records already written with kind next_wave must be tolerated (they fall to the _condition_resolved default True).",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790875247.3554099,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790874984.6357791,
+        "spec_review_at_lease": 1790875884.6357791,
+        "spec_review_at_done": 1790874984.644898,
+        "spec_review_held_at": 1790875247.355335
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790875484.7751338,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790874984.6357791,
+        "spec_review_at_lease": 1790875884.6357791,
+        "spec_review_at_done": 1790874984.644898,
+        "spec_review_held_at": 1790875247.355335,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790875486.077898,
+      "pipeline": {
+        "first_ready_at": 1790873467.9321642,
+        "spec_review_at": 1790874984.6357791,
+        "spec_review_at_lease": 1790875884.6357791,
+        "spec_review_at_done": 1790874984.644898,
+        "spec_review_held_at": 1790875247.355335,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790875247.3554099": true
+        }
+      }
+    },
+    {
+      "ts": 1790878815.906802,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1469 (2026-10-01 wave 2 respec)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790873467.9321642,
+    "spec_review_at": 1790874984.6357791,
+    "spec_review_at_lease": 1790875884.6357791,
+    "spec_review_at_done": 1790874984.644898,
+    "spec_review_held_at": 1790875247.355335,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790875247.3554099": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Line numbers in the spec (168-210, 1545-1590, 257-258, 588-616) do not match this worktree. decision_points() is at about 190-244, _claim's decision_requested map at about 260, _condition_resolved at about 626, build_ctx's closable branch at about 1104. The base is older than 'main 355583c', so insertion points must be located by symbol.",
+      "severity": "low",
+      "line": 190
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Superseded execute children never satisfy closable, and the spec leaves that alone. A goal whose children are all merged or superseded, with no unfiled labels and at least one superseded child, still never reaches closable. That is the original T-1403 stall once plan.md is fully filed or dropped. The next_wave condition accepts 'merged_into or superseded', but closable still needs every child merged_into.",
+      "severity": "med",
+      "line": 241
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The next_wave key is a hash of the label set only. If the Planner decides not to file and records 'Needs the human', the record stays blocked and never re-fires. That is intended, but the Planner can also file part of the wave and merge it. The leftover labels then hash to a new key and fire again, which is correct. If the Planner files nothing and the labels change only because plan.md was edited, a new Planner launches with no attempt cap. _condition_resolved says a changed hash counts as resolved, but nothing ties that to attempts or notify dedup.",
+      "severity": "med",
+      "line": 243
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Hidden coupling outside scope. planner_runs treats every non-'held' kind as goal-keyed in _decision_task (~330), _observed_outcome (~631), reconcile/jev (~1000), and the closable-specific branches in build_ctx and tick (~1570-1575). The 'unchanged_state' route and _record_running (~333) copy the point to evidence as [goal_id, payload_key]. The spec does not say next_wave must skip the closable-only gate_state and routine paths, or that _observed_outcome returns None for it. The decision packet kind mapping in planner_packet.py _KIND_FALLBACK has no next_wave entry. That file is out of scope, so the resulting decision type and prompt text fall to 'other'/'decide' with no explanation of the kind.",
+      "severity": "med",
+      "line": 330
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "unfiled_labels reads plan.md, which is mutable and may be stale or injected. The tokens are label-shaped only, but the regex permits false positives from prose on wave lines, for example 'B1' or 'E12' inside commentary, or a label like 'A1' inside a path-like string that slips through the lookarounds. A false positive creates a permanent next_wave that blocks closable. The 'Dropped:' escape hatch needs a Planner write to plan.md, which is blocked outside .orchestrator/ only for source files, so it works. Add a test where a wave line contains a label-shaped token in prose.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Reading plan.md and matching 'queued or running' on children make the behaviour depend on _session_attached() and the autonomous gate. Both are unchanged. The acceptance test asserts that tick() records a skip while attached, but does not assert that an already-blocked or already-resolved record launches nothing. tick() also calls build_ctx and decision.route before the attached check at ~1283, so the new plan.md read runs on every tick for every goal, including goals with no plan section. Cost is small, but the file read should be wrapped so a missing or unreadable plan.md or a decode error yields [] and does not raise.",
+      "severity": "low",
+      "line": 1509
+    },
+    {
+      "path": "orchestrator/decision.py",
+      "issue": "'unknown:unfiled_labels' is the existing 'unknown(required)' path, but the field check must accept the empty list as present. The spec says empty -> none 'no_unfiled_work', so 'missing' must test for key absence, not falsiness. Also decide whether next_wave honours the disabled and unchanged_state short-circuits above line 95 (the spec says test_disabled_routes_everything_to_escalate must pass unchanged, so it must).",
+      "severity": "low",
+      "line": 109
+    },
+    {
+      "path": ".orchestrator/prompts/planner-decision.md",
+      "issue": "The new sentence says to 'file the next wave from plan.md (SPEC RULE, depends_on by plan label)'. Nothing in the packet gives the Planner the unfiled labels except the evidence list, and the prompt's only data path is the packet. Confirm unfiled_labels reaches the rendered packet, otherwise the Planner works from plan.md alone. Also rollback is unstated. State that reverting the commit removes the kind, and that records already written with kind next_wave must be tolerated (they fall to the _condition_resolved default True).",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "superseded by T-1469 (2026-10-01 wave 2 respec)"
+}

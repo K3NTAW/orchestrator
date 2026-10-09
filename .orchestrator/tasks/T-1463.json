@@ -1,0 +1,662 @@
+{
+  "id": "T-1463",
+  "created_at": 1790874985.348486,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Remove the Codex gates v2: fallback mode only with an enabled codex row, bounded requeue vs visible hold without one, free_slots caps Claude rows, executed_by from the row provider",
+  "spec": "Goal T-1403, wave 2, plan label B2v2 (respec of T-1434 after spec review T-1444 request_changes; every risk is\nanswered below). With Codex cancelled the pool is Claude-only (codex rows disabled in the live pool.toml). Today\nthe daemon and executor still treat 'no Codex' as an outage.\n\nFacts (goal/T-1403 at 92c1a98; daemon.py and executor.py unchanged since main 355583c):\n- daemon.py:459-464 _codex_available(pool) is true when ANY enabled execute row (Claude rows included) is not\n  cooling; 467-471 _fallback_mode(pool) = not _codex_available and cfg.codex.on_exhausted == 'fallback_claude'.\n- daemon.py:488-503 free_slots(): outside fallback mode returns sum(max_parallel - running) over every enabled\n  non-cooling execute row, Claude rows uncapped (3 + 2 = 5 > [limits].max_parallel_claude_workers 4); only fallback\n  mode applies the cap via running_claude_workers (474-478) and inflight_claude_dispatches (481-485).\n- daemon.py:1943-1945 notifies 'Executor (Codex) cooling' whenever not pool.codex_available() and\n  pool.codex.cooling(), even with every codex row disabled.\n- daemon.py:354 reconcile_dead(t, pool=None); 397 posts executed_by = t.get('executor') or 'claude:<tier>', so a\n  codex task gets a bare 'astra' while executor.py:324/678 and daemon.py:576/647 post 'codex:<id>'.\n- pool.py:156-170 executor_identity(field, cfg) resolves a row id (any provider) or a 'claude:<tier>' label;\n  anything else -> provider None. pool.py:577-597 eligible_executors() drops rows that are disabled, cooling, out\n  of complexity band, saturated or over budget, and Claude rows without account headroom; pick_executor (599-604)\n  returns None when that list is empty, with no reason.\n- executor.py:487-496 start(): Claude row -> _exhausted(pool, t, tier=...); ex None -> _exhausted(pool, t).\n  executor.py:545-597 _exhausted(): unrouted reads pool.cfg['codex']['on_exhausted'] (KeyError without [codex])\n  and HOLDS 'codex unavailable; policy=...; no Claude fallback for complexity N' when no fallback tier applies. The\n  requeue shape exists at 559-566 (status queued, pipeline.hold_note 'claude_capacity', dispatched_at popped).\n\nChange:\n1. daemon.py: _codex_rows(pool) -> enabled execute-role rows with provider 'codex'. _fallback_mode(pool) is True\n   only when that list is non-empty, every row in it is cooling, and cfg.get('codex', {}).get('on_exhausted',\n   'hold') == 'fallback_claude'. _codex_available keeps its name and counts only codex rows.\n2. free_slots(pool): fallback mode unchanged. Otherwise codex_slots = free parallelism of non-cooling enabled codex\n   rows; claude_slots = min(free parallelism of non-cooling enabled Claude execute rows,\n   max(0, max_parallel_claude_workers - running_claude_workers(pool) - inflight_claude_dispatches()));\n   return codex_slots + claude_slots. [limits] default 4 when missing. ACCEPTED RISK (T-1444 #2, record it in the\n   free_slots docstring): inflight_claude_dispatches() also counts a Codex-bound dispatch for the one tick between\n   dispatch and claim; that only under-reports Claude slots for that tick, never over-dispatches.\n3. daemon.py:1943: the Codex cooling notice fires only when _codex_rows(pool) is non-empty.\n4. executor.executed_by(field, tier, cfg) -> str, pure: identity = pool.executor_identity(field, cfg); provider\n   codex -> 'codex:<field>'; provider claude -> field (row ids and labels are already 'claude:<tier>'); otherwise a\n   string field starting 'codex:' or 'claude:' -> itself; a bare string with no ':' (a stale codex id such as\n   'astra') -> 'codex:<field>'; None or empty -> 'claude:<tier or sonnet>'. Use it at daemon.py:397 with\n   cfg = (pool.cfg if pool else pool_config()); keep 'codex:<id>' output at executor.py:324/678 and\n   daemon.py:576/647 (route through the helper where the call is a one-line swap).\n5. executor._exhausted(): policy = pool.cfg.get('codex', {}).get('on_exhausted', 'hold'). When not routed (tier\n   None on entry) and no enabled codex row exists (same predicate as rule 1, computed from pool.executors):\n   - if any enabled Claude execute row covers t['complexity'] (complexity_min <= c <= complexity_max, cooling and\n     saturation ignored): requeue exactly like 559-566 (status queued, hold_note 'claude_capacity', pop\n     dispatched_at, no hold_reason) and return {'status': 'claude_capacity', 'reason': 'no claude row free'}. This\n     is bounded: free_slots() returns 0 Claude slots while every Claude row is cooling or at cap, so dispatch stops\n     reaching start() (T-1444 #1).\n   - else HOLD visibly: status held, hold_reason 'no executor row covers complexity N', return {'status': 'held',\n     'hold_reason': ...}. Never requeue in that case.\n   With an enabled codex row the legacy path (fallback tier or the 'codex unavailable' hold) is unchanged.\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract):\n- tests/test_executor.py claude_pool() (~388-400) builds cfg['executors'] = [claude:opus] only. Give it a\n  with_codex_row=False option that appends one enabled, cooling codex row and use it in\n  test_complexity_nine_fallback_still_held, test_claude_dispatch_below_cap_dispatches and\n  test_claude_dispatch_requeues_at_worker_cap so they keep testing the legacy path.\n- tests/test_daemon.py free_slots/fallback tests (~2109-2195) run on the harness pool.toml (codex rows kept, Claude\n  rows stripped by tests/_harness.py) and should pass unchanged; if one fails, update it to the new contract,\n  never weaken the cap. The new tests build the Claude rows by hand (cfg['executors'] entries with provider\n  'claude', max_parallel 3 and 2); the 'three running' case needs running bus tasks with executor 'claude:sonnet'\n  or 'claude:opus', because running_claude_workers derives from the executor id.\n- The 'no Codex cooling notice' test must set pool.codex.cooldown_until = time.time() + 600 while every codex row\n  is disabled, so it fails against the old code (T-1444 #5).\n- tests/test_daemon.py::test_dispatch_worker_posts_codex_done (~3770) pins executed_by 'codex:astra': must stay.\n\nRollback: the Planner records the revert path (git revert of the merge) in decisions.md at merge; the task itself\nadds nothing there. Out of scope: pool.py (B1 merged), spawn.py (B4), mcp.py/tool_catalog.py (B3),\nconcurrency.py/speculation.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.",
+  "inputs": [
+    "T-1451"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_claude_only_pool_never_enters_fallback_and_caps_free_slots: passes: with every codex row disabled and enabled claude:sonnet (max_parallel 3) and claude:opus (max_parallel 2) rows, _fallback_mode(pool) is False, free_slots(pool) == min(5, max_parallel_claude_workers - running Claude workers - in-flight dispatches) (4 with the shipped cap and nothing running, 1 with three running execute tasks whose executor is claude:sonnet/claude:opus), and a daemon tick with every codex row disabled and pool.codex.cooldown_until in the future sends no 'Codex cooling' notice",
+    "tests/test_daemon.py::test_mixed_pool_free_slots_sums_codex_and_capped_claude_slots: passes: with one enabled non-cooling codex row (max_parallel 2, running 1) plus the two Claude rows, _fallback_mode(pool) is False and free_slots(pool) == 1 + min(5, max_parallel_claude_workers - running Claude workers - in-flight dispatches)",
+    "tests/test_executor.py::test_no_codex_row_requeues_or_holds_visibly: passes: executor.start on a pool whose executors are only Claude rows, pick_executor returning None and pool.cfg without a [codex] table, (a) leaves a complexity-5 task queued with pipeline.hold_note 'claude_capacity', no dispatched_at and no hold_reason and returns status 'claude_capacity' when an enabled claude row's band covers 5; (b) holds a task whose complexity no enabled row covers with hold_reason 'no executor row covers complexity N' and returns status 'held'; neither raises",
+    "tests/test_executor.py::test_executed_by_from_row_provider: passes: executor.executed_by('astra', 'sonnet', cfg) == 'codex:astra' for a codex row id and for a bare id absent from cfg, 'claude:opus' for the claude:opus row id and for the label 'claude:opus', 'codex:x' for 'codex:x', and 'claude:sonnet' for None with tier sonnet; daemon.reconcile_dead's orphan re-gate posts executed_by through it",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1463",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "Rule 5 says the claude_capacity requeue is bounded because free_slots() returns 0 Claude slots when every Claude row is cooling or at cap. That doesn't hold. free_slots() ignores row complexity bands and account headroom, but pick_executor/eligible_executors() applies both. Cases that still requeue each tick: (a) a complexity-3 task whose only covering row is cooling or saturated while another Claude row has free parallelism; (b) every Claude account lacks headroom, while the rows are not cooling and under cap. In both, free_slots() stays > 0, start() requeues, dispatched_at is popped, and the task is retried and burns a slot every tick with no visible reason. Under the default first-come ordering it can also starve other eligible tasks.",
+        "severity": "high",
+        "line": 559
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "eligible() (699-707) only filters by fallback_tier when fallback mode is on. In a Claude-only pool fallback is False, so tasks outside every row's band still pass through, take a slot, reach start(), and are held there. This works as the 'visible hold', but the spec doesn't acknowledge it. It also never checks band coverage in free_slots() or eligible(), which is the root of the churn above. Filtering uncovered or saturated bands there, or counting only rows that can take the candidate, would fix both.",
+        "severity": "med",
+        "line": 699
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "capacity.snapshot(pool, running_claude_workers, inflight_claude_dispatches) at line 811 and the capacity_reason logic at 777-779 sit outside scope and feed scheduler admission. The spec doesn't say whether capacity.py still treats Claude rows as uncapped or counts Codex-bound in-flight dispatches. The wave/admission path could then disagree with the new free_slots(). The 'cooldown' reason (all enabled rows cooling) would also now also be mislabelled for Claude-only pools.",
+        "severity": "med",
+        "line": 811
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "The new rule 5 branch needs 'enabled codex row exists' computed from pool.executors, and the same predicate also lives in daemon._codex_rows. Duplicating it risks drift, and executor importing from daemon is already a circular-import pattern (imports inside _exhausted). The spec should name one helper, e.g. in executor or pool-adjacent code that daemon imports, rather than copying the predicate.",
+        "severity": "low",
+        "line": 545
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The accepted risk (inflight_claude_dispatches also counts Codex-bound dispatches) is real for mixed pools. A mixed pool with several Codex dispatches in flight can report 0 Claude slots for a tick while Claude workers sit idle. The docstring note is fine, but the mixed-pool acceptance test should pin a case with an in-flight Codex dispatch so the behaviour is documented and not accidental.",
+        "severity": "low",
+        "line": 481
+      },
+      {
+        "path": "tests/test_executor.py",
+        "issue": "Acceptance (a) only covers the case where a Claude row's band covers 5 and pick_executor is mocked to None. It doesn't test the churn case: the covering row cooling or saturated while another row has free slots. Nor does it cover the account-headroom-exhausted case. Without them the unbounded requeue goes untested.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Fix the boundedness claim. Either make free_slots() count only Claude rows that are enabled, not cooling, under their own max_parallel and backed by an account with headroom, or have the requeue path set a per-task backoff, such as a hold_note timestamp that eligible() skips until the next cooldown or capacity change. Don't rely on 'free_slots() returns 0 Claude slots' as the guarantee.",
+      "Make eligible() or free_slots() band-aware for the Claude-only case. Only count Claude rows whose complexity band covers the candidate, or skip candidates no enabled row covers, so uncovered tasks hit the visible hold once and saturated bands don't cause per-tick requeues.",
+      "State how capacity.snapshot() and the capacity_reason at daemon.py:777-779 behave for Claude-only and mixed pools. Add them to scope, or add an acceptance test showing the scheduler path agrees with free_slots().",
+      "Name a single shared predicate for 'enabled execute codex rows' and use it from both daemon.py and executor.py instead of duplicating it.",
+      "Add tests: (1) covering Claude row cooling or saturated while another row is free, asserting no unbounded requeue or a visible reason; (2) all Claude accounts without headroom; (3) a mixed pool with an in-flight Codex dispatch, pinning the accepted under-report.",
+      "Rollback: keep the record.sh decision entry at merge as planned. Also state the revert is a clean git revert of the merge, since the daemon and executor paths change together and can't be reverted separately."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790875002.630929,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9748,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790875002.710471,
+      "packet_meta": {
+        "chars": 9009,
+        "est_tokens": 2252,
+        "presented_tokens": 2252,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "553ba095c1ea73e75c4bd2b56b284e7cf3f10b924cd729b1709176977e2a8287"
+          },
+          "spec": {
+            "chars": 6566,
+            "est_tokens": 1641,
+            "sha256": "f1d1b585b926dbcb09d6ad4b22c44cbc4f7b6767d7ad86db2b185b6fed7279e3"
+          },
+          "acceptance": {
+            "chars": 1950,
+            "est_tokens": 487,
+            "sha256": "a6a83714acd9bf7b2b7dd26ba098e3ae3d76a4379e2b1bb83cf895ddca98f2e5"
+          },
+          "scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "3b43148e2a690a780a89b5ec9569ce8ec3c69d5c004b40cbe15633afa5b10a3f"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "c6e2ea8c5df1426c8a2f5ea8e881c5cd7f0fac430a2ae45e518ac29501469fb0"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "1d1f650cf897",
+        "version": "1d1f650cf897",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1451 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9748,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790875005.161435,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1463",
+      "claimed_at": 1790875005.155287
+    },
+    {
+      "ts": 1790875005.173877,
+      "account": "A"
+    },
+    {
+      "ts": 1790875020.752959,
+      "pid": 28002,
+      "account": "A"
+    },
+    {
+      "ts": 1790875062.637123,
+      "packet_meta": {
+        "chars": 9009,
+        "est_tokens": 2252,
+        "presented_tokens": 2252,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "553ba095c1ea73e75c4bd2b56b284e7cf3f10b924cd729b1709176977e2a8287"
+          },
+          "spec": {
+            "chars": 6566,
+            "est_tokens": 1641,
+            "sha256": "f1d1b585b926dbcb09d6ad4b22c44cbc4f7b6767d7ad86db2b185b6fed7279e3"
+          },
+          "acceptance": {
+            "chars": 1950,
+            "est_tokens": 487,
+            "sha256": "a6a83714acd9bf7b2b7dd26ba098e3ae3d76a4379e2b1bb83cf895ddca98f2e5"
+          },
+          "scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "3b43148e2a690a780a89b5ec9569ce8ec3c69d5c004b40cbe15633afa5b10a3f"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "c6e2ea8c5df1426c8a2f5ea8e881c5cd7f0fac430a2ae45e518ac29501469fb0"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "1d1f650cf897",
+        "version": "1d1f650cf897",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1451 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9748,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "8bf4e9b9-13ea-409b-8caa-98176a0e173a"
+      }
+    },
+    {
+      "ts": 1790875062.667659,
+      "packet_meta": {
+        "chars": 9009,
+        "est_tokens": 2252,
+        "presented_tokens": 2252,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "553ba095c1ea73e75c4bd2b56b284e7cf3f10b924cd729b1709176977e2a8287"
+          },
+          "spec": {
+            "chars": 6566,
+            "est_tokens": 1641,
+            "sha256": "f1d1b585b926dbcb09d6ad4b22c44cbc4f7b6767d7ad86db2b185b6fed7279e3"
+          },
+          "acceptance": {
+            "chars": 1950,
+            "est_tokens": 487,
+            "sha256": "a6a83714acd9bf7b2b7dd26ba098e3ae3d76a4379e2b1bb83cf895ddca98f2e5"
+          },
+          "scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "3b43148e2a690a780a89b5ec9569ce8ec3c69d5c004b40cbe15633afa5b10a3f"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "c6e2ea8c5df1426c8a2f5ea8e881c5cd7f0fac430a2ae45e518ac29501469fb0"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "1d1f650cf897",
+        "version": "1d1f650cf897",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1451 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9748,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "8bf4e9b9-13ea-409b-8caa-98176a0e173a",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790875064.756592,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Rule 5 says the claude_capacity requeue is bounded because free_slots() returns 0 Claude slots when every Claude row is cooling or at cap. That doesn't hold. free_slots() ignores row complexity bands and account headroom, but pick_executor/eligible_executors() applies both. Cases that still requeue each tick: (a) a complexity-3 task whose only covering row is cooling or saturated while another Claude row has free parallelism; (b) every Claude account lacks headroom, while the rows are not cooling and under cap. In both, free_slots() stays > 0, start() requeues, dispatched_at is popped, and the task is retried and burns a slot every tick with no visible reason. Under the default first-come ordering it can also starve other eligible tasks.",
+            "severity": "high",
+            "line": 559
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "eligible() (699-707) only filters by fallback_tier when fallback mode is on. In a Claude-only pool fallback is False, so tasks outside every row's band still pass through, take a slot, reach start(), and are held there. This works as the 'visible hold', but the spec doesn't acknowledge it. It also never checks band coverage in free_slots() or eligible(), which is the root of the churn above. Filtering uncovered or saturated bands there, or counting only rows that can take the candidate, would fix both.",
+            "severity": "med",
+            "line": 699
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "capacity.snapshot(pool, running_claude_workers, inflight_claude_dispatches) at line 811 and the capacity_reason logic at 777-779 sit outside scope and feed scheduler admission. The spec doesn't say whether capacity.py still treats Claude rows as uncapped or counts Codex-bound in-flight dispatches. The wave/admission path could then disagree with the new free_slots(). The 'cooldown' reason (all enabled rows cooling) would also now also be mislabelled for Claude-only pools.",
+            "severity": "med",
+            "line": 811
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "The new rule 5 branch needs 'enabled codex row exists' computed from pool.executors, and the same predicate also lives in daemon._codex_rows. Duplicating it risks drift, and executor importing from daemon is already a circular-import pattern (imports inside _exhausted). The spec should name one helper, e.g. in executor or pool-adjacent code that daemon imports, rather than copying the predicate.",
+            "severity": "low",
+            "line": 545
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The accepted risk (inflight_claude_dispatches also counts Codex-bound dispatches) is real for mixed pools. A mixed pool with several Codex dispatches in flight can report 0 Claude slots for a tick while Claude workers sit idle. The docstring note is fine, but the mixed-pool acceptance test should pin a case with an in-flight Codex dispatch so the behaviour is documented and not accidental.",
+            "severity": "low",
+            "line": 481
+          },
+          {
+            "path": "tests/test_executor.py",
+            "issue": "Acceptance (a) only covers the case where a Claude row's band covers 5 and pick_executor is mocked to None. It doesn't test the churn case: the covering row cooling or saturated while another row has free slots. Nor does it cover the account-headroom-exhausted case. Without them the unbounded requeue goes untested.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Fix the boundedness claim. Either make free_slots() count only Claude rows that are enabled, not cooling, under their own max_parallel and backed by an account with headroom, or have the requeue path set a per-task backoff, such as a hold_note timestamp that eligible() skips until the next cooldown or capacity change. Don't rely on 'free_slots() returns 0 Claude slots' as the guarantee.",
+          "Make eligible() or free_slots() band-aware for the Claude-only case. Only count Claude rows whose complexity band covers the candidate, or skip candidates no enabled row covers, so uncovered tasks hit the visible hold once and saturated bands don't cause per-tick requeues.",
+          "State how capacity.snapshot() and the capacity_reason at daemon.py:777-779 behave for Claude-only and mixed pools. Add them to scope, or add an acceptance test showing the scheduler path agrees with free_slots().",
+          "Name a single shared predicate for 'enabled execute codex rows' and use it from both daemon.py and executor.py instead of duplicating it.",
+          "Add tests: (1) covering Claude row cooling or saturated while another row is free, asserting no unbounded requeue or a visible reason; (2) all Claude accounts without headroom; (3) a mixed pool with an in-flight Codex dispatch, pinning the accepted under-report.",
+          "Rollback: keep the record.sh decision entry at merge as planned. Also state the revert is a clean git revert of the merge, since the daemon and executor paths change together and can't be reverted separately."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790875064.758091,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Rule 5 says the claude_capacity requeue is bounded because free_slots() returns 0 Claude slots when every Claude row is cooling or at cap. That doesn't hold. free_slots() ignores row complexity bands and account headroom, but pick_executor/eligible_executors() applies both. Cases that still requeue each tick: (a) a complexity-3 task whose only covering row is cooling or saturated while another Claude row has free parallelism; (b) every Claude account lacks headroom, while the rows are not cooling and under cap. In both, free_slots() stays > 0, start() requeues, dispatched_at is popped, and the task is retried and burns a slot every tick with no visible reason. Under the default first-come ordering it can also starve other eligible tasks.",
+          "severity": "high",
+          "line": 559
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "eligible() (699-707) only filters by fallback_tier when fallback mode is on. In a Claude-only pool fallback is False, so tasks outside every row's band still pass through, take a slot, reach start(), and are held there. This works as the 'visible hold', but the spec doesn't acknowledge it. It also never checks band coverage in free_slots() or eligible(), which is the root of the churn above. Filtering uncovered or saturated bands there, or counting only rows that can take the candidate, would fix both.",
+          "severity": "med",
+          "line": 699
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "capacity.snapshot(pool, running_claude_workers, inflight_claude_dispatches) at line 811 and the capacity_reason logic at 777-779 sit outside scope and feed scheduler admission. The spec doesn't say whether capacity.py still treats Claude rows as uncapped or counts Codex-bound in-flight dispatches. The wave/admission path could then disagree with the new free_slots(). The 'cooldown' reason (all enabled rows cooling) would also now also be mislabelled for Claude-only pools.",
+          "severity": "med",
+          "line": 811
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The new rule 5 branch needs 'enabled codex row exists' computed from pool.executors, and the same predicate also lives in daemon._codex_rows. Duplicating it risks drift, and executor importing from daemon is already a circular-import pattern (imports inside _exhausted). The spec should name one helper, e.g. in executor or pool-adjacent code that daemon imports, rather than copying the predicate.",
+          "severity": "low",
+          "line": 545
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The accepted risk (inflight_claude_dispatches also counts Codex-bound dispatches) is real for mixed pools. A mixed pool with several Codex dispatches in flight can report 0 Claude slots for a tick while Claude workers sit idle. The docstring note is fine, but the mixed-pool acceptance test should pin a case with an in-flight Codex dispatch so the behaviour is documented and not accidental.",
+          "severity": "low",
+          "line": 481
+        },
+        {
+          "path": "tests/test_executor.py",
+          "issue": "Acceptance (a) only covers the case where a Claude row's band covers 5 and pick_executor is mocked to None. It doesn't test the churn case: the covering row cooling or saturated while another row has free slots. Nor does it cover the account-headroom-exhausted case. Without them the unbounded requeue goes untested.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 9009,
+    "est_tokens": 2252,
+    "presented_tokens": 2252,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "553ba095c1ea73e75c4bd2b56b284e7cf3f10b924cd729b1709176977e2a8287"
+      },
+      "spec": {
+        "chars": 6566,
+        "est_tokens": 1641,
+        "sha256": "f1d1b585b926dbcb09d6ad4b22c44cbc4f7b6767d7ad86db2b185b6fed7279e3"
+      },
+      "acceptance": {
+        "chars": 1950,
+        "est_tokens": 487,
+        "sha256": "a6a83714acd9bf7b2b7dd26ba098e3ae3d76a4379e2b1bb83cf895ddca98f2e5"
+      },
+      "scope": {
+        "chars": 109,
+        "est_tokens": 27,
+        "sha256": "3b43148e2a690a780a89b5ec9569ce8ec3c69d5c004b40cbe15633afa5b10a3f"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 264,
+        "est_tokens": 66,
+        "sha256": "c6e2ea8c5df1426c8a2f5ea8e881c5cd7f0fac430a2ae45e518ac29501469fb0"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "1d1f650cf897",
+    "version": "1d1f650cf897",
+    "candidate_known": false,
+    "base": "db2ae815ac55",
+    "sources": "task@T-1451 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 9748,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "8bf4e9b9-13ea-409b-8caa-98176a0e173a",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790875005.155287,
+  "account": "A",
+  "pid": 28002,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Rule 5 says the claude_capacity requeue is bounded because free_slots() returns 0 Claude slots when every Claude row is cooling or at cap. That doesn't hold. free_slots() ignores row complexity bands and account headroom, but pick_executor/eligible_executors() applies both. Cases that still requeue each tick: (a) a complexity-3 task whose only covering row is cooling or saturated while another Claude row has free parallelism; (b) every Claude account lacks headroom, while the rows are not cooling and under cap. In both, free_slots() stays > 0, start() requeues, dispatched_at is popped, and the task is retried and burns a slot every tick with no visible reason. Under the default first-come ordering it can also starve other eligible tasks.",
+      "severity": "high",
+      "line": 559
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "eligible() (699-707) only filters by fallback_tier when fallback mode is on. In a Claude-only pool fallback is False, so tasks outside every row's band still pass through, take a slot, reach start(), and are held there. This works as the 'visible hold', but the spec doesn't acknowledge it. It also never checks band coverage in free_slots() or eligible(), which is the root of the churn above. Filtering uncovered or saturated bands there, or counting only rows that can take the candidate, would fix both.",
+      "severity": "med",
+      "line": 699
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "capacity.snapshot(pool, running_claude_workers, inflight_claude_dispatches) at line 811 and the capacity_reason logic at 777-779 sit outside scope and feed scheduler admission. The spec doesn't say whether capacity.py still treats Claude rows as uncapped or counts Codex-bound in-flight dispatches. The wave/admission path could then disagree with the new free_slots(). The 'cooldown' reason (all enabled rows cooling) would also now also be mislabelled for Claude-only pools.",
+      "severity": "med",
+      "line": 811
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The new rule 5 branch needs 'enabled codex row exists' computed from pool.executors, and the same predicate also lives in daemon._codex_rows. Duplicating it risks drift, and executor importing from daemon is already a circular-import pattern (imports inside _exhausted). The spec should name one helper, e.g. in executor or pool-adjacent code that daemon imports, rather than copying the predicate.",
+      "severity": "low",
+      "line": 545
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The accepted risk (inflight_claude_dispatches also counts Codex-bound dispatches) is real for mixed pools. A mixed pool with several Codex dispatches in flight can report 0 Claude slots for a tick while Claude workers sit idle. The docstring note is fine, but the mixed-pool acceptance test should pin a case with an in-flight Codex dispatch so the behaviour is documented and not accidental.",
+      "severity": "low",
+      "line": 481
+    },
+    {
+      "path": "tests/test_executor.py",
+      "issue": "Acceptance (a) only covers the case where a Claude row's band covers 5 and pick_executor is mocked to None. It doesn't test the churn case: the covering row cooling or saturated while another row has free slots. Nor does it cover the account-headroom-exhausted case. Without them the unbounded requeue goes untested.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

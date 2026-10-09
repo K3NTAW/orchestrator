@@ -404,3 +404,20 @@ type: decision · goal: T-1745 · tasks: T-1746,T-1747,T-1748 · provenance: rep
 - closable_goal packet: gate green, T-1746 merged (6a11de8), T-1747 review done, T-1748 superseded; routine_close skipped it because all_children_merged was False (review/superseded rows counted)
 - Closed with bus_post_result goal_closed=true, pr_url=null; [ship].enabled is on so ship.py gates the merged tree, pushes goal/T-1745 and opens then merges the PR; no PR opened by hand
 outcome: ship.candidates() lists T-1745; revert: bus.update('T-1745', status='queued', result=None) and drop pipeline.ship
+
+## 2026-10-09 T-1745 shipped to main as 569f4b12385f
+type: decision · goal: T-1745 · provenance: repo
+- revert path: orchestrator rollback 569f4b12385fb752e9ad579c9221777d07d9207c
+outcome: recorded by orchestrator ship
+
+## 2026-10-09 2026-10-09 PR 49 shipped by ship (569f4b1): stale dispatch stamps cleared after a dead worker; first unattended ship
+type: decision · goal: T-1745 · tasks: T-1746 · provenance: repo
+- Ship gated goal/T-1745 against main 98932a6 (gate_ok) and merged PR 49 itself at 10:03; no Planner action. Duplicate fix round T-1748 superseded by the Planner
+- Ship does not pull the local checkout the daemons run from; the Planner pulled main to 66d866c and restarted the daemons at 10:17: orchestrator 14680, luna-inbox 14714, ai-apprentice 14726, docs-kentawaibel 14735
+outcome: Revert: orchestrator rollback 569f4b1 (or git revert -m 1 569f4b1 via a revert PR), then restart the daemons
+
+## 2026-10-09 Planner state committed and synced to origin/main via a plan PR (human: "push local main")
+type: decision · goal: T-1745 · provenance: repo
+- The guardrail denies a direct push to main, so the 22 planner-only commits (bus closes T-1334/T-1391/T-1654/T-1658/T-1705, memory, ship re-enable) plus this checkpoint go up on branch planner/sync-2026-10-09 and merge through a PR.
+- This checkpoint commits .orchestrator/plan.md, plan-log.md, memory/*.md, scorecard.json, jev_state.json, ship_state.json and the tasks tree (bus.archive moved 1340 closed task files into .orchestrator/tasks/archive; recent task JSONs T-1391.. were never tracked before).
+outcome: Revert: git revert <this sha>; the sync PR's merge commit reverts with git revert -m 1 <merge sha>.

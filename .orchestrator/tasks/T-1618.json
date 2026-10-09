@@ -1,0 +1,519 @@
+{
+  "id": "T-1618",
+  "created_at": 1791025251.827892,
+  "parent": "T-1403",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "B8 scout: pin the Claude fresh-execute path, the Codex fix-delta path, _resume_compatible and run_claude's error shape so B8 v3 can name the session-resume mechanics",
+  "spec": "Read-only scout for B8 (Claude fix rounds resume the executor's session; held T-1509, v2 T-1587 got spec review T-1589 request_changes twice because the spec could not name the mechanics). Read goal/T-1403 (git show goal/T-1403:<path> or a worktree on that branch); change nothing. Answer each question with file:symbol facts (line numbers as a hint only).\n\nQ1 Fresh execute path. In spawn.run_worker, list in order every step between the claim and run_claude for a fresh Claude execute task: ensure_worktree, bus.claim with wt, packet render, packet_meta (where session_id is stored), pool.reserve/release, the executor='claude:<tier>' write, skill telemetry, log_run (inside run_claude?), _combined_usage. For each, say whether it depends on the packet render.\n\nQ2 Codex fix delta. How a Codex fix round reaches the executor today: the executor.reply / _exhausted path, how the daemon dispatches a fix round (_dispatch_reply_worker, _dispatch_fresh_fix: what each passes), whether the delta is the fix task's own spec (bus.get(fix id)['spec']) or something the daemon passes, and which symbol makes a Codex fix round reuse the parent's worktree and branch (the reason its commits land on task/<parent>).\n\nQ3 _resume_compatible(parent): what it verifies, its callers, and what happens when it returns False.\n\nQ4 run_claude: its return shape on success and on error (where stderr / the error message lives; whether 'No conversation found' or a missing-session error is observable distinctly from other errors and in which field); whether run_claude accepts a resume/session argument today; where it calls log_run and with which outcome.\n\nQ5 Registry and concurrency: how worker_registry / worker_control record a running worker per task (keys), so a resume plan can tell whether a given session's task has a live worker.\n\nQ6 Tests: in tests/test_spawn.py and tests/test_executor.py (and tests/test_daemon.py for fix-round dispatch), the fixtures and patch targets existing tests use for run_claude, ensure_worktree, executor.reply and the registry, so a spec can name the same seams.\n\nPost via bus_post_result: summary (<= 1500 tokens), findings list of {q, fact, path, symbol, line, confidence}, provenance 'repo'. Any confidence < 0.7 must say what is uncertain.",
+  "inputs": [],
+  "acceptance": [
+    "result.findings answers Q1-Q6, each with at least one path and symbol",
+    "every finding has a confidence; any below 0.7 names what is uncertain",
+    "provenance is ['repo'] and no file in the repo changed"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/worker_control.py",
+    "orchestrator/worker_registry.py",
+    "orchestrator/bus.py",
+    "tests/test_spawn.py",
+    "tests/test_executor.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 40,
+    "timeout_s": 1500,
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B8-scout"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1618",
+  "codex_thread": null,
+  "result": {
+    "summary": "Posted the Q1\u2013Q6 answers to T-1618 as done, all from `goal/T-1403`, and no repo file changed. The first post errored, probably for length, so I posted a shorter version.\n\nThe main thing for B8: `goal/T-1403` already has Claude resume mechanics. The spec should extend them, not add new seams.\n\n- **Q1:** The order is pick account, write `executor='claude:<tier>'`, `packet()`, `render('execute')`, `packet_meta`, skill exposure, `pool.reserve`, `ensure_worktree`, `bus.claim`, then `run_claude`. Only the executor write is independent of the packet render. `session_id` goes into `packet_meta.session_id` inside `run_claude`, after the CLI returns. `log_run` is also called inside `run_claude`.\n- **Q2:** The daemon tick sets the fix task's `worktree` and `branch` to the parent's when the plan is resume. That is why Codex fix commits land on `task/<parent>`. The delta comes from `_fix_round_delta` (failures plus filtered acceptance), not from the fix task's own spec. `_dispatch_fresh_fix` is the one that renders the fix spec, on a new `task/<fix>` branch.\n- **Q3:** `_resume_compatible` checks that the worktree exists, is clean, and that HEAD descends from `codex_thread_head`. Its only caller is `resume_plan`. When it returns False, the plan is fresh with reason `incompatible_worktree`. `resume_plan` already returns fresh for any non-Codex parent, so Claude parents always plan fresh today.\n- **Q4:**\n  - **Resume support:** `run_claude` already accepts `resume_session`. `run_worker(resume_task=, resume_prompt=, session_id=)` and `spawn.resume_worker` call it.\n  - **Missing session:** a missing-session error is not special-cased. It only shows up in the `reason` string of a failed result, or in `output.result`, so detection needs a substring check.\n  - **Unverified:** I did not run the CLI, so I don't know its exact error wording (that finding is at 0.5 confidence).\n- **Q5:** There is one registry JSON per task, and a worker is live if its status is not in {cancelled, done, fail",
+    "parse_error": true,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791025262.2792509,
+      "packet_meta": {
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 11277,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791025262.298774,
+      "packet_meta": {
+        "chars": 10538,
+        "est_tokens": 2634,
+        "presented_tokens": 2634,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "17c8ff2ac42a217470bf16ecf7807e3512b9eb8cc8744e674cbfa659140b9b9e"
+          },
+          "question": {
+            "chars": 2277,
+            "est_tokens": 569,
+            "sha256": "4ca73074bf775d45a840e7ca4db9691828aad924a84a198108950135fa1d46e0"
+          },
+          "expected output": {
+            "chars": 220,
+            "est_tokens": 55,
+            "sha256": "778e66681c4bd936834d5d83fbfe5e54fca9b60c31da6bf872bb3c3a52f00852"
+          },
+          "scope tree": {
+            "chars": 1725,
+            "est_tokens": 431,
+            "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+          },
+          "memory titles": {
+            "chars": 6111,
+            "est_tokens": 1527,
+            "sha256": "29e198396b490519fa2e06f8763d4a99b853747f0614169ba636ad1b8b225b0b"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "dfee3d49986d",
+        "version": "dfee3d49986d",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1618 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 11277,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3222,
+        "tool_tokens_minimal": 2222,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "scout/trace-callers"
+        ],
+        "skill_tokens_selected_l0": 19,
+        "skill_tokens_selected_l2": 56,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791025262.677275,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1618",
+      "claimed_at": 1791025262.676984
+    },
+    {
+      "ts": 1791025262.6794162,
+      "account": "B"
+    },
+    {
+      "ts": 1791025266.713747,
+      "pid": 43858,
+      "account": "B"
+    },
+    {
+      "ts": 1791025358.933266,
+      "status": "done",
+      "result": {
+        "summary": "goal/T-1403 already has a Claude resume path: run_claude(resume_session=), run_worker(resume_task, resume_prompt, session_id), spawn.resume_worker. Codex-only resume_plan/_resume_compatible decide fix-round mode; a Claude parent always plans fresh today. No file changed.",
+        "findings": [
+          {
+            "q": "Q1",
+            "fact": "run_worker fresh execute order: pool.pick -> executor='claude:<tier>' bus.update -> packet() -> render('execute') -> packet_meta -> _shadow_tool_disclosure + skill exposure (bus.update packet_meta) -> pool.reserve -> ensure_worktree -> bus.claim(task,'claude:<acct>',wt) -> bus.update(account) -> run_claude. Only the executor write is independent of render; packet_meta/skill telemetry/allowlist derive from it. session_id is stored by run_claude into packet_meta.session_id after CLI returns. log_run is inside run_claude. _combined_usage used only in tool-escalation rerun and resume_output.",
+            "path": "orchestrator/spawn.py",
+            "symbol": "run_worker",
+            "line": 1546,
+            "confidence": 0.9
+          },
+          {
+            "q": "Q2",
+            "fact": "daemon tick (fix_round_for): executor.resume_plan; mode resume -> bus.update(fix, worktree=parent.worktree, branch=parent.branch or task/<parent>) (this is why commits land on task/<parent>), then spawn_async(_dispatch_reply_worker, fix, parent, _fix_round_delta(parent,fix), plan). Delta is daemon-built (failures from parent resume_hint or rejecting reviews + filtered fix acceptance), not the fix spec. reply() sets _run_task_id=fix, re-checks plan (mismatch -> incompatible), runs codex 'resume <thread> <delta>' in parent worktree; _state_target routes state to fix, rounds to parent. incompatible -> _dispatch_fresh_fix(worktree=None, branch=task/<fix>, packet+render('execute') from fix spec, _dispatch_worker). _exhausted is the fresh Claude fallback, not the fix path.",
+            "path": "orchestrator/daemon.py",
+            "symbol": "_fix_round_delta/_dispatch_reply_worker/_dispatch_fresh_fix",
+            "line": 634,
+            "confidence": 0.9
+          },
+          {
+            "q": "Q3",
+            "fact": "_resume_compatible(task)->(bool,reason): False if no worktree; True if no codex_thread_head (legacy); False if git status dirty; else head must descend from recorded head. Sole caller resume_plan (executor.py:329); False -> {'mode':'fresh','reason':'incompatible_worktree'}. resume_plan also fresh for no codex_thread, rounds>=MAX_ROUNDS, executor provider != codex.",
+            "path": "orchestrator/executor.py",
+            "symbol": "_resume_compatible/resume_plan",
+            "line": 302,
+            "confidence": 0.9
+          },
+          {
+            "q": "Q4",
+            "fact": "run_claude has kw resume_session (adds --resume id --tools '' empty mcp, log_run no-op) and task['_resume_session'] (--resume with normal tools). Returns {'status':'done','output':json} on success; {'status':'failed','output':out,'reason':'budget or error exit (rc=N): '+result[:500]} on error exit; non-JSON -> reason 'non-JSON output (rc=N): '+(stdout+stderr)[-500:]; timeout/held/superseded variants. 'No conversation found' is not special-cased anywhere; detect by substring on reason or output.result. log_run outcome done|error (rc), plus rate_limit/no_cli, with session_id.",
+            "path": "orchestrator/spawn.py",
+            "symbol": "run_claude",
+            "line": 1329,
+            "confidence": 0.75
+          },
+          {
+            "q": "Q4b",
+            "fact": "Uncertain: actual CLI wording/stream of a missing-session error not verified.",
+            "path": "orchestrator/spawn.py",
+            "symbol": "run_claude",
+            "line": 1425,
+            "confidence": 0.5
+          },
+          {
+            "q": "Q5",
+            "fact": "worker_registry keeps STATE/workers/<task_id>.json with fields role, model, provider, account, pid, thread, worktree, branch, started_at, last_event_at, status, status_reason, epoch, tools, parent, tokens, usd. get(task) -> doc; live = status not in TERMINAL {cancelled,done,failed,held}; reconcile(alive_fn) marks dead pids failed. session_id is not a registry field (lives in task packet_meta.session_id), so map session->task via bus then registry.get. worker_control.launch_epoch/is_current/write_if_current guard superseded launches. resume_worker reuses recorded account/model/tools.",
+            "path": "orchestrator/worker_registry.py",
+            "symbol": "upsert/get/finish/reconcile",
+            "line": 111,
+            "confidence": 0.85
+          },
+          {
+            "q": "Q6",
+            "fact": "test_spawn: FakePopen + patch spawn.subprocess.Popen, spawn.shutil.which, spawn.worker_registry, spawn.trust_workspace, spawn.secrets_for_role, spawn.env_policy.worker_env; run_worker tests patch spawn.run_claude and spawn.ensure_worktree (or pre-mkdir TMP/'wt'/id). test_executor: patch.object(executor,'resume_plan'/'_resume_compatible', return_value=(True,'compatible')), executor.reply(parent,'repair',fix_round_task_id=..., plan=...), P.Executor rows. test_daemon: self.swap(executor,'reply'/'_resume_compatible'), daemon._dispatch_fresh_fix(tid,reason), patch daemon.worker_registry get/reconcile.",
+            "path": "tests/test_spawn.py",
+            "symbol": "FakePopen; run_claude/ensure_worktree patches",
+            "line": 12,
+            "confidence": 0.85
+          }
+        ],
+        "open_questions": [
+          "Reuse run_worker(resume_task=)/resume_worker or add a new fix-round path?",
+          "Exact CLI text for a missing --resume session"
+        ],
+        "suggested_next": [
+          "Extend resume_plan for claude parents via packet_meta.session_id, falling back to _dispatch_fresh_fix"
+        ],
+        "blocked": null,
+        "provenance": [
+          "repo"
+        ],
+        "confidence": 0.0
+      }
+    },
+    {
+      "ts": 1791025367.173008,
+      "packet_meta": {
+        "chars": 10538,
+        "est_tokens": 2634,
+        "presented_tokens": 2634,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "17c8ff2ac42a217470bf16ecf7807e3512b9eb8cc8744e674cbfa659140b9b9e"
+          },
+          "question": {
+            "chars": 2277,
+            "est_tokens": 569,
+            "sha256": "4ca73074bf775d45a840e7ca4db9691828aad924a84a198108950135fa1d46e0"
+          },
+          "expected output": {
+            "chars": 220,
+            "est_tokens": 55,
+            "sha256": "778e66681c4bd936834d5d83fbfe5e54fca9b60c31da6bf872bb3c3a52f00852"
+          },
+          "scope tree": {
+            "chars": 1725,
+            "est_tokens": 431,
+            "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+          },
+          "memory titles": {
+            "chars": 6111,
+            "est_tokens": 1527,
+            "sha256": "29e198396b490519fa2e06f8763d4a99b853747f0614169ba636ad1b8b225b0b"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "dfee3d49986d",
+        "version": "dfee3d49986d",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1618 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 11277,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3222,
+        "tool_tokens_minimal": 2222,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "scout/trace-callers"
+        ],
+        "skill_tokens_selected_l0": 19,
+        "skill_tokens_selected_l2": 56,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "8116b569-7c41-4123-879a-b1db2f8f6538"
+      }
+    },
+    {
+      "ts": 1791025367.208107,
+      "packet_meta": {
+        "chars": 10538,
+        "est_tokens": 2634,
+        "presented_tokens": 2634,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "17c8ff2ac42a217470bf16ecf7807e3512b9eb8cc8744e674cbfa659140b9b9e"
+          },
+          "question": {
+            "chars": 2277,
+            "est_tokens": 569,
+            "sha256": "4ca73074bf775d45a840e7ca4db9691828aad924a84a198108950135fa1d46e0"
+          },
+          "expected output": {
+            "chars": 220,
+            "est_tokens": 55,
+            "sha256": "778e66681c4bd936834d5d83fbfe5e54fca9b60c31da6bf872bb3c3a52f00852"
+          },
+          "scope tree": {
+            "chars": 1725,
+            "est_tokens": 431,
+            "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+          },
+          "memory titles": {
+            "chars": 6111,
+            "est_tokens": 1527,
+            "sha256": "29e198396b490519fa2e06f8763d4a99b853747f0614169ba636ad1b8b225b0b"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "dfee3d49986d",
+        "version": "dfee3d49986d",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1618 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 11277,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3222,
+        "tool_tokens_minimal": 2222,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "scout/trace-callers"
+        ],
+        "skill_tokens_selected_l0": 19,
+        "skill_tokens_selected_l2": 56,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "8116b569-7c41-4123-879a-b1db2f8f6538",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791025368.1479838,
+      "status": "done",
+      "result": {
+        "summary": "Posted the Q1\u2013Q6 answers to T-1618 as done, all from `goal/T-1403`, and no repo file changed. The first post errored, probably for length, so I posted a shorter version.\n\nThe main thing for B8: `goal/T-1403` already has Claude resume mechanics. The spec should extend them, not add new seams.\n\n- **Q1:** The order is pick account, write `executor='claude:<tier>'`, `packet()`, `render('execute')`, `packet_meta`, skill exposure, `pool.reserve`, `ensure_worktree`, `bus.claim`, then `run_claude`. Only the executor write is independent of the packet render. `session_id` goes into `packet_meta.session_id` inside `run_claude`, after the CLI returns. `log_run` is also called inside `run_claude`.\n- **Q2:** The daemon tick sets the fix task's `worktree` and `branch` to the parent's when the plan is resume. That is why Codex fix commits land on `task/<parent>`. The delta comes from `_fix_round_delta` (failures plus filtered acceptance), not from the fix task's own spec. `_dispatch_fresh_fix` is the one that renders the fix spec, on a new `task/<fix>` branch.\n- **Q3:** `_resume_compatible` checks that the worktree exists, is clean, and that HEAD descends from `codex_thread_head`. Its only caller is `resume_plan`. When it returns False, the plan is fresh with reason `incompatible_worktree`. `resume_plan` already returns fresh for any non-Codex parent, so Claude parents always plan fresh today.\n- **Q4:**\n  - **Resume support:** `run_claude` already accepts `resume_session`. `run_worker(resume_task=, resume_prompt=, session_id=)` and `spawn.resume_worker` call it.\n  - **Missing session:** a missing-session error is not special-cased. It only shows up in the `reason` string of a failed result, or in `output.result`, so detection needs a substring check.\n  - **Unverified:** I did not run the CLI, so I don't know its exact error wording (that finding is at 0.5 confidence).\n- **Q5:** There is one registry JSON per task, and a worker is live if its status is not in {cancelled, done, fail",
+        "parse_error": true,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "packet_meta": {
+    "chars": 10538,
+    "est_tokens": 2634,
+    "presented_tokens": 2634,
+    "sections": {
+      "_preamble": {
+        "chars": 82,
+        "est_tokens": 20,
+        "sha256": "17c8ff2ac42a217470bf16ecf7807e3512b9eb8cc8744e674cbfa659140b9b9e"
+      },
+      "question": {
+        "chars": 2277,
+        "est_tokens": 569,
+        "sha256": "4ca73074bf775d45a840e7ca4db9691828aad924a84a198108950135fa1d46e0"
+      },
+      "expected output": {
+        "chars": 220,
+        "est_tokens": 55,
+        "sha256": "778e66681c4bd936834d5d83fbfe5e54fca9b60c31da6bf872bb3c3a52f00852"
+      },
+      "scope tree": {
+        "chars": 1725,
+        "est_tokens": 431,
+        "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+      },
+      "memory titles": {
+        "chars": 6111,
+        "est_tokens": 1527,
+        "sha256": "29e198396b490519fa2e06f8763d4a99b853747f0614169ba636ad1b8b225b0b"
+      },
+      "result contract": {
+        "chars": 123,
+        "est_tokens": 30,
+        "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+      }
+    },
+    "hash": "dfee3d49986d",
+    "version": "dfee3d49986d",
+    "candidate_known": false,
+    "base": "884f2d03c34e",
+    "sources": "task@T-1618 tree@HEAD memory@notes",
+    "prefix_sha": "a24bf5bb2eee",
+    "prefix_chars": 648,
+    "suffix_chars": 11277,
+    "dynamic_sections": [
+      "question",
+      "expected output",
+      "scope tree",
+      "memory titles",
+      "result contract",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 347,
+    "instruction_tokens_modular": 347,
+    "role": "scout",
+    "tool_tokens_disclosed": 3222,
+    "tool_tokens_minimal": 2222,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "scout/trace-callers"
+    ],
+    "skill_tokens_selected_l0": 19,
+    "skill_tokens_selected_l2": 56,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "8116b569-7c41-4123-879a-b1db2f8f6538",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791025262.676984,
+  "account": "B",
+  "pid": 43858,
+  "pipeline": {
+    "skills_used": []
+  }
+}

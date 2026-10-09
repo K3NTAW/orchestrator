@@ -1,0 +1,52 @@
+{
+  "id": "T-1471",
+  "created_at": 1790878815.872003,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "MCP execute tool for any executor row; codex/codex_reply refuse without an enabled codex row; executor_fallback reports Claude rows; CLAUDE.md names the execute tool",
+  "spec": "Goal T-1403, wave 2, plan label B3. With Codex off, the Planner's only dispatch tools are `codex`/`codex_reply`\n(orchestrator/mcp.py:123-136), named after a provider that no longer runs; CLAUDE.md:4 and :8 tell the Planner to\ndelegate through them.\n\nFacts (goal/T-1403 at 92c1a98):\n- mcp.py:123-128 codex(task_id, prompt) = executor.start(task_id, prompt) + executor.post_tool_result; 131-136\n  codex_reply = executor.reply + post_tool_result(replace_result=True). executor.start (executor.py:347) already\n  picks any eligible row via pool.pick_executor, Claude rows included (routes to spawn.run_worker through\n  _exhausted(tier=...)).\n- mcp.py:152-161 executor_fallback(complexity) uses p.codex_available() (legacy pool.codex) and p.cfg['codex']\n  ['on_exhausted'] (KeyError without a [codex] table).\n- tool_catalog.py:31-49 _MCP lists the Planner tools with one-line descriptions ('codex', 'codex_reply',\n  'executor_fallback'); specialist.py:18-19 lists the same names in the Planner tool allowlist;\n  tests/test_specialist.py:54 pins that list.\n- B2v2 (T-1451, merged before this task) adds daemon._codex_rows(pool) (enabled execute rows with provider codex).\n  Use pool rows directly here (same predicate: any enabled row with 'execute' in roles and provider 'codex') so\n  mcp.py does not import daemon.\n\nChange:\n1. mcp.py: new tool execute(task_id, prompt, executor_id=None) -> executor.start(task_id, prompt,\n   executor_id=executor_id) + post_tool_result, identical shape to codex() (docstring: 'Executor: dispatch one\n   atomic execute task to the cheapest eligible executor row (Claude or Codex) in its worktree'). codex() and\n   codex_reply() return {'status': 'refused', 'reason': 'no enabled codex row; use execute'} without calling\n   executor when Pool() has no enabled codex execute row. executor_fallback(complexity): when no enabled codex\n   row exists return {'use': 'execute', 'rows': [ids of enabled Claude execute rows whose band covers\n   complexity]} (empty list -> {'use': 'hold', 'hint': 'no row covers this complexity'}); read on_exhausted with\n   .get(..., 'hold'); legacy branch unchanged when a codex row is enabled.\n2. tool_catalog.py _MCP: add 'execute': ('dispatch an execute task to an executor row', 'executor'); keep codex\n   entries. specialist.py:18-19: add 'execute' to the Planner allowlist. tests/test_specialist.py:54 pins the\n   list: update it.\n3. CLAUDE.md lines 4 and 8: the executor is 'the execute tool (any enabled executor row; codex/codex_reply only\n   while a codex row is enabled)'; keep the rest of each sentence. Only those two lines change.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_mcp.py (grep 'codex') and tests/test_specialist.py:54;\nupdate to the new contract. Run tests/test_mcp.py, tests/test_tool_catalog.py, tests/test_specialist.py.\n\nDepends on B2v2 T-1451 (shared predicate; its merge lands first). Out of scope: executor.py, daemon.py, pool.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.\n\nRe-filed 2026-10-01 (replaces T-1455): depends_on re-pointed to T-1467 after the B2v3/B4v3 respecs; the spec, acceptance and scope are unchanged.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_mcp.py::test_execute_tool_dispatches_and_codex_tools_refuse_without_codex_row: passes: with executor.start patched, mcp.execute(task_id, prompt) calls it with executor_id passthrough and returns its result plus posted/posted_reason; on a pool whose enabled execute rows are only Claude rows, mcp.codex and mcp.codex_reply return status 'refused' with reason naming the execute tool and never call executor.start/reply; with an enabled codex row they call through as before",
+    "tests/test_mcp.py::test_executor_fallback_reports_claude_rows_without_codex: passes: executor_fallback(5) on a pool with no enabled codex row and no [codex] table returns use 'execute' with the ids of enabled Claude execute rows whose band covers 5, and use 'hold' when no row covers the complexity",
+    "tests/test_tool_catalog.py::test_catalog_lists_execute_tool: passes: tool_catalog.CATALOG['execute'] exists with category 'executor' and specialist's Planner allowlist contains 'execute'",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/mcp.py",
+    "orchestrator/tool_catalog.py",
+    "orchestrator/specialist.py",
+    "CLAUDE.md",
+    "tests/test_mcp.py",
+    "tests/test_tool_catalog.py",
+    "tests/test_specialist.py"
+  ],
+  "depends_on": [
+    "T-1467"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B3",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1455"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790892462.713859,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1493 (2026-10-02 wave 2 round 3)"
+    }
+  ],
+  "hold_reason": "superseded by T-1493 (2026-10-02 wave 2 round 3)"
+}

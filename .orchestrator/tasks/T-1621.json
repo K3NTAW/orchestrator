@@ -1,0 +1,691 @@
+{
+  "id": "T-1621",
+  "created_at": 1791025574.736641,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: B8 v3 (fix round of T-1509): a Claude fix round resumes the newest Claude session in its chain from the daemon's fix-round dispatch, with a fresh fallback when the session is gone",
+  "spec": "Goal T-1403, wave 2, plan label B8-v3. Respec of B8 v2 T-1587 (spec review T-1589 request_changes 2026-10-02 22:30; human go for scout then v3), filed as a FIX ROUND of T-1509 so its merge stamps T-1509 and E7 T-1555 stays valid; T-1509 has no branch, so the worktree is cut from goal/T-1403. Motivation: Codex fix rounds resume the parent thread and send a delta; Claude fix rounds start a fresh `claude -p` with the full packet every round (fix rounds were 41% of execute runs, analysis 2026-10-01).\n\nFacts (scout T-1618 on goal/T-1403; locate by symbol):\n- Daemon fix-round dispatch (daemon.py, the tick that handles constraints.fix_round_for): executor.resume_plan(parent, fix) is Codex-only (fresh reasons no_thread, rounds_exhausted, executor_not_codex, incompatible_worktree via _resume_compatible). Mode resume: bus.update(fix, worktree=parent.worktree, branch=parent.branch or task/<parent>), then spawn_async(_dispatch_reply_worker, fix, parent, _fix_round_delta(parent, fix), plan). The delta is daemon-built by _fix_round_delta (failures or rejecting review comments + the fix acceptance). Otherwise _dispatch_fresh_fix(fix, reason): worktree None, branch task/<fix>, packet + render('execute') from the fix spec, _dispatch_worker. A Claude parent always goes fresh today (executor_not_codex).\n- spawn.run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None). Fresh order: pool.pick, executor='claude:<tier>' write, packet(), render('execute'), packet_meta, skill exposure telemetry (derived from the render), pool.reserve, ensure_worktree, bus.claim(task, 'claude:<acct>', wt), account write, run_claude. The resume_task branch (used by worker_control steering through spawn.resume_worker) reads worker_registry.get(task_id) model/tools and skips reserve, worktree and claim; the `resume_task is None` guards gate B4b derivation and execute_incomplete handling.\n- run_claude(..., *, resume_session=None): resume_session adds `--resume <id> --tools ''` and silences log_run (steering); task['_resume_session'] adds `--resume <id>` with normal tools. Error results: {'status': 'failed', 'output': out, 'reason': 'budget or error exit (rc=N): ' + result[:500]} or reason 'non-JSON output (rc=N): ' + (stdout+stderr)[-500:]. run_claude stores packet_meta.session_id after a run and logs one log_run row (outcome done|error, with session_id). Nothing special-cases a missing session; the CLI wording is unverified (scout confidence 0.5).\n- worker_registry keeps STATE/workers/<task_id>.json (status live unless in {cancelled, done, failed, held}); session_id is not a registry field. Sessions are keyed by cwd and account (CLAUDE_CONFIG_DIR); `claude --resume <id>` works only from the worktree and account that created the session.\n\nChange:\n1. executor.claude_resume_plan(fix_task, pool) -> {'mode': 'session', 'session_id', 'account', 'owner_id', 'worktree', 'branch'} or {'mode': 'fresh', 'reason'}. Walk the constraints.fix_round_for chain upward from fix_task (fix_task's fix_round_for first, then its fix_round_for, ...) and take the NEWEST task whose packet_meta.session_id is set and whose executor starts with 'claude:' as the owner. Fresh reasons, checked in this order: no_fix_round_for; no_session (no such owner); ancestor_merged (owner.merged_into set); account_unavailable (owner.account missing or pool.claude_has_headroom(owner account) false); incompatible_worktree (owner worktree missing or not a git worktree); session_busy (worker_registry.get(owner id) is live). Pure except bus.get, pool reads, the worktree check and the registry read.\n2. Daemon fix-round dispatch: when resume_plan returns fresh with reason executor_not_codex, call claude_resume_plan(fix, pool). Session mode: bus.update(fix, worktree=owner worktree, branch=owner branch) like the Codex resume, then spawn_async a new _dispatch_session_worker(fix, plan, delta) that calls spawn.run_worker(fix id, account_id=plan['account'], session_resume=True, session_id=plan['session_id'], resume_prompt=line + delta), where delta = _fix_round_delta(parent, fix) (same as Codex) and line = 'Resumed session for fix round <n> of <owner id>; same worktree <path>, branch <branch>; commit before the final message.' Fresh mode: _dispatch_fresh_fix as today. Both record pipeline.resume = {'mode', 'reason', 'session_id', 'account', 'owner_id'}, merged into the existing pipeline dict under bus.locked (read-modify-write).\n3. spawn.run_worker gains `session_resume=False`. True: no packet render and no skill telemetry; prompt = resume_prompt; model and tools from the FIX task's tier and TOOLS['execute'] as a fresh execute run (never worker_registry); executor write, pool.reserve, bus.claim(fix id, 'claude:<acct>', owner worktree) and the account write happen as in the fresh path, but no ensure_worktree (cwd = owner worktree); t['_resume_session'] = session_id (run_claude's resume_session argument is not used); resume_task stays None so B4b derivation and execute_incomplete handling run; packet_meta.session_id is refreshed after the run. After the run, if HEAD in that worktree moved, point ref task/<fix id> at that HEAD and record branch task/<fix id> on the fix task, so review packets and merge find the fix round's commits (today's Codex resume leaves them only on the parent's branch).\n4. Session-missing fallback: restructure so the session attempt is a call that returns a sentinel. When the session attempt's result has status 'failed' and its 'reason' field (never output text of a successful result) contains 'No conversation found', or both 'session' and 'not found' (case-insensitive): the attempt stays logged as run_claude logged it (one row, its usage), the reserve is released, the fix task's worktree and branch are reset to None / task/<fix id>, notify.notify names the fix and owner, pipeline.resume becomes {'mode': 'fresh', 'reason': 'session_missing', ...}, and run_worker re-enters the fresh path from the top once (packet rendered, ensure_worktree for the fix id, same account). One retry only; never triggered by a successful result.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_daemon.py fix-round dispatch tests with Codex parents pass unchanged; tests/test_spawn.py steering resume tests (grep 'resume_task' / '_resume_session' / 'resume_worker') pass unchanged; tests/test_executor.py resume_plan and _resume_compatible tests pass unchanged. Run tests/test_executor.py, tests/test_spawn.py and tests/test_daemon.py in the foreground after committing; never background a command and never run the full gate.\n\nOut of scope: merge.py, pool.py (use existing accessors), worker_control.py, prompts. Rollback: git revert of the merge commit.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests (seams per the scout: test_spawn patches spawn.run_claude, spawn.ensure_worktree, spawn.worker_registry; test_executor patch.object(executor, ...); test_daemon self.swap(executor, ...) and patches daemon.worker_registry). Never module-level test functions. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [
+    "T-1620"
+  ],
+  "acceptance": [
+    "tests/test_executor.py::test_claude_resume_plan_picks_newest_session_in_chain passes: for a chain fix -> F1 (claude, session S2, worktree W1) -> H (claude, session S1) it returns mode 'session' with session_id S2, owner F1, account and worktree of F1; it returns fresh with reason no_fix_round_for, no_session, ancestor_merged, account_unavailable (no headroom), incompatible_worktree (worktree missing) and session_busy (live registry entry for the owner) in the matching fixtures",
+    "tests/test_daemon.py::test_fix_round_of_claude_parent_dispatches_session_resume passes: with a Claude parent (resume_plan fresh executor_not_codex) and a session plan, the dispatch sets the fix task's worktree and branch to the owner's, calls the session worker with a resume_prompt that starts with 'Resumed session for fix round' and contains the _fix_round_delta text, and merges pipeline.resume mode 'session' into the existing pipeline; with a fresh plan it calls _dispatch_fresh_fix as today and records mode 'fresh' with the plan's reason; a Codex parent still takes the reply path",
+    "tests/test_spawn.py::test_session_resume_run_uses_delta_prompt_and_owner_worktree passes: run_worker(session_resume=True) passes `--resume S` and the resume prompt (no rendered packet) with the fix tier's model and TOOLS['execute'], does not call ensure_worktree, claims the fix task against the owner worktree, takes pool.reserve, logs exactly one run row, and after a run that moved HEAD points ref task/<fix id> at it and records that branch; a failed resumed run still reaches the B4b derivation",
+    "tests/test_spawn.py::test_session_missing_falls_back_to_fresh_once passes: when the session attempt fails with reason containing 'No conversation found', the reserve is released, the fix worktree and branch are reset, notify is called, run_worker runs once more with the rendered packet and ensure_worktree for the fix id, and pipeline.resume is mode 'fresh' reason 'session_missing'; a successful result whose output text contains 'session not found' triggers no retry; a second missing-session failure does not loop"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_executor.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1621",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "Spec calls pool.claude_has_headroom(owner account), but Pool.claude_has_headroom() takes no argument and returns `self.pick('execute') is not None`. It is a global check and says nothing about the owner's account. The account_unavailable test would pass while an exhausted or cooling owner account is still chosen, and `claude --resume` only works on that account. The spec forbids editing pool.py ('use existing accessors'), so it needs a per-account check from existing accessors (e.g. the account's cooldown/window fields), or the criterion must be reworded to the global semantics.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Spec says fresh mode calls _dispatch_fresh_fix 'as today'. In the dispatch tick the fresh path is not _dispatch_fresh_fix. The tick records pipeline.resume fresh, keeps the task's worktree, and falls through to the inline spawn.packet/render/_dispatch_worker code. _dispatch_fresh_fix is only used for the compat_changed fallback after a Codex reply. The acceptance test 'with a fresh plan it calls _dispatch_fresh_fix' therefore conflicts with the real flow. Either change the fall-through (a behaviour change to existing Codex-parent and fresh tests) or fix the criterion to say the existing fall-through is kept and mode 'fresh' is recorded with the plan's reason.",
+        "severity": "high",
+        "line": 976
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "A new _dispatch_session_worker bypasses _dispatch_worker, which handles epoch checks (worker_control.launch_epoch/is_current), render_error holds, the dispatch_error pipeline note, and posting done/failed/held results. The spec does not say who posts the result or handles exceptions. Without that, a crashing or held session run leaves the fix task running with no result. It should reuse the same epoch guards and result posting as _dispatch_reply_worker/_dispatch_worker, and an acceptance test should cover it.",
+        "severity": "high",
+        "line": 671
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The post-run ref update `branch -f task/<fix>` to the worktree HEAD happens while the owner's branch is checked out in that worktree, so the owner's branch also advances. The owner (F1 or H) may be in review or already approved, so its reviewed diff changes after the fact, and the same commits are counted under two branches. The spec does not say what happens to the owner's branch or to a review in flight. It should either have the session worker create and check out task/<fix id> in the owner worktree before running, or state that mutating the owner branch is acceptable and guard on the owner not being in review or merge. It also needs a failure path for the ref update (git error, no commits) rather than a silent skip.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "Concurrency and ownership gaps in claude_resume_plan. session_busy only checks worker_registry for the owner id. Two sibling fix rounds off the same owner, or a reviewer/merge touching the owner worktree, are not excluded. Both would resume the same session in the same cwd. ancestor_merged only checks the owner's merged_into, not whether the worktree was cleaned up after a merge of a descendant, nor whether a busy sibling fix task has claimed that worktree. Add a check that no other running task has this worktree.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Replace claude_has_headroom(owner account) with a per-account check built from existing pool.py accessors (account cooldown/window/budget fields), or explicitly accept global headroom and say so; reword the account_unavailable acceptance to match.",
+      "Correct the daemon description: the fresh path is the existing inline packet/render/_dispatch_worker fall-through in the dispatch tick, with pipeline.resume mode 'fresh' and the plan's reason merged in. Update the acceptance for a fresh plan to assert that, not _dispatch_fresh_fix.",
+      "State how _dispatch_session_worker handles launch_epoch/is_current, result posting (done/failed/held), and exceptions, mirroring _dispatch_reply_worker/_dispatch_worker, and add an acceptance test for the failed and exception paths.",
+      "Decide the branch strategy explicitly: check out a new task/<fix id> branch from owner HEAD in the owner worktree before the run (so the owner branch is untouched), rather than moving a ref after the fact. Add a failure path if the ref update fails.",
+      "Add a plan check that no other running task holds the owner worktree (sibling fix rounds), with an acceptance case.",
+      "Capture the real CLI missing-session error text from a live run (recording it in the spec) and gate the fallback retry on the worktree HEAD being unchanged. Define the single-retry mechanism (a parameter, not recursion) and the exact undo of reserve, claim, executor and account writes, with a test asserting balanced reserve and release.",
+      "Name the exact seam or symbol for the B4b derivation assertion in the failed-resumed-run test."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6897,
+      "trimmed": {
+        "risks": 3
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791025580.924546,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10837,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791025580.946579,
+      "packet_meta": {
+        "chars": 10098,
+        "est_tokens": 2524,
+        "presented_tokens": 2524,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7067bcf2f15320136db589d54448719cf99732c9940316bae56632a2b0865fce"
+          },
+          "spec": {
+            "chars": 7333,
+            "est_tokens": 1833,
+            "sha256": "49f842e4375456b4fbeb11e564c6366bf2f93f239f5238cbb23e7aac49c39817"
+          },
+          "acceptance": {
+            "chars": 2111,
+            "est_tokens": 527,
+            "sha256": "945c1b75e16f2b332252ff3a37b904f7c4d564875dfd7d2040e2ddce0488a631"
+          },
+          "scope": {
+            "chars": 155,
+            "est_tokens": 38,
+            "sha256": "d8e34f5b1b8f6e5cf8c5fb83106d125c834c087bc57b0c8e95aace28b462eab1"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 379,
+            "est_tokens": 94,
+            "sha256": "5386907e1b6f5e2b6c3166e97d83cff4363bfe30e80f42a72f9f5d0889b1adab"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "a05ce009f873",
+        "version": "a05ce009f873",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1620 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10837,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791025582.730933,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1621",
+      "claimed_at": 1791025582.730456
+    },
+    {
+      "ts": 1791025582.732865,
+      "account": "A"
+    },
+    {
+      "ts": 1791025590.086123,
+      "pid": 48501,
+      "account": "A"
+    },
+    {
+      "ts": 1791025626.9231648,
+      "packet_meta": {
+        "chars": 10098,
+        "est_tokens": 2524,
+        "presented_tokens": 2524,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7067bcf2f15320136db589d54448719cf99732c9940316bae56632a2b0865fce"
+          },
+          "spec": {
+            "chars": 7333,
+            "est_tokens": 1833,
+            "sha256": "49f842e4375456b4fbeb11e564c6366bf2f93f239f5238cbb23e7aac49c39817"
+          },
+          "acceptance": {
+            "chars": 2111,
+            "est_tokens": 527,
+            "sha256": "945c1b75e16f2b332252ff3a37b904f7c4d564875dfd7d2040e2ddce0488a631"
+          },
+          "scope": {
+            "chars": 155,
+            "est_tokens": 38,
+            "sha256": "d8e34f5b1b8f6e5cf8c5fb83106d125c834c087bc57b0c8e95aace28b462eab1"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 379,
+            "est_tokens": 94,
+            "sha256": "5386907e1b6f5e2b6c3166e97d83cff4363bfe30e80f42a72f9f5d0889b1adab"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "a05ce009f873",
+        "version": "a05ce009f873",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1620 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10837,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "1a4f98e6-ff3f-46cc-acfd-2b9152f087cf"
+      }
+    },
+    {
+      "ts": 1791025626.9573078,
+      "packet_meta": {
+        "chars": 10098,
+        "est_tokens": 2524,
+        "presented_tokens": 2524,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7067bcf2f15320136db589d54448719cf99732c9940316bae56632a2b0865fce"
+          },
+          "spec": {
+            "chars": 7333,
+            "est_tokens": 1833,
+            "sha256": "49f842e4375456b4fbeb11e564c6366bf2f93f239f5238cbb23e7aac49c39817"
+          },
+          "acceptance": {
+            "chars": 2111,
+            "est_tokens": 527,
+            "sha256": "945c1b75e16f2b332252ff3a37b904f7c4d564875dfd7d2040e2ddce0488a631"
+          },
+          "scope": {
+            "chars": 155,
+            "est_tokens": 38,
+            "sha256": "d8e34f5b1b8f6e5cf8c5fb83106d125c834c087bc57b0c8e95aace28b462eab1"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 379,
+            "est_tokens": 94,
+            "sha256": "5386907e1b6f5e2b6c3166e97d83cff4363bfe30e80f42a72f9f5d0889b1adab"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "a05ce009f873",
+        "version": "a05ce009f873",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1620 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10837,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "1a4f98e6-ff3f-46cc-acfd-2b9152f087cf",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791025628.122365,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Spec calls pool.claude_has_headroom(owner account), but Pool.claude_has_headroom() takes no argument and returns `self.pick('execute') is not None`. It is a global check and says nothing about the owner's account. The account_unavailable test would pass while an exhausted or cooling owner account is still chosen, and `claude --resume` only works on that account. The spec forbids editing pool.py ('use existing accessors'), so it needs a per-account check from existing accessors (e.g. the account's cooldown/window fields), or the criterion must be reworded to the global semantics.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Spec says fresh mode calls _dispatch_fresh_fix 'as today'. In the dispatch tick the fresh path is not _dispatch_fresh_fix. The tick records pipeline.resume fresh, keeps the task's worktree, and falls through to the inline spawn.packet/render/_dispatch_worker code. _dispatch_fresh_fix is only used for the compat_changed fallback after a Codex reply. The acceptance test 'with a fresh plan it calls _dispatch_fresh_fix' therefore conflicts with the real flow. Either change the fall-through (a behaviour change to existing Codex-parent and fresh tests) or fix the criterion to say the existing fall-through is kept and mode 'fresh' is recorded with the plan's reason.",
+            "severity": "high",
+            "line": 976
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "A new _dispatch_session_worker bypasses _dispatch_worker, which handles epoch checks (worker_control.launch_epoch/is_current), render_error holds, the dispatch_error pipeline note, and posting done/failed/held results. The spec does not say who posts the result or handles exceptions. Without that, a crashing or held session run leaves the fix task running with no result. It should reuse the same epoch guards and result posting as _dispatch_reply_worker/_dispatch_worker, and an acceptance test should cover it.",
+            "severity": "high",
+            "line": 671
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The post-run ref update `branch -f task/<fix>` to the worktree HEAD happens while the owner's branch is checked out in that worktree, so the owner's branch also advances. The owner (F1 or H) may be in review or already approved, so its reviewed diff changes after the fact, and the same commits are counted under two branches. The spec does not say what happens to the owner's branch or to a review in flight. It should either have the session worker create and check out task/<fix id> in the owner worktree before running, or state that mutating the owner branch is acceptable and guard on the owner not being in review or merge. It also needs a failure path for the ref update (git error, no commits) rather than a silent skip.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Concurrency and ownership gaps in claude_resume_plan. session_busy only checks worker_registry for the owner id. Two sibling fix rounds off the same owner, or a reviewer/merge touching the owner worktree, are not excluded. Both would resume the same session in the same cwd. ancestor_merged only checks the owner's merged_into, not whether the worktree was cleaned up after a merge of a descendant, nor whether a busy sibling fix task has claimed that worktree. Add a check that no other running task has this worktree.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Replace claude_has_headroom(owner account) with a per-account check built from existing pool.py accessors (account cooldown/window/budget fields), or explicitly accept global headroom and say so; reword the account_unavailable acceptance to match.",
+          "Correct the daemon description: the fresh path is the existing inline packet/render/_dispatch_worker fall-through in the dispatch tick, with pipeline.resume mode 'fresh' and the plan's reason merged in. Update the acceptance for a fresh plan to assert that, not _dispatch_fresh_fix.",
+          "State how _dispatch_session_worker handles launch_epoch/is_current, result posting (done/failed/held), and exceptions, mirroring _dispatch_reply_worker/_dispatch_worker, and add an acceptance test for the failed and exception paths.",
+          "Decide the branch strategy explicitly: check out a new task/<fix id> branch from owner HEAD in the owner worktree before the run (so the owner branch is untouched), rather than moving a ref after the fact. Add a failure path if the ref update fails.",
+          "Add a plan check that no other running task holds the owner worktree (sibling fix rounds), with an acceptance case.",
+          "Capture the real CLI missing-session error text from a live run (recording it in the spec) and gate the fallback retry on the worktree HEAD being unchanged. Define the single-retry mechanism (a parameter, not recursion) and the exact undo of reserve, claim, executor and account writes, with a test asserting balanced reserve and release.",
+          "Name the exact seam or symbol for the B4b derivation assertion in the failed-resumed-run test."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6897,
+          "trimmed": {
+            "risks": 3
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791025628.1243362,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Spec calls pool.claude_has_headroom(owner account), but Pool.claude_has_headroom() takes no argument and returns `self.pick('execute') is not None`. It is a global check and says nothing about the owner's account. The account_unavailable test would pass while an exhausted or cooling owner account is still chosen, and `claude --resume` only works on that account. The spec forbids editing pool.py ('use existing accessors'), so it needs a per-account check from existing accessors (e.g. the account's cooldown/window fields), or the criterion must be reworded to the global semantics.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec says fresh mode calls _dispatch_fresh_fix 'as today'. In the dispatch tick the fresh path is not _dispatch_fresh_fix. The tick records pipeline.resume fresh, keeps the task's worktree, and falls through to the inline spawn.packet/render/_dispatch_worker code. _dispatch_fresh_fix is only used for the compat_changed fallback after a Codex reply. The acceptance test 'with a fresh plan it calls _dispatch_fresh_fix' therefore conflicts with the real flow. Either change the fall-through (a behaviour change to existing Codex-parent and fresh tests) or fix the criterion to say the existing fall-through is kept and mode 'fresh' is recorded with the plan's reason.",
+          "severity": "high",
+          "line": 976
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "A new _dispatch_session_worker bypasses _dispatch_worker, which handles epoch checks (worker_control.launch_epoch/is_current), render_error holds, the dispatch_error pipeline note, and posting done/failed/held results. The spec does not say who posts the result or handles exceptions. Without that, a crashing or held session run leaves the fix task running with no result. It should reuse the same epoch guards and result posting as _dispatch_reply_worker/_dispatch_worker, and an acceptance test should cover it.",
+          "severity": "high",
+          "line": 671
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The post-run ref update `branch -f task/<fix>` to the worktree HEAD happens while the owner's branch is checked out in that worktree, so the owner's branch also advances. The owner (F1 or H) may be in review or already approved, so its reviewed diff changes after the fact, and the same commits are counted under two branches. The spec does not say what happens to the owner's branch or to a review in flight. It should either have the session worker create and check out task/<fix id> in the owner worktree before running, or state that mutating the owner branch is acceptable and guard on the owner not being in review or merge. It also needs a failure path for the ref update (git error, no commits) rather than a silent skip.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Concurrency and ownership gaps in claude_resume_plan. session_busy only checks worker_registry for the owner id. Two sibling fix rounds off the same owner, or a reviewer/merge touching the owner worktree, are not excluded. Both would resume the same session in the same cwd. ancestor_merged only checks the owner's merged_into, not whether the worktree was cleaned up after a merge of a descendant, nor whether a busy sibling fix task has claimed that worktree. Add a check that no other running task has this worktree.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The session-missing detection depends on unverified CLI wording (scout confidence 0.5), and 'session' + 'not found' also matches unrelated error reasons. The reason embeds result[:500], which can include model-authored text from an error-exit result. A false positive resets the worktree and re-runs the task fresh after the first run may have already made commits. A false negative leaves a failed fix with no fallback. The spec should capture the real CLI error text from a live run before fixing the match strings, and make the retry conditional on the worktree HEAD being unmoved. Resetting the fix's worktree to None also discards the owner worktree link without checking nothing was committed.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Restructuring run_worker to re-enter the fresh path 'from the top once' risks double side effects: a second pool.reserve, a second bus.claim on a task already claimed to 'claude:<acct>', duplicate executor and account writes, and a second log_run row. Only the release of the first reserve is specified, so the claim state, the epoch, and usage double counting are not. Specify a single retry guard parameter (not a loop), and an explicit release and unclaim before re-entry. The test should assert reserve and release counts balance.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "issue": "Acceptance test 'a failed resumed run still reaches the B4b derivation' and 'logs exactly one run row' are checkable only if the harness exposes those seams. B4b derivation is guarded by resume_task is None, but nothing in the spec says which symbol to assert on. Name the derivation function to patch or assert, so the criterion is verifiable.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 10098,
+    "est_tokens": 2524,
+    "presented_tokens": 2524,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "7067bcf2f15320136db589d54448719cf99732c9940316bae56632a2b0865fce"
+      },
+      "spec": {
+        "chars": 7333,
+        "est_tokens": 1833,
+        "sha256": "49f842e4375456b4fbeb11e564c6366bf2f93f239f5238cbb23e7aac49c39817"
+      },
+      "acceptance": {
+        "chars": 2111,
+        "est_tokens": 527,
+        "sha256": "945c1b75e16f2b332252ff3a37b904f7c4d564875dfd7d2040e2ddce0488a631"
+      },
+      "scope": {
+        "chars": 155,
+        "est_tokens": 38,
+        "sha256": "d8e34f5b1b8f6e5cf8c5fb83106d125c834c087bc57b0c8e95aace28b462eab1"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 379,
+        "est_tokens": 94,
+        "sha256": "5386907e1b6f5e2b6c3166e97d83cff4363bfe30e80f42a72f9f5d0889b1adab"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "a05ce009f873",
+    "version": "a05ce009f873",
+    "candidate_known": false,
+    "base": "884f2d03c34e",
+    "sources": "task@T-1620 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 10837,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "1a4f98e6-ff3f-46cc-acfd-2b9152f087cf",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791025582.730456,
+  "account": "A",
+  "pid": 48501,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Spec calls pool.claude_has_headroom(owner account), but Pool.claude_has_headroom() takes no argument and returns `self.pick('execute') is not None`. It is a global check and says nothing about the owner's account. The account_unavailable test would pass while an exhausted or cooling owner account is still chosen, and `claude --resume` only works on that account. The spec forbids editing pool.py ('use existing accessors'), so it needs a per-account check from existing accessors (e.g. the account's cooldown/window fields), or the criterion must be reworded to the global semantics.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec says fresh mode calls _dispatch_fresh_fix 'as today'. In the dispatch tick the fresh path is not _dispatch_fresh_fix. The tick records pipeline.resume fresh, keeps the task's worktree, and falls through to the inline spawn.packet/render/_dispatch_worker code. _dispatch_fresh_fix is only used for the compat_changed fallback after a Codex reply. The acceptance test 'with a fresh plan it calls _dispatch_fresh_fix' therefore conflicts with the real flow. Either change the fall-through (a behaviour change to existing Codex-parent and fresh tests) or fix the criterion to say the existing fall-through is kept and mode 'fresh' is recorded with the plan's reason.",
+      "severity": "high",
+      "line": 976
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "A new _dispatch_session_worker bypasses _dispatch_worker, which handles epoch checks (worker_control.launch_epoch/is_current), render_error holds, the dispatch_error pipeline note, and posting done/failed/held results. The spec does not say who posts the result or handles exceptions. Without that, a crashing or held session run leaves the fix task running with no result. It should reuse the same epoch guards and result posting as _dispatch_reply_worker/_dispatch_worker, and an acceptance test should cover it.",
+      "severity": "high",
+      "line": 671
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The post-run ref update `branch -f task/<fix>` to the worktree HEAD happens while the owner's branch is checked out in that worktree, so the owner's branch also advances. The owner (F1 or H) may be in review or already approved, so its reviewed diff changes after the fact, and the same commits are counted under two branches. The spec does not say what happens to the owner's branch or to a review in flight. It should either have the session worker create and check out task/<fix id> in the owner worktree before running, or state that mutating the owner branch is acceptable and guard on the owner not being in review or merge. It also needs a failure path for the ref update (git error, no commits) rather than a silent skip.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Concurrency and ownership gaps in claude_resume_plan. session_busy only checks worker_registry for the owner id. Two sibling fix rounds off the same owner, or a reviewer/merge touching the owner worktree, are not excluded. Both would resume the same session in the same cwd. ancestor_merged only checks the owner's merged_into, not whether the worktree was cleaned up after a merge of a descendant, nor whether a busy sibling fix task has claimed that worktree. Add a check that no other running task has this worktree.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The session-missing detection depends on unverified CLI wording (scout confidence 0.5), and 'session' + 'not found' also matches unrelated error reasons. The reason embeds result[:500], which can include model-authored text from an error-exit result. A false positive resets the worktree and re-runs the task fresh after the first run may have already made commits. A false negative leaves a failed fix with no fallback. The spec should capture the real CLI error text from a live run before fixing the match strings, and make the retry conditional on the worktree HEAD being unmoved. Resetting the fix's worktree to None also discards the owner worktree link without checking nothing was committed.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Restructuring run_worker to re-enter the fresh path 'from the top once' risks double side effects: a second pool.reserve, a second bus.claim on a task already claimed to 'claude:<acct>', duplicate executor and account writes, and a second log_run row. Only the release of the first reserve is specified, so the claim state, the epoch, and usage double counting are not. Specify a single retry guard parameter (not a loop), and an explicit release and unclaim before re-entry. The test should assert reserve and release counts balance.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "issue": "Acceptance test 'a failed resumed run still reaches the B4b derivation' and 'logs exactly one run row' are checkable only if the harness exposes those seams. B4b derivation is guarded by resume_task is None, but nothing in the spec says which symbol to assert on. Name the derivation function to patch or assert, so the criterion is verifiable.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}
