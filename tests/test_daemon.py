@@ -356,6 +356,69 @@ class Daemon(unittest.TestCase):
         return [entry["task"] for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
                 if entry["action"] == "dispatched"]
 
+    def stamped_task(self, title, path, age, **fields):
+        now = time.time()
+        pipeline = {"dispatched_at": now - age, "dispatched_at_lease": now - age + 900,
+                    "dispatched_at_done": now - age + 1}
+        return self.scheduler_task(title, path, parent=None, pipeline=pipeline, **fields)
+
+    def test_stale_dispatch_stamp_cleared_after_grace(self):
+        pool = self.scheduler_pool("off", slots=1)
+        fresh = self.stamped_task("worker died just now", "fresh/a.py", 30)
+        dead = self.stamped_task("worker died at restart", "dead/a.py", 200)
+        launched = []
+        with mock.patch.object(daemon.worker_registry, "get", return_value=None), \
+                mock.patch.object(daemon, "spawn_async", side_effect=lambda fn, tid, *a: launched.append(tid)):
+            daemon.dispatch(pool)
+        self.assertEqual(launched, [dead])
+        self.assertEqual(self.scheduler_dispatched(), [dead])
+        self.assertIn("stale dispatch stamp cleared (worker gone)",
+                      [e.get("reason") for e in bus.get(dead)["events"]])
+        self.assertEqual(bus.get(fresh)["pipeline"]["dispatched_at_done"],
+                         bus.get(fresh)["pipeline"]["dispatched_at"] + 1)
+        pool.cfg["dispatch"] = {"stale_stamp_grace_s": 10}
+        with mock.patch.object(daemon.worker_registry, "get", return_value=None):
+            self.assertEqual(daemon.clear_stale_dispatch_stamps(pool), [fresh])
+        self.assertNotIn("dispatched_at", bus.get(fresh)["pipeline"])
+        for tid in (fresh, dead):
+            bus.update(tid, status="done")
+
+    def test_live_worker_stamp_kept(self):
+        pool = self.scheduler_pool("off", slots=0)
+        own_pid = self.stamped_task("pid alive", "live/a.py", 600, pid=os.getpid())
+        registered = self.stamped_task("registry pid alive", "live/b.py", 600)
+        starting = self.stamped_task("registry starting", "live/c.py", 600)
+        in_process = self.stamped_task("dispatch thread", "live/d.py", 600)
+        running = self.stamped_task("running", "live/e.py", 600, status="running")
+        held = self.stamped_task("held", "live/f.py", 600, status="held", hold_reason="budget")
+        docs = {registered: {"status": "running", "pid": os.getpid()},
+                starting: {"status": "starting"}}
+        before = {tid: dict(bus.get(tid)["pipeline"])
+                  for tid in (own_pid, registered, starting, in_process, running, held)}
+        daemon._LIVE_DISPATCH[in_process] = 1
+        try:
+            with mock.patch.object(daemon.worker_registry, "get", side_effect=lambda tid: docs.get(tid)):
+                self.assertEqual(daemon.clear_stale_dispatch_stamps(pool), [])
+                daemon.dispatch(pool)
+        finally:
+            daemon._LIVE_DISPATCH.pop(in_process, None)
+        for tid, pipeline in before.items():
+            self.assertEqual(bus.get(tid)["pipeline"], pipeline, tid)
+            bus.update(tid, status="done")
+
+    def test_skip_reason_names_stale_stamp(self):
+        pool = self.scheduler_pool("off", slots=0)
+        dead = self.stamped_task("worker gone, in grace", "skip/a.py", 30)
+        live = self.stamped_task("worker alive", "skip/b.py", 30, pid=os.getpid())
+        with mock.patch.object(daemon.worker_registry, "get", return_value=None):
+            daemon.dispatch(pool)
+        entries = {e["task"]: e for e in daemon.schedlog.read("dispatch")[-1]["considered"]}
+        self.assertEqual(entries[dead]["reason"], "stale_dispatch_stamp")
+        self.assertEqual(entries[live]["reason"], "other")
+        self.assertIn("dispatched_at", bus.get(dead)["pipeline"])
+        for tid in (dead, live):
+            bus.update(tid, status="done")
+
     def test_candidate_order_keeps_queued_before_budget_retries(self):
         for mode in ("off", "shadow"):
             for slots in (1, 2):
