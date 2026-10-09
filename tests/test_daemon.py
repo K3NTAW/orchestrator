@@ -6,7 +6,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
 import io
-import http.server, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest
+import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
@@ -1667,13 +1667,6 @@ class Daemon(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.sandbox, True)
         P.PERSIST.unlink(missing_ok=True)                 # a cooldown another test persisted would zero free_slots
         self.addCleanup(P.PERSIST.unlink, True)
-        # The live pool.toml disabled every Codex row on 2026-10-03 and _harness drops the Claude rows, which leaves
-        # no enabled executor and forces fallback mode. These tests assume Codex dispatch, so revert that switch here.
-        cfg = Path(tempfile.mkdtemp(prefix="orch-daemon-cfg-")) / "pool.toml"
-        self.addCleanup(shutil.rmtree, cfg.parent, True)
-        cfg.write_text(re.sub(r"(?m)^enabled = false(\s+# 2026-10-03 human: executors switched)", r"enabled = true\1",
-                              P.CFG.read_text()))
-        self.swap(P, "CFG", cfg)
         self.started, self.workers, self.merged = [], [], []
         # Keep daemon work inside the test that dispatched it.  A real daemon thread can outlive cleanup,
         # after which the restored executor mock and the next test's bus sandbox make it post into the wrong bus.

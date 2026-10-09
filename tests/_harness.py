@@ -4,6 +4,16 @@ module does that at import time — every test file imports it first."""
 import json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
+# The launchd default soft limit is 256 open files and the gate-timeout tests open more.
+try:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 8192 if hard == resource.RLIM_INFINITY else min(8192, hard)
+    if soft < want:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+except (ValueError, OSError):
+    pass
+
 REPO = Path(__file__).resolve().parents[1]
 TMP = Path(tempfile.mkdtemp(prefix="orch-"))
 os.environ["ORCH_ROOT"] = str(TMP)
@@ -20,6 +30,10 @@ for f in ("pool.toml",):
             # Live routed Claude rows are an operator setting; tests that need one build it.
             sections[index] = ""
             continue
+        if section.startswith("[[executors]]"):
+            # The 2026-10-03 Codex disable is an operator setting; tests assume the Codex baseline.
+            section = re.sub(r"(?m)^enabled = false(\s+# 2026-10-03 human: executors switched)", r"enabled = true\1",
+                             section)
         if section.splitlines()[:1] == ["[planner]"]:
             section = re.sub(r"(?m)^([ \t]*autonomous[ \t]*=[ \t]*).*$", r"\1false", section)
         if section.splitlines()[:1] == ["[ship]"]:
