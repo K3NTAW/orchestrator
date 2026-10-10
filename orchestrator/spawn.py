@@ -4,16 +4,20 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import claude_cli, contracts, worker_registry, env_policy, worker_control
+from . import claude_cli, contracts, worker_registry, env_policy, worker_control, gitutil
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
+from .scopes import effective_scope
 
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _INSTRUCTION_RENDER_META = OrderedDict()
 NEEDS_TOOL_PREFIX = "needs_tool:"
+
+execute_outcome = gitutil.execute_outcome
+head_sha = gitutil.head_sha
 
 _SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
 _SKILL_PRESENTATION_CAP = 2400
@@ -274,7 +278,7 @@ def branch_exists(name):
     return git("rev-parse", "--verify", name, check=False).returncode == 0
 
 
-def base_for(task):
+def base_choice(task):
     """Pick the base branch for a new worktree. review tasks whose inputs[0] is a task id: base on that task's
     own branch so the reviewer sees the code under review, not a worktree cut from origin/main before the
     reviewed task (or its dependency, B1-style) ever landed (review T-0026). Fall back to the reviewed task's
@@ -286,6 +290,7 @@ def base_for(task):
     cuts from that task's own task/<id> branch when it still exists, so the fix round starts on the code it is
     fixing rather than the goal branch the original may have already been merged past (gotchas.md 2026-09-19)."""
     role, parent = task["role"], task.get("parent")
+    chain = []
     if role == "review" and task.get("inputs") and isinstance(task["inputs"][0], str):
         try:
             src = bus.get(task["inputs"][0])
@@ -294,16 +299,33 @@ def base_for(task):
         if src is not None:
             branch = f"task/{task['inputs'][0]}"
             if branch_exists(branch):
-                return branch
+                return {"base": branch, "via": "fix_chain", "chain": [task["inputs"][0]]}
             src_parent = src.get("parent")
             if src_parent and branch_exists(f"goal/{src_parent}"):
-                return f"goal/{src_parent}"
-    elif role == "execute" and (task.get("constraints") or {}).get("fix_round_for") and \
-            branch_exists(f"task/{task['constraints']['fix_round_for']}"):
-        return f"task/{task['constraints']['fix_round_for']}"
-    elif role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
-        return f"goal/{parent}"
-    return "origin/main"
+                return {"base": f"goal/{src_parent}", "via": "goal", "chain": [task["inputs"][0]]}
+    elif role == "execute":
+        current_id = (task.get("constraints") or {}).get("fix_round_for")
+        seen = set()
+        for _ in range(20):
+            if not isinstance(current_id, str) or current_id in seen:
+                break
+            seen.add(current_id)
+            chain.append(current_id)
+            try:
+                src = bus.get(current_id)
+            except KeyError:
+                break
+            branch = f"task/{current_id}"
+            if branch_exists(branch):
+                return {"base": branch, "via": "fix_chain", "chain": chain}
+            current_id = (src.get("constraints") or {}).get("fix_round_for")
+    if role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
+        return {"base": f"goal/{parent}", "via": "goal", "chain": chain}
+    return {"base": "origin/main", "via": "trunk", "chain": chain}
+
+
+def base_for(task):
+    return base_choice(task)["base"]
 
 
 def ensure_worktree(task_id, base=None):
@@ -318,8 +340,10 @@ def ensure_worktree(task_id, base=None):
     if not wt.exists():
         wt.parent.mkdir(exist_ok=True)
         git("fetch", "origin", check=False)
+        choice = None
         if base is None:
-            base = base_for(bus.get(task_id))
+            choice = base_choice(bus.get(task_id))
+            base = choice["base"]
         if git("rev-parse", "--verify", base, check=False).returncode:
             base = "HEAD"  # no remote yet
         branch = f"task/{task_id}"
@@ -327,6 +351,16 @@ def ensure_worktree(task_id, base=None):
             git("worktree", "add", str(wt), branch)
         else:
             git("worktree", "add", str(wt), "-b", branch, base)
+        if choice is None:
+            choice = {"base": base, "via": "trunk", "chain": []}
+        try:
+            with bus.locked():
+                task = bus.get(task_id)
+                pipeline = dict(task.get("pipeline") or {})
+                pipeline["worktree_base"] = choice
+                bus.update(task_id, pipeline=pipeline)
+        except KeyError:
+            pass
     return wt
 
 
@@ -670,7 +704,8 @@ def _memory_tokens(sections):
 
 def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
-    from .steering_policy import read_scope as derive_read_scope, safe_scope
+    from .scopes import safe_scope
+    from .steering_policy import read_scope as derive_read_scope
     wt = Path(worktree)
     cfg = Pool().cfg if cfg is None else cfg
     scope = safe_scope(task, worktree)
@@ -1071,7 +1106,9 @@ def _section(name, value):
 
 def _base_sha(task, worktree=None):
     wt = Path(worktree or task.get("worktree") or ROOT)
-    return git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()[:12] or "(unavailable)"
+    base = scoped_diff_base(task)
+    result = git("merge-base", base, "HEAD", cwd=wt, check=False)
+    return result.stdout.strip()[:12] or "(unavailable)"
 
 
 def _acceptance_test_ids(acceptance):
@@ -1085,10 +1122,13 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
+    scope = effective_scope(src)
+    head = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()[:12] or "(unavailable)"
+    branch = src.get("branch") or f"task/{src.get('id', '(none)')}"
     lineage_range = None
     if task.get("lineage"):
         # Stamped by daemon._open_reviews; never recomputed here.
-        base, head = task.get("review_base"), task.get("reviewed_sha") or "HEAD"
+        base, lineage_head = task.get("review_base"), task.get("reviewed_sha") or "HEAD"
         label = "lineage unresolved; reviewing the whole branch" if task.get("lineage_unresolved") or not base else None
         paths = None
         if not label:
@@ -1096,13 +1136,14 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
                 paths = lineage_paths(fix_chain(src))
             except LookupError:
                 label = "lineage unresolved; reviewing the whole branch"
-        lineage_range = f"{base}..{head}" if base else f"origin/main...{head}"
+        lineage_range = f"{base}..{lineage_head}" if base else f"origin/main...{lineage_head}"
         raw_diff = git("diff", "-U3", "--no-renames", lineage_range, "--", *(paths or []),
                        cwd=wt, check=False).stdout or "(empty diff)"
         hint = f"git -C {wt} diff {lineage_range}"
     else:
         raw_diff = scoped_diff(src)
-        hint = f"git -C {wt} diff -- {' '.join(src.get('scope', []))}"
+        base = scoped_diff_base(src)
+        hint = f"git -C {wt} diff -U3 {base}...HEAD -- {' '.join(scope)}"
     changed = sorted(set(re.findall(r"^[+\-]{3} [ab]/(tests/\S+)", raw_diff, re.M)))
     tests = [f"{path}: present" for path in changed]
     for test_id in _acceptance_test_ids(src.get("acceptance", [])):
@@ -1121,8 +1162,9 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
         gate_lines.append("last_failure_head: " + str(failure).splitlines()[0][:500])
     sections = ([_section("skills", skills["section"].removeprefix("## skills\n"))]
                 if skills and skills.get("section") else []) + [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
-                _section("scope", src.get("scope", [])), None,
-                _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
+                _section("scope", scope), None,
+                _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines),
+                _section("review branch", f"{branch} @ {head}")]
     reviewer_role = (task.get("constraints") or {}).get("reviewer_role")
     role_focus = {
         "acceptance": ("Focus: every acceptance criterion met by the diff, functional correctness, regressions "
@@ -1178,14 +1220,14 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
     configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
-    diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
+    diff_budget = max(1, configured_cap)
     if lineage_range:
         lineage_text = lineage_diff_text(wt, lineage_range, paths, diff_budget)
         if label:
             lineage_text = label + "\n" + lineage_text
         sections[sections.index(None)] = _section("diff", "lineage (everything that will land): " + lineage_text)
-        round_diff = fix_round_diff(src, head)
-        round_hint = f"git -C {wt} diff {_fix_round_base(src)}...{head} -- {' '.join(src.get('scope', []))}"
+        round_diff = fix_round_diff(src, lineage_head)
+        round_hint = f"git -C {wt} diff {_fix_round_base(src)}...{lineage_head} -- {' '.join(src.get('scope', []))}"
         room = diff_budget - len(lineage_text)
         sections.append(_section("this round's change", round_diff if len(round_diff) <= room else
                                  f"(omitted, {len(round_diff)} chars over the packet budget; expand with: {round_hint})"))
@@ -1539,7 +1581,14 @@ def _account_from_assigned_to(assigned_to):
 
 
 def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None):
-    """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
+    """Run a worker and post its result.
+
+    An rc=143 non-JSON result may be a timeout, reaper kill, or external kill that
+    never went through cancel(). When enabled, clean commits since the claim may
+    therefore be posted as done; the relative count, tests gate, and derived
+    markers are the intentional backstops. The registry remains failed after a
+    derived write, and an unposted contract decision is accepted.
+    """
     pool = Pool(); t = dict(resume_task or bus.get(task_id)); role = t["role"]
     epoch = t.get("_launch_epoch", worker_control.launch_epoch(task_id))
     t["_launch_epoch"] = epoch
@@ -1564,6 +1613,11 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
         return {"status": "held"}
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
+    derive = pool.cfg.get("spawn", {}).get("derive_execute_result", False)
+    pre_head = None
+    goal_id = None
+    scope = None
+    wt = None
     if resume_task:
         prompt = resume_prompt
         t["_resume_session"] = session_id
@@ -1628,7 +1682,15 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
             pipeline.pop("dispatched_at", None)
             worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="queued", pipeline=pipeline)
             return {"status": "budget"}
-        bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
+        wt = Path(ensure_worktree(task_id))
+        bus.claim(task_id, f"claude:{acct.id}", str(wt))
+        if role == "execute" and derive:
+            goal_id = t.get("parent")
+            scope = effective_scope(t)
+            try:
+                pre_head = head_sha(wt)
+            except Exception:
+                pre_head = None
         worker_control.write_if_current(task_id, epoch, bus.update, task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = None
     release_usage = None
@@ -1737,11 +1799,84 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
         elif r["status"] == "held":
             worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
         else:
-            update_fields = {"status": "failed", "reason": r.get("reason", "unknown failure")}
-            result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
-            if isinstance(result, str):
-                update_fields["resume_hint"] = {"partial_output": result[:2000]}
-            worker_control.write_if_current(task_id, epoch, bus.update, task_id, **update_fields)
+            reason = r.get("reason", "unknown failure")
+            triggered = (role == "execute" and derive and resume_task is None
+                         and pre_head is not None and r.get("status") == "failed"
+                         and str(reason).startswith("non-JSON output")
+                         and not worker_control.cancel_or_steer_pending(task_id, epoch))
+            if triggered:
+                derived = False
+                try:
+                    outcome = execute_outcome(wt, goal_id, scope, since=pre_head)
+                    if outcome is None:
+                        posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
+                        if not posted:
+                            r = {"status": "superseded", "reason": reason}
+                        else:
+                            r = {"status": "failed", **{key: value for key, value in r.items() if key != "status"}, "reason": reason}
+                        derived = True
+                    elif outcome["ahead"] == 0:
+                        payload = {"hold_reason": "execute_incomplete: no commits",
+                                   "resume_hint": {"partial_output": reason,
+                                                   "dirty_in_scope": outcome["dirty_in_scope"],
+                                                   "dirty_out_of_scope": outcome["dirty_out_of_scope"],
+                                                   "head": outcome["head"]}}
+                        derived = worker_control.post_if_current(task_id, epoch, "held", payload)
+                        if derived:
+                            r = {"status": "held", "derived_from": "git_state", "reason": reason}
+                            bus.log_run(task=task_id, role="execute", outcome="execute_incomplete",
+                                        executor=t["executor"], tier=t["tier"], account=acct.id,
+                                        derived_from="git_state")
+                    elif outcome is not None and (outcome["dirty_in_scope"] or outcome["dirty_out_of_scope"]):
+                        payload = {"hold_reason": "execute_incomplete: uncommitted changes",
+                                   "resume_hint": {"partial_output": reason,
+                                                   "dirty_in_scope": outcome["dirty_in_scope"],
+                                                   "dirty_out_of_scope": outcome["dirty_out_of_scope"],
+                                                   "head": outcome["head"]}}
+                        derived = worker_control.post_if_current(task_id, epoch, "held", payload)
+                        if derived:
+                            r = {"status": "held", "derived_from": "git_state", "reason": reason}
+                            bus.log_run(task=task_id, role="execute", outcome="execute_incomplete",
+                                        executor=t["executor"], tier=t["tier"], account=acct.id,
+                                        derived_from="git_state")
+                    elif outcome is not None:
+                        candidate = {"summary": "derived from git state after " + str(reason)[:300],
+                                     "commit": outcome["head"], "executed_by": t["executor"],
+                                     "derived_from": "git_state",
+                                     "review": "derived from git state; other account, different model; label PR same-family-review"}
+                        fitted = fit_result(candidate)
+                        processed = dict(contracts.process(task_id, role, fitted, cfg=pool.cfg, session=None))
+                        processed.update({key: candidate[key] for key in ("commit", "derived_from", "executed_by", "review")})
+                        processed.setdefault("confidence", 0.0)
+                        processed.setdefault("provenance", ["repo"])
+                        if len(json.dumps(processed)) <= bus.MAX_RESULT_CHARS:
+                            derived = worker_control.post_if_current(task_id, epoch, "done", processed)
+                            if derived:
+                                r = {"status": "done", "derived_from": "git_state", "reason": reason}
+                                bus.log_run(task=task_id, role="execute", outcome="derived_done",
+                                            executor=t["executor"], tier=t["tier"], account=acct.id,
+                                            derived_from="git_state")
+                except Exception as exc:
+                    notify.notify(f"{task_id}: derivation failed: {exc}")
+                    reason = f"{reason} (derivation failed: {type(exc).__name__})"
+                if not derived:
+                    posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
+                    if not posted:
+                        r = {"status": "superseded", "reason": reason}
+                    else:
+                        r = {"status": "failed", **{key: value for key, value in r.items() if key != "status"}, "reason": reason}
+            elif (derive and role == "execute" and resume_task is None
+                  and r.get("status") == "failed" and str(reason).startswith("non-JSON output")):
+                reason = str(reason)
+                posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
+                if not posted:
+                    r = {"status": "superseded", "reason": reason}
+            else:
+                update_fields = {"status": "failed", "reason": reason}
+                result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
+                if isinstance(result, str):
+                    update_fields["resume_hint"] = {"partial_output": result[:2000]}
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, **update_fields)
     except Exception as e:
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
@@ -1769,14 +1904,18 @@ def code_excerpts(scope, base_dir, cap=12000):
     return "".join(out) or "(no matching files)"
 
 
+def scoped_diff_base(src):
+    parent = src.get("parent")
+    return f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+
+
 def scoped_diff(src):
     """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo. Diffs against the
     reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't
     include its predecessor's already-merged hunks."""
     wt = src.get("worktree") or ROOT
-    parent = src.get("parent")
-    base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
-    r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
+    base = scoped_diff_base(src)
+    r = git("diff", "-U3", f"{base}...HEAD", "--", *effective_scope(src), cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
 
 

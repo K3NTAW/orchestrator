@@ -34,6 +34,7 @@ _MCP = {
     "bus_post_result": ("post a worker result", "bus"),
     "bus_read": ("read tasks from the bus", "bus"),
     "bus_events": ("read bus events", "bus"),
+    "execute": ("dispatch an execute task to an executor row", "executor"),
     "codex": ("implement software tasks", "executor"),
     "codex_reply": ("continue a Codex fix loop", "executor"),
     "spawn_scout": ("start a research worker", "search"),

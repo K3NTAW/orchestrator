@@ -25,6 +25,32 @@ def _user(ts):
 
 
 class PoolSel(unittest.TestCase):
+    def test_row_covers_and_claude_has_headroom_extracted(self):
+        pool = self.p
+        sonnet = P.Executor("claude:sonnet", "claude", "sonnet", ["execute"], complexity_max=5)
+        opus = P.Executor("claude:opus", "claude", "opus", ["execute"], complexity_min=6)
+        pool.executors = {row.id: row for row in (sonnet, opus)}
+        pool._claude_split = 6
+        with mock.patch.object(pool, "pick", return_value=object()) as pick:
+            self.assertTrue(pool.claude_has_headroom())
+            pick.assert_called_once_with("execute")
+            for complexity in range(1, 11):
+                expected = sonnet if complexity <= 6 else opus
+                self.assertEqual([row for row in (sonnet, opus) if pool.row_covers(row, complexity)],
+                                 [expected])
+                self.assertEqual(pool.eligible_executors("execute", complexity), [expected])
+            opus.enabled = False
+            self.assertFalse(pool.row_covers(sonnet, 6))
+            pool.executors = {sonnet.id: sonnet}
+            for complexity in range(1, 11):
+                covers = complexity <= 5
+                self.assertEqual(pool.row_covers(sonnet, complexity), covers)
+                self.assertEqual(pool.eligible_executors("execute", complexity), [sonnet] if covers else [])
+        with mock.patch.object(pool, "pick", return_value=None) as pick:
+            self.assertFalse(pool.claude_has_headroom())
+            pick.assert_called_once_with("execute")
+            self.assertEqual(pool.eligible_executors("execute", 3), [])
+
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 
@@ -65,6 +91,11 @@ class PoolSel(unittest.TestCase):
                         self.assertEqual(self.p.usd_of(row), cost)
 
     def test_affinity_reserve_cooldown_budget(self):
+        # Live account affinity and reserve are operator settings; this fixture keeps A's 0.35 planner reserve.
+        cfg = {**self.p.cfg, "claude_accounts": [
+            {**a, "reserve_for_planner": 0.35 if a["id"] == "A" else 0.0, "role_affinity": ["planner", "scout", "review"]
+             if a["id"] == "A" else ["scout", "review"]} for a in self.p.cfg["claude_accounts"]]}
+        self.p = P.Pool(cfg)
         self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
         A, B = self.p.get("A"), self.p.get("B")
         A.window_tokens = int(self.p.cap * 0.7); self.p.save()       # above 1-reserve(0.35)=0.65 -> scouts go to B;
@@ -119,7 +150,15 @@ class PoolSel(unittest.TestCase):
 
     def test_pool_toml_documents_roadmap_defaults(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
-        self.assertEqual(cfg["scheduler"]["mode"], "shadow")
+        # Modes are operator settings (2026-09-23 "make them all active"); only their values are checked here, so
+        # the next deliberate flip does not turn the suite red. Tuning defaults stay pinned.
+        modes = {"off", "shadow", "active"}
+        for mode in (cfg["scheduler"]["mode"], cfg["scheduler"]["jev_mode"], cfg["jev"]["routing"]["mode"],
+                     cfg["allocation"]["mode"], cfg["strategy"]["mode"], cfg["speculation"]["mode"],
+                     *cfg["jev"]["points"].values()):
+            self.assertIn(mode, modes)
+        self.assertEqual(set(cfg["jev"]["points"]),
+                         {"scout_necessity", "context_escalation", "review_escalation", "planner_relaunch"})
         self.assertEqual(cfg["scheduler"], {
             **cfg["scheduler"],
             "duration_mode": "empirical",
@@ -131,26 +170,20 @@ class PoolSel(unittest.TestCase):
             "merge_queue_elevated": 3,
             "merge_queue_saturated": 5,
             "merge_conflicts_saturated": 2,
-            "jev_mode": "shadow",
             "jev_max_pairs": 8,
             "jev_cache_ttl_s": 3600,
             "jev_cache_max_entries": 200,
         })
-        self.assertEqual(cfg["jev"]["routing"]["mode"], "shadow")
         self.assertEqual(cfg["jev"]["routing"], {
             **cfg["jev"]["routing"], "max_adjustment": 0.25, "evidence_floor_n": 10,
         })
-        self.assertEqual(cfg["jev"]["points"], {
-            "scout_necessity": "shadow", "context_escalation": "shadow",
-            "review_escalation": "shadow", "planner_relaunch": "shadow",
-        })
         self.assertEqual(cfg["allocation"], {
-            "mode": "shadow", "min_samples": 5, "latency_weight_usd_per_hour": 2.0,
+            **cfg["allocation"], "min_samples": 5, "latency_weight_usd_per_hour": 2.0,
             "critical_factor": 1.0, "non_critical_factor": 0.25,
         })
-        self.assertEqual(cfg["strategy"], {"mode": "shadow", "min_samples": 10})
+        self.assertEqual(cfg["strategy"], {**cfg["strategy"], "min_samples": 10})
         self.assertEqual(cfg["speculation"], {
-            "mode": "off", "min_fix_round_p": 0.5, "min_samples": 5, "min_retry_cost_usd": 1.0,
+            **cfg["speculation"], "min_fix_round_p": 0.5, "min_samples": 5, "min_retry_cost_usd": 1.0,
         })
         self.assertEqual(cfg["promotion"], {"min_samples": 20})
 
@@ -168,15 +201,45 @@ class PoolSel(unittest.TestCase):
         rows = {row["id"]: row for row in cfg["executors"]}
         self.assertEqual((rows["claude:sonnet"]["complexity_min"], rows["claude:sonnet"]["complexity_max"]), (1, 5))
         self.assertEqual(rows["claude:sonnet"]["model"], "claude-sonnet-5-5")
-        self.assertEqual((rows["claude:opus"]["complexity_min"], rows["claude:opus"]["complexity_max"]), (6, 10))
+        self.assertEqual(rows["claude:opus"]["complexity_max"], 10)
+        self.assertLessEqual(rows["claude:opus"]["complexity_min"], 6)
 
+        # The live opus band (opened to 1..10) and enabled flags (2026-10-03 Opus-only switch) are operator
+        # settings; routing is checked on the documented split with both Claude rows on.
         codex_disabled = {**cfg, "executors": [
-            {**row, "enabled": False} if row["provider"] == "codex" else row
+            {**row, "enabled": False} if row["provider"] == "codex"
+            else {**row, "enabled": True, "complexity_min": 6} if row["id"] == "claude:opus"
+            else {**row, "enabled": True} if row["id"] == "claude:sonnet" else row
             for row in cfg["executors"]
         ]}
         pool = P.Pool(codex_disabled)
         self.assertEqual(pool.pick_executor("execute", 3).id, "claude:sonnet")
         self.assertEqual(pool.pick_executor("execute", 8).id, "claude:opus")
+
+    def test_claude_split_moves_line_by_evidence(self):
+        cfg = {"models": {"success_floor": 0.6}, "routing": {"sonnet_max_complexity": 5,
+                "split_min": 4, "split_max": 7, "split_min_samples": 10}}
+        good = {"merged": 6, "failed": 4}
+        self.assertEqual(P.claude_split(cfg, {}), 5)
+        self.assertEqual(P.claude_split(cfg, {"claude:sonnet": {"by_complexity": {"4-6": good}},
+                                               "claude:opus": {"by_complexity": {"4-6": {"merged": 5, "failed": 5}}}}), 6)
+        self.assertEqual(P.claude_split(cfg, {"claude:sonnet": {"by_complexity": {"4-6": {"merged": 5, "failed": 5}}}}), 4)
+        bounded = {**cfg, "routing": {**cfg["routing"], "sonnet_max_complexity": 99}}
+        self.assertEqual(P.claude_split(bounded, {}), 7)
+
+        shipped = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        # The split applies only with both Claude rows on; the live enabled flags are operator settings.
+        paired = {**shipped, "executors": [{**row, "enabled": True} for row in shipped["executors"]
+                   if row["id"] in ("claude:sonnet", "claude:opus")]}
+        pool = P.Pool(paired)
+        pool._claude_split = 6
+        self.assertEqual(pool.pick_executor("execute", 6).id, "claude:sonnet")
+        self.assertEqual(pool.pick_executor("execute", 7).id, "claude:opus")
+
+    def test_status_without_codex_table(self):
+        cfg = {**self.p.cfg}
+        cfg.pop("codex", None)
+        self.assertEqual(P.Pool(cfg).status()["codex"]["on_exhausted"], "hold")
 
     def test_daemon_respawn_max_documented(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
@@ -188,10 +251,14 @@ class PoolSel(unittest.TestCase):
 
     def test_planner_routing_table_documented_defaults(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
-        self.assertEqual(cfg["planner"]["routing"], planner_router._DEFAULTS)
+        routing = cfg["planner"]["routing"]
+        live_modes = {key: routing[key] for key in ("mode", "jev_mode")}
+        for mode in live_modes.values():
+            self.assertIn(mode, {"off", "shadow", "active"})
+        self.assertEqual(routing, {**planner_router._DEFAULTS, **live_modes})
         self.assertEqual(cfg["limits"]["max_budget_usd"]["planner_shadow"], 1.5)
         with mock.patch.object(planner_router.notify, "notify") as notify:
-            self.assertEqual(planner_router.load_cfg(cfg), planner_router._DEFAULTS)
+            self.assertEqual(planner_router.load_cfg(cfg), {**planner_router._DEFAULTS, **live_modes})
             notify.assert_not_called()
 
 
@@ -527,7 +594,7 @@ class ExecutorIdentity(unittest.TestCase):
             pick.assert_called_once_with("execute")
             pick.reset_mock()
             self.p.accounts[0].cooldown_until = 0
-            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["claude:sonnet", "x", "claude:opus"])
+            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["claude:sonnet", "x"])
             pick.assert_called_once_with("execute")
             pick.reset_mock()
             for eid in ("claude:sonnet", "claude:opus"):

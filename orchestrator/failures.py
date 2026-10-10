@@ -1,12 +1,15 @@
 """Validated failure evidence and conservative change-risk classification."""
 import fnmatch, hashlib, json, re, subprocess, tomllib
 from pathlib import Path
-from . import gitutil, bus, spawn, merge, gate
+from . import gitutil, bus
 
 _PATH_TEST_ID = re.compile(r"[A-Za-z0-9_./-]+\.py(?:::[A-Za-z0-9_.\[\]]+)*\Z")
 _DOTTED_TEST_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
 _TEST_ID_TOKEN = re.compile(r"(?<![A-Za-z0-9_./-])[A-Za-z0-9_./-]+\.py(?:::[A-Za-z0-9_.\[\]-]+)+")
 _QUOTA_MARKER = re.compile(r"\b(?:cooling|usage limit|usage-limit|quota|rate limit)\b")
+_ENVIRONMENT_MARKERS = ("modulenotfounderror", "no module named", "enoent", "command not found",
+                        "missing venv", "missing .venv", "uv: error")
+_PERMISSION_MARKERS = ("eacces", "permission denied", "sandbox")
 
 
 def root(task):
@@ -76,8 +79,14 @@ def failure_signature(task):
     ids = sorted(_test_ids(hint.get("failures")) or [])
     comments = sorted((str(c.get("path") or ""), _normal_issue(c.get("issue")))
                       for _, cs in _rejecting_reviews(task) for c in cs)
-    payload = json.dumps({"kind": (task.get("pipeline") or {}).get("failure_kind") or "unknown",
-                          "tests": ids, "comments": comments}, separators=(",", ":"), sort_keys=True)
+    kind = (task.get("pipeline") or {}).get("failure_kind") or "unknown"
+    payload = {"kind": kind, "tests": ids, "comments": comments}
+    if kind == "incomplete":
+        payload.update({"hold_reason": str(task.get("hold_reason") or "").split(":", 1)[0].lower(),
+                        "dirty": sorted([*(hint.get("dirty_in_scope") or []),
+                                          *(hint.get("dirty_out_of_scope") or [])]),
+                        "head": hint.get("head") or ""})
+    payload = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 def _failure_text(task):
@@ -101,6 +110,9 @@ def _node_id_to_unittest(node_id):
         return None
     return ".".join([dotted_path, *parts])
 
+
+from . import gate
+
 class _RunnerProbeTimeout(Exception):
     def __init__(self, timeout_s):
         self.timeout_s = timeout_s
@@ -122,13 +134,22 @@ def _flaky_rerun_command(ids, worktree, *, probe_timeout=60):
 def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     """Classify a held execution failure without relying on an LLM judgment."""
     reason = str(task.get("hold_reason") or "").lower()
+    hint = task.get("resume_hint") or {}
+    if reason.startswith("execute_incomplete"):
+        text = str(hint.get("partial_output") or "").lower()
+        if any(marker in text for marker in _ENVIRONMENT_MARKERS):
+            return "environment"
+        if any(marker in text for marker in _PERMISSION_MARKERS):
+            return "permissions"
+        if reason != "gate_red" and _QUOTA_MARKER.search(_strip_test_ids(text)):
+            return "quota"
+        return "incomplete"
     text = (reason + "\n" + _failure_text(task)).lower()
     if "conflict" in reason or "rebase_conflict" in text:
         return "conflict"
-    if any(marker in text for marker in ("modulenotfounderror", "no module named", "enoent",
-                                          "command not found", "missing venv", "missing .venv", "uv: error")):
+    if any(marker in text for marker in _ENVIRONMENT_MARKERS):
         return "environment"
-    if any(marker in text for marker in ("eacces", "permission denied", "sandbox")):
+    if any(marker in text for marker in _PERMISSION_MARKERS):
         return "permissions"
     if reason != "gate_red" and _QUOTA_MARKER.search(_strip_test_ids(text)):
         return "quota"
@@ -136,6 +157,8 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     issues = "\n".join(str(c.get("issue") or "").lower() for _, cs in comments for c in cs)
     if ("spec" in issues and ("contradict" in issues or "impossible" in issues)) or "acceptance cannot" in issues:
         return "invalid_spec"
+    if reason.startswith("review request_changes") and comments:
+        return "code_defect"
     ids, rejected = _test_ids_with_rejections((task.get("resume_hint") or {}).get("failures"))
     if rejected:
         hint = dict(task.get("resume_hint") or {})

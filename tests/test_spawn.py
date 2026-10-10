@@ -203,7 +203,9 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(updated["status"], "held")
         self.assertTrue(updated["hold_reason"].startswith("render_error"))
         self.assertIsNone(updated.get("assigned_to"))
-        notify.assert_called_once()
+        # Live active-mode refusals (skill routing, context_router) also notify; exactly one is the render error.
+        render_notices = [c for c in notify.call_args_list if "render_error" in c.args[0]]
+        self.assertEqual(len(render_notices), 1)
 
     def test_ensure_worktree_reuses_existing_task_branch(self):
         with tempfile.TemporaryDirectory(prefix="orch-worktree-") as directory:
@@ -563,6 +565,84 @@ class RunWorkerMissingReason(unittest.TestCase):
         self.assertEqual(updated["reason"], "unknown failure")
         self.assertEqual(updated["resume_hint"]["partial_output"], "partial")
 
+class ExecuteDerivation(unittest.TestCase):
+    def test_derivation_falls_back_to_guarded_failed_write_or_superseded(self):
+        pool = P.Pool()
+        pool.cfg.setdefault("spawn", {})["derive_execute_result"] = True
+        account = pool.accounts[0]
+        for reason, output, registry_reason in (
+                ("non-JSON output (rc=143): ", None, "non_json"),
+                ("budget cap", {"result": "partial implementation"}, "budget_cap")):
+            with self.subTest(reason=reason):
+                task = bus.create_task("fallback", "s", ["a"], ["result.txt"], role="execute")
+                failure = {"status": "failed", "reason": reason}
+                if output is not None:
+                    failure["output"] = output
+
+                def run(*args, **kwargs):
+                    spawn.worker_registry.upsert(task["id"], status="failed", status_reason=registry_reason)
+                    return dict(failure)
+
+                with mock.patch.object(spawn, "Pool", return_value=pool), \
+                        mock.patch.object(pool, "pick", return_value=account), \
+                        mock.patch.object(pool, "reserve", return_value=account), \
+                        mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                        mock.patch.object(spawn, "head_sha", return_value="pre-head"), \
+                        mock.patch.object(spawn, "execute_outcome", return_value=None) as outcome, \
+                        mock.patch.object(spawn, "run_claude", side_effect=run), \
+                        mock.patch.object(spawn.notify, "notify") as notify, \
+                        mock.patch.object(spawn.worker_control, "post_if_current",
+                                          wraps=spawn.worker_control.post_if_current) as post, \
+                        mock.patch.object(spawn.worker_control, "write_if_current",
+                                          wraps=spawn.worker_control.write_if_current) as write, \
+                        mock.patch.object(bus, "log_run") as log:
+                    result = spawn.run_worker(task["id"])
+                self.assertEqual(result, failure)
+                updated = bus.get(task["id"])
+                self.assertEqual(updated["status"], "failed")
+                self.assertEqual(updated["reason"], reason)
+                self.assertEqual(spawn.worker_registry.get(task["id"])["status_reason"], registry_reason)
+                self.assertFalse(any("derivation failed" in str(call) for call in notify.call_args_list))
+                self.assertFalse(any(call.kwargs.get("outcome") in {"derived_done", "execute_incomplete"}
+                                     for call in log.call_args_list))
+                if output is None:
+                    outcome.assert_called_once()
+                    post.assert_called_once_with(task["id"], 1, "failed", {"reason": reason})
+                else:
+                    outcome.assert_not_called()
+                    post.assert_not_called()
+                    self.assertEqual(updated["resume_hint"]["partial_output"], output["result"])
+                    write.assert_any_call(task["id"], 1, bus.update, task["id"],
+                                          status="failed", reason=reason,
+                                          resume_hint={"partial_output": output["result"]})
+
+    def test_execute_result_derived_from_git_state(self):
+        repo = scratch_repo(TMP / "derived-worktree")
+        task = bus.create_task("derived", "s", ["committed"], ["result.txt"], role="execute")
+        bus.update(task["id"], parent=None)
+        pool = P.Pool()
+        pool.cfg.setdefault("spawn", {})["derive_execute_result"] = True
+        account = pool.accounts[0]
+
+        def run(*args, **kwargs):
+            (repo / "result.txt").write_text("done\n")
+            g("add", "result.txt", cwd=repo, check=True)
+            g("commit", "-qm", "derived work", cwd=repo, check=True)
+            return {"status": "failed", "reason": "non-JSON output (rc=143): "}
+
+        with mock.patch.object(spawn, "Pool", return_value=pool), \
+                mock.patch.object(pool, "pick", return_value=account), \
+                mock.patch.object(pool, "reserve", return_value=account), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=repo), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            result = spawn.run_worker(task["id"])
+        self.assertEqual(result["status"], "done")
+        posted = bus.get(task["id"])
+        self.assertEqual(posted["status"], "done")
+        self.assertEqual(posted["result"]["commit"], g("rev-parse", "HEAD", cwd=repo).stdout.strip())
+        self.assertEqual(posted["result"]["derived_from"], "git_state")
+
+
 
 class SpecReview(unittest.TestCase):
     def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_minimal_packet(self):
@@ -801,6 +881,7 @@ class Render(unittest.TestCase):
     def test_packet_prior_worker_section_lists_partial_facts(self):
         self.active_eval()
         task = self.packet_fixture()
+        g("branch", "goal/G")   # Render sorts before SpawnBase, whose setUpClass otherwise creates it; no-op if present
         head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
         item = spawn.evidence.make("worker_partial", "T-old:" + head, "file: widget.py\ntest: OK",
                                    commit=head, provenance="worker_partial", scope=["widget.py"])
@@ -843,6 +924,7 @@ class Render(unittest.TestCase):
 
     def test_prior_worker_section_inert_in_shadow_mode(self):
         task = self.packet_fixture()
+        g("branch", "goal/G")   # Render sorts before SpawnBase, whose setUpClass otherwise creates it; no-op if present
         head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
         item = spawn.evidence.make("worker_partial", "T-shadow:" + head, "file: widget.py",
                                    commit=head, provenance="worker_partial", scope=["widget.py"])
@@ -949,10 +1031,14 @@ class Render(unittest.TestCase):
                 "pipeline": {"last_failure_text": "g" * 1500}}
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i} " + "x" * 80 for i in range(400))
         with mock.patch.object(spawn, "scoped_diff", return_value=raw):
-            text = spawn.review_packet(task, task)
-        self.assertLessEqual(len(text), 8200)
+            text = spawn.review_packet(task, task, cfg={"limits": {"review_diff_chars": 8000}})
+        diff_section = text.split("## diff\n", 1)[1].split("\n## ", 1)[0]
+        self.assertLessEqual(len(diff_section), 8000 + 600)
+        self.assertLess(len(diff_section), len(raw))
+        self.assertGreater(len(text), 8200)
         self.assertEqual(text.count("expand with:"), 1)
-        self.assertIn(f"expand with: git -C {TMP} diff -- widget.py {'x' * 1500}", text)
+        base = spawn.scoped_diff_base(task)
+        self.assertIn(f"expand with: git -C {TMP} diff -U3 {base}...HEAD -- widget.py {'x' * 1500}", text)
 
     def test_review_packet_excludes_other_tasks_and_memory(self):
         task = {**self.packet_fixture(), "spec": "only this task"}
@@ -1157,7 +1243,8 @@ class Render(unittest.TestCase):
 
     def test_bounded_diff_expansion_hint(self):
         diff = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(2000))
-        hint = f"git -C {TMP} diff -- widget.py"
+        reviewed = {}
+        hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(reviewed)}...HEAD -- widget.py"
         bounded = spawn.bounded_diff(diff, 300, hint)
         self.assertLessEqual(len(bounded), 300)
         self.assertTrue(bounded.endswith(f"expand with: {hint}"))
@@ -1181,11 +1268,15 @@ class Render(unittest.TestCase):
         self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
         self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run))
 
-        spawn.run_worker(review["id"])
+        cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 8000}}
+        with mock.patch.object(P, "config", return_value=cfg):
+            spawn.run_worker(review["id"])
         prompt = captured["prompt"]
-        hint = f"git -C {TMP} diff -- widget.py"
+        hint = f"git -C {TMP} diff -U3 origin/main...HEAD -- widget.py"
         self.assertIn("Diffstat: ", prompt)
-        self.assertLessEqual(len(prompt), P.Pool().cfg["limits"].get("review_diff_chars", 12000) + 2000)
+        cap = 8000
+        non_diff = len(prompt) - len(prompt.split("## diff\n", 1)[1].split("\n## ", 1)[0])
+        self.assertLessEqual(len(prompt), cap + non_diff + 64)
         self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
 
     def test_bounded_diff_hunk_header_once(self):
@@ -1193,9 +1284,9 @@ class Render(unittest.TestCase):
         self.assertEqual(sum(line.startswith("@@") for line in spawn.bounded_diff(diff).splitlines()), 1)
 
     def test_render_does_not_rebound_diff(self):
-        hint = f"git -C {TMP} diff -- widget.py"
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(1000))
         task = {**self.packet_fixture(), "spec": "ordinary", "complexity": 1}
+        hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(task)}...HEAD -- widget.py"
         cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 100}}
         with mock.patch.object(P, "config", return_value=cfg), \
                 mock.patch.object(spawn, "scoped_diff", return_value=raw):
@@ -1311,6 +1402,44 @@ class SpawnBase(unittest.TestCase):
                                       constraints={"fix_round_for": "T-9999"})
         self.assertEqual(spawn.base_for(fix_missing), "goal/G")   # named branch doesn't exist: falls back
 
+    def test_base_for_follows_fix_chain_to_nearest_existing_branch(self):
+        a = bus.create_task("fix A", "s", ["a"], ["a.py"], role="execute", parent="G")
+        b = bus.create_task("fix B", "s", ["a"], ["a.py"], role="execute", parent="G",
+                            constraints={"fix_round_for": a["id"]})
+        c = bus.create_task("fix C", "s", ["a"], ["a.py"], role="execute", parent="G",
+                            constraints={"fix_round_for": b["id"]})
+        self.assertEqual(spawn.base_for(c), "goal/G")
+        self.assertEqual(spawn.base_choice(c), {"base": "goal/G", "via": "goal", "chain": [b["id"], a["id"]]})
+
+        wt = spawn.ensure_worktree(a["id"], base="HEAD")
+        bus.update(a["id"], worktree=str(wt))
+        self.assertEqual(spawn.base_for(c), f"task/{a['id']}")
+        self.assertEqual(spawn.base_choice(c)["chain"], [b["id"], a["id"]])
+
+        wt_b = spawn.ensure_worktree(b["id"], base="HEAD")
+        bus.update(b["id"], worktree=str(wt_b))
+        self.assertEqual(spawn.base_for(c), f"task/{b['id']}")
+        self.assertEqual(spawn.base_choice(c)["chain"], [b["id"]])
+
+        cycle_a = bus.create_task("cycle A", "s", ["a"], ["a.py"], role="execute", parent="missing",
+                                  constraints={"fix_round_for": "missing-id"})
+        cycle_b = bus.create_task("cycle B", "s", ["a"], ["a.py"], role="execute", parent="missing",
+                                  constraints={"fix_round_for": cycle_a["id"]})
+        self.assertEqual(spawn.base_for(cycle_a), "origin/main")
+        self.assertEqual(spawn.base_choice(cycle_a)["chain"], ["missing-id"])
+        self.assertEqual(spawn.base_for(cycle_b), "origin/main")
+
+    def test_ensure_worktree_records_worktree_base(self):
+        original = bus.create_task("record source", "s", ["a"], ["record.py"], role="execute", parent="G")
+        source_wt = spawn.ensure_worktree(original["id"], base="HEAD")
+        bus.update(original["id"], worktree=str(source_wt))
+        fix = bus.create_task("record fix", "s", ["a"], ["record.py"], role="execute", parent="G",
+                              constraints={"fix_round_for": original["id"]})
+        spawn.ensure_worktree(fix["id"])
+        recorded = bus.get(fix["id"])["pipeline"]["worktree_base"]
+        self.assertEqual(recorded["base"], f"task/{original['id']}")
+        self.assertEqual(recorded["via"], "fix_chain")
+
     def test_ensure_worktree_resolves_base_when_none_given(self):
         t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")
         wt = spawn.ensure_worktree(t["id"])
@@ -1332,6 +1461,53 @@ class SpawnBase(unittest.TestCase):
         diff = spawn.scoped_diff(bus.get(t["id"]))
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
+
+    def test_review_packet_hint_names_base_range_and_branch(self):
+        task = bus.create_task("review hint", "s", ["a"], ["hint.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(task["id"], base="goal/G")
+        bus.update(task["id"], worktree=str(wt))
+        (wt / "hint.py").write_text("hint = True\n")
+        self.g("add", "hint.py", cwd=wt); self.g("commit", "-qm", "review hint", cwd=wt)
+        task = {**bus.get(task["id"]), "branch": "review/custom"}
+        base_sha = self.g("rev-parse", "goal/G", cwd=TMP).stdout.strip()[:12]
+        head_sha = self.g("rev-parse", "HEAD", cwd=wt).stdout.strip()[:12]
+        raw = "diff --git a/hint.py b/hint.py\n" + "\n".join(f"+line {i:05d}" for i in range(1500))
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw):
+            packet = spawn.review_packet(task, task, cfg={"context_router": {"mode": "shadow"}})
+        hint = f"git -C {wt} diff -U3 goal/G...HEAD -- hint.py"
+        self.assertIn(hint, packet)
+        self.assertIn(f"base {base_sha} ", packet.splitlines()[0])
+        self.assertIn("review/custom @ " + head_sha, packet)
+
+    def test_review_packet_diff_budget_honours_review_diff_chars(self):
+        task = bus.create_task("review budget", "s", ["a"], ["budget.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(task["id"], base="goal/G")
+        bus.update(task["id"], worktree=str(wt))
+        task = bus.get(task["id"])
+        raw = "diff --git a/budget.py b/budget.py\n" + "\n".join(f"+line {i:05d}" for i in range(1500))
+        hint = f"git -C {wt} diff -U3 goal/G...HEAD -- budget.py"
+        for cap, truncated in ((20000, False), (3000, True)):
+            with self.subTest(cap=cap), mock.patch.object(spawn, "scoped_diff", return_value=raw):
+                packet = spawn.review_packet(task, task, cfg={"context_router": {"mode": "shadow"},
+                                                               "limits": {"review_diff_chars": cap}})
+            self.assertEqual("more lines" in packet, truncated)
+            if truncated:
+                self.assertIn(hint, packet)
+
+    def test_review_diff_includes_grant_scope_paths(self):
+        t = bus.create_task("grant review", "s", ["a"], ["shared.py"], role="execute", parent="G",
+                            constraints={"grant_scope": ["grant.py"]})
+        wt = spawn.ensure_worktree(t["id"])
+        bus.update(t["id"], worktree=str(wt))
+        (wt / "shared.py").write_text("shared = 1\n")
+        (wt / "grant.py").write_text("granted = 1\n")
+        self.g("add", "-A", cwd=wt)
+        self.g("commit", "-qm", "scoped grant", cwd=wt)
+
+        diff = spawn.scoped_diff(bus.get(t["id"]))
+        self.assertIn("grant.py", diff)
+        packet = spawn.review_packet(bus.get(t["id"]), bus.get(t["id"]))
+        self.assertIn("grant.py", packet)
 
 
 class LineageReviewPacket(unittest.TestCase):

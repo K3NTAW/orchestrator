@@ -1,6 +1,6 @@
 """The .claude/hooks/*.sh scripts: acceptance gating, scope guard, loop guard, retrospect/uncommitted checks,
 tests-green, guardrails (destructive/protected command blocking), and planner-mode (Planner may not edit source)."""
-import os, shutil, subprocess, sys, tempfile, time, unittest
+import os, shutil, subprocess, sys, tempfile, time, tomllib, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_hooks.py` doesn't add this dir itself
 from _harness import HOOKS, REPO, TMP, hook
@@ -61,6 +61,54 @@ class Hooks(unittest.TestCase):
         self.assertEqual(ok.returncode, 0); self.assertEqual(bad.returncode, 2); self.assertIn("outside task", bad.stderr)
         # planner session (no task id) is never blocked
         self.assertEqual(hook("scope-guard.sh", {"tool_input": {"file_path": "/x/y.ts"}}, cwd=TMP, env={"ORCH_TASK_ID": ""}).returncode, 0)
+
+    def test_scope_guard_accepts_grant_scope(self):
+        t = bus.create_task("grant", "s", ["a"], ["src/**"], role="execute",
+                            constraints={"grant_scope": ["tests/extra.py"]})
+        env = {"ORCH_TASK_ID": t["id"], "ORCH_ROOT": str(TMP)}
+        wt = TMP / "wt" / t["id"]; wt.mkdir(parents=True); subprocess.run(["git", "init", "-q"], cwd=wt)
+        ok = hook("scope-guard.sh", {"tool_input": {"file_path": str(wt / "tests/extra.py")}}, cwd=wt, env=env)
+        bad = hook("scope-guard.sh", {"tool_input": {"file_path": str(wt / "docs/out.py")}}, cwd=wt, env=env)
+        self.assertEqual(ok.returncode, 0)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("scope", bad.stderr)
+        self.assertIn("grant_scope", bad.stderr)
+        foreign = TMP / "foreign-worktree"
+        foreign.mkdir()
+        outside = hook("scope-guard.sh", {"tool_input": {"file_path": str(foreign / "src" / "x.py")}},
+                       cwd=wt, env=env)
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn('"scope":["src/**"]', outside.stderr)
+        self.assertIn('"grant_scope":["tests/extra.py"]', outside.stderr)
+
+    def test_scope_guard_child_worktree(self):
+        t = bus.create_task("edit child", "s", ["a"], ["src/**"], role="execute")
+        env = {"ORCH_TASK_ID": t["id"], "ORCH_ROOT": str(TMP)}
+        wt = TMP / "wt" / t["id"]
+        wt.mkdir(parents=True)
+        for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            subprocess.run(["git", *args], cwd=wt, check=True)
+        (wt / "README").write_text("init\n")
+        subprocess.run(["git", "add", "README"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=wt, check=True)
+        child = TMP / "wt" / f"{t['id']}-child"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "child", str(child)], cwd=wt, check=True)
+        bus.update(t["id"], worktree=str(wt))
+
+        unrelated = TMP / "unrelated"
+        unrelated.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=unrelated, check=True)
+        (unrelated / "README").write_text("unrelated\n")
+        subprocess.run(["git", "add", "README"], cwd=unrelated, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], cwd=unrelated, check=True)
+
+        for cwd in (wt, child):
+            ok = hook("scope-guard.sh", {"cwd": str(cwd), "tool_input": {"file_path": str(child / "src" / "in.ts")}}, cwd=cwd, env=env)
+            bad = hook("scope-guard.sh", {"cwd": str(cwd), "tool_input": {"file_path": str(child / "docs" / "out.ts")}}, cwd=cwd, env=env)
+            self.assertEqual(ok.returncode, 0, (cwd, ok.stderr))
+            self.assertEqual(bad.returncode, 2, (cwd, bad.stderr))
+        foreign = hook("scope-guard.sh", {"cwd": str(child), "tool_input": {"file_path": str(unrelated / "src" / "foreign.ts")}}, cwd=child, env=env)
+        self.assertEqual(foreign.returncode, 2, foreign.stderr)
 
     def test_loop_guard(self):
         log = TMP / ".orchestrator" / "runs"; log.mkdir(exist_ok=True)
@@ -172,11 +220,14 @@ class PlannerMode(unittest.TestCase):
             project.mkdir(parents=True)
             transcript = project / "session.jsonl"
             env = {**self.P, "ORCH_ROOT": str(REPO), "CLAUDE_CONFIG_DIR": directory}
-            for tokens in (149999, 150000):
+            # The hook reads the live threshold from ORCH_ROOT's pool.toml, an operator setting.
+            cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+            threshold = cfg["planner"].get("handover_context_tokens", 150000)
+            for tokens in (threshold - 1, threshold):
                 transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": tokens}}}) + "\n")
                 result = hook("planner-prompt.sh", {"prompt": "continue"}, cwd=TMP, env=env)
                 self.assertEqual(result.returncode, 0)
-                if tokens < 150000:
+                if tokens < threshold:
                     self.assertEqual(result.stdout, reminder)
                 else:
                     self.assertTrue(result.stdout.startswith(reminder))

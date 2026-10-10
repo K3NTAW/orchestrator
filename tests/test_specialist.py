@@ -50,7 +50,7 @@ class SpecialistTests(unittest.TestCase):
         self.assertEqual(specialist.normalize_tool("Search", offered), ["Grep", "Glob"])
         for tool in ("bus_post_result", "bus_read"):
             self.assertEqual(specialist.normalize_tool(tool, offered), ["mcp__bus__" + tool])
-        for tool in ("spawn_scout", "spawn_review", "spawn_challenge", "spawn_spec_review",
+        for tool in ("spawn_scout", "spawn_review", "spawn_challenge", "spawn_spec_review", "execute",
                      "codex", "codex_reply", "merge", "status", "executor_fallback",
                      "hold_account", "resume_account", "Read", "Grep", "Glob", "Edit", "Write"):
             self.assertEqual(specialist.normalize_tool(tool, offered), [tool])
