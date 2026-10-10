@@ -2391,6 +2391,7 @@ class Daemon(unittest.TestCase):
 
     def test_two_level_fix_chain_marks_root_merged(self):
         self.swap(daemon, "notify", lambda message: None)
+        self.swap(daemon, "landed", lambda *args, **kwargs: True)    # fake shas: the merged daemon checks ancestry
         root_id, middle, last = self.hand_filed_fix_chain()
         daemon.report_merge(last, {"status": "merged", "target": "goal/G", "sha": "19ccbf2c"})
         for tid in (root_id, middle, last):
@@ -2409,6 +2410,7 @@ class Daemon(unittest.TestCase):
 
     def test_late_gate_result_does_not_reheld_merged_root(self):
         self.swap(daemon, "notify", lambda message: None)
+        self.swap(daemon, "landed", lambda *args, **kwargs: True)    # fake shas: the merged daemon checks ancestry
         root_id, middle, last = self.hand_filed_fix_chain()
         bus.update(root_id, status="done", worktree=str(self.sandbox), hold_reason=None)
         self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
