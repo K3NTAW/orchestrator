@@ -881,6 +881,7 @@ class Render(unittest.TestCase):
     def test_packet_prior_worker_section_lists_partial_facts(self):
         self.active_eval()
         task = self.packet_fixture()
+        g("branch", "goal/G")   # Render sorts before SpawnBase, whose setUpClass otherwise creates it; no-op if present
         head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
         item = spawn.evidence.make("worker_partial", "T-old:" + head, "file: widget.py\ntest: OK",
                                    commit=head, provenance="worker_partial", scope=["widget.py"])
@@ -923,6 +924,7 @@ class Render(unittest.TestCase):
 
     def test_prior_worker_section_inert_in_shadow_mode(self):
         task = self.packet_fixture()
+        g("branch", "goal/G")   # Render sorts before SpawnBase, whose setUpClass otherwise creates it; no-op if present
         head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
         item = spawn.evidence.make("worker_partial", "T-shadow:" + head, "file: widget.py",
                                    commit=head, provenance="worker_partial", scope=["widget.py"])

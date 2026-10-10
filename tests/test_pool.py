@@ -228,7 +228,8 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(P.claude_split(bounded, {}), 7)
 
         shipped = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
-        paired = {**shipped, "executors": [row for row in shipped["executors"]
+        # The split applies only with both Claude rows on; the live enabled flags are operator settings.
+        paired = {**shipped, "executors": [{**row, "enabled": True} for row in shipped["executors"]
                    if row["id"] in ("claude:sonnet", "claude:opus")]}
         pool = P.Pool(paired)
         pool._claude_split = 6
