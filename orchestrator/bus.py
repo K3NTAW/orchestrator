@@ -62,6 +62,14 @@ def _descriptor():
     return _fh[2]
 
 
+def _close_lock():
+    if _fh is not None and _fh[0] == os.getpid():
+        _fh[2].close()
+
+
+atexit.register(_close_lock)
+
+
 def _warn_wait(stage, waited, holder):
     print(f"[bus] lock wait {waited:.1f}s: stage {stage} thread {threading.current_thread().name} waits on "
           f"bus.lock held by {holder}", file=sys.stderr)
