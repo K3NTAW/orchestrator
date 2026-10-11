@@ -57,7 +57,8 @@ class StateIsolation(unittest.TestCase):
     def test_foreign_checkout_state_is_invisible(self):
         self.plant_foreign_state()
         self.assertNotIn(FOREIGN, [t["id"] for t in bus.read()])
-        self.assertIsNone(bus.get(FOREIGN))
+        with self.assertRaises(KeyError):
+            bus.get(FOREIGN)
         self.assertNotIn(FOREIGN, [w.get("task_id") for w in worker_registry.listing(include_finished=True)])
         self.assertNotIn(FOREIGN, daemon.gate_runner._live_registry_keys())
         self.assertNotEqual(bus.next_id(), "T-9991")
