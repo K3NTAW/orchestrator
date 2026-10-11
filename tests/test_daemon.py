@@ -4445,11 +4445,17 @@ class Daemon(unittest.TestCase):
     def reap_begin(self):
         scratch_repo(TMP)
         self.assertTrue(Path(daemon.ROOT).resolve().is_relative_to(TMP.resolve()))
-        self.live_worktrees = g("worktree", "list", cwd=REPO).stdout
+        self.live_worktrees = self.reap_real_repo_tmp_worktrees()
         self.reap_pool = types.SimpleNamespace(cfg={"daemon": {}})
 
     def reap_end(self):
-        self.assertEqual(g("worktree", "list", cwd=REPO).stdout, self.live_worktrees)
+        self.assertEqual(self.reap_real_repo_tmp_worktrees(), self.live_worktrees)
+
+    def reap_real_repo_tmp_worktrees(self):
+        # Only the real repo's worktrees under TMP: daemon worktrees under the real wt/ may come and go mid-gate.
+        out = g("worktree", "list", "--porcelain", cwd=REPO).stdout
+        paths = (Path(line[len("worktree "):]).resolve() for line in out.splitlines() if line.startswith("worktree "))
+        return sorted(str(p) for p in paths if p.is_relative_to(TMP.resolve()))
 
     def reap_clean(self, tid):
         wt = TMP / "wt" / tid
@@ -4485,6 +4491,35 @@ class Daemon(unittest.TestCase):
     def reap_events(self, tid):
         rows = bus.db().execute("select count(*) from events where task_id=?", (tid,)).fetchone()[0]
         return bus.get(tid)["events"], rows
+
+    def reap_real_clean(self, path, branch):
+        g("worktree", "remove", "--force", str(path), cwd=REPO)
+        g("worktree", "prune", cwd=REPO)
+        g("branch", "-D", branch, cwd=REPO)
+
+    def test_reap_fixture_ignores_foreign_worktrees(self):
+        # A worktree added to the real repo outside TMP (e.g. the daemon's wt/<id>) must not fail reap_end.
+        self.reap_begin()
+        foreign = Path(tempfile.mkdtemp(prefix="reap-foreign-"))
+        self.addCleanup(shutil.rmtree, foreign, True)
+        self.addCleanup(self.reap_real_clean, foreign / "wt", "task/T-9799-foreign")
+        self.reap_real_clean(foreign / "wt", "task/T-9799-foreign")
+        self.assertEqual(g("worktree", "add", "-q", str(foreign / "wt"), "-b", "task/T-9799-foreign", "HEAD",
+                           cwd=REPO).returncode, 0)
+        self.assertTrue((foreign / "wt" / ".git").exists())
+        self.reap_end()
+
+    def test_reap_fixture_detects_worktree_leaked_into_real_repo(self):
+        # A TMP path added to the real repo is a leak and must still fail reap_end.
+        self.reap_begin()
+        leak = TMP / "wt-leak"
+        self.addCleanup(shutil.rmtree, leak, True)
+        self.addCleanup(self.reap_real_clean, leak, "task/T-9798-leak")
+        self.reap_real_clean(leak, "task/T-9798-leak")
+        self.assertEqual(g("worktree", "add", "-q", str(leak), "-b", "task/T-9798-leak", "HEAD",
+                           cwd=REPO).returncode, 0)
+        with self.assertRaises(AssertionError):
+            self.reap_end()
 
     def test_reap_worktrees_removes_landed_and_superseded_after_grace(self):
         self.reap_begin()
