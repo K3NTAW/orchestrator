@@ -119,6 +119,19 @@ def next_id():
     return f"T-{(ids[-1] + 1) if ids else 1:04d}"
 
 
+DEFAULT_TIMEOUT_S = 900
+
+
+def default_timeout_s(role):
+    """pool.toml [limits].timeout_s[role]; 900 when the role has no entry or pool.toml is unreadable. A flat 900 for
+    every role timed out finished execute work (T-1802) while [limits] allowed execute 1800."""
+    try:
+        value = ((pool_config().get("limits") or {}).get("timeout_s") or {}).get(role)
+    except AttributeError:
+        return DEFAULT_TIMEOUT_S
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else DEFAULT_TIMEOUT_S
+
+
 def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", complexity=3,
                 parent=None, inputs=None, constraints=None, depends_on=None):
     """Planner-only. Mirrors the require-acceptance hook: no acceptance or scope -> rejected."""
@@ -142,7 +155,8 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
     t = {"id": tid, "created_at": time.time(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
          "depends_on": deps,
-         "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
+         "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": default_timeout_s(role),
+                         **(constraints or {})},
          "status": "queued", "assigned_to": None, "worktree": None, "codex_thread": None, "result": None, "events": []}
     _save(t); _event(t["id"], "created")
     if normalized_dep:

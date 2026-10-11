@@ -158,6 +158,20 @@ class Bus(BusSandbox):
                          ["fix_round", root["id"], 1, "4-6", "debugging"])
         self.assertEqual(row["model"], "gpt-6-astra")
 
+    def test_create_task_timeout_defaults_from_pool_limits(self):
+        cfg = {"limits": {"timeout_s": {"execute": 1800, "scout": 600}}}
+        with patch.object(bus, "pool_config", return_value=cfg):
+            execute = bus.create_task("Exec", "s", ["a"], ["x"], role="execute")
+            scout = bus.create_task("Scout", "s", ["a"], ["x"], role="scout")
+            review = bus.create_task("Review", "s", ["a"], ["x"], role="review")
+            explicit = bus.create_task("Exec", "s", ["a"], ["x"], role="execute", constraints={"timeout_s": 300})
+        self.assertEqual(execute["constraints"]["timeout_s"], 1800)
+        self.assertEqual(scout["constraints"]["timeout_s"], 600)
+        self.assertEqual(review["constraints"]["timeout_s"], 900)   # no entry for the role
+        self.assertEqual(explicit["constraints"]["timeout_s"], 300)
+        with patch.object(bus, "pool_config", return_value={}):     # unreadable pool.toml yields {}
+            self.assertEqual(bus.create_task("E", "s", ["a"], ["x"], role="execute")["constraints"]["timeout_s"], 900)
+
     def test_log_run_without_task_uses_other_bucket(self):
         row = self.written_row(role="unknown")
         self.assertEqual(row["bucket"], "other")

@@ -4684,6 +4684,35 @@ class DispatchWorker(unittest.TestCase):
         self.assertEqual(self.state["status"], "failed")
         self.assertEqual(self.state["result"]["reason"], "executor timeout")
 
+    def _worktree_with_commits(self, extra_commits):
+        wt = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="timeout-wt-")))
+        run = lambda *a: subprocess.run(["git", *a], cwd=wt, check=True, capture_output=True, text=True)
+        run("init", "-q", "-b", "goal/T-1"); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (wt / "a.txt").write_text("a"); run("add", "."); run("commit", "-qm", "base")
+        run("checkout", "-qb", f"task/{self.task_id}")
+        for i in range(extra_commits):
+            (wt / f"f{i}.txt").write_text(str(i)); run("add", "."); run("commit", "-qm", f"work {i}")
+        self.state.update(worktree=str(wt), constraints={"start_branch": "goal/T-1"})
+        return run("rev-parse", "HEAD").stdout.strip()
+
+    def test_dispatch_worker_timeout_with_commits_goes_to_gate(self):
+        sha = self._worktree_with_commits(1)
+        self.start.return_value = {"status": "failed", "reason": "timeout after 900s"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "done")
+        self.assertTrue(self.state["result"]["timeout_with_commits"])
+        self.assertEqual(self.state["result"]["commit"], sha)
+        self.assertEqual(self.state["result"]["executed_by"], "codex:astra")
+        self.assertEqual(self.state["pipeline"]["timeout_with_commits"]["commits"], [sha])
+
+    def test_dispatch_worker_timeout_without_commits_still_fails(self):
+        self._worktree_with_commits(0)
+        self.start.return_value = {"status": "failed", "reason": "timeout after 900s"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "timeout after 900s")
+        self.assertNotIn("timeout_with_commits", self.state["pipeline"])
+
     def test_dispatch_worker_leaves_held(self):
         def held(*args):
             bus.update(self.task_id, status="held", hold_reason="quota exhausted",

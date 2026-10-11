@@ -614,6 +614,50 @@ def _track_dispatch(fn):
     return tracked
 
 
+def _timeout_commits(task_id):
+    """Commits a timed-out worker left on its task branch beyond the start branch (constraints.start_branch, else
+    the trunk _resolve_base picks). Empty when there is no worktree or git can't tell."""
+    try:
+        t = bus.get(task_id)
+    except KeyError:
+        return []
+    worktree = t.get("worktree")
+    if not worktree or not Path(worktree).is_dir():
+        return []
+    start = (t.get("constraints") or {}).get("start_branch")
+    base = None
+    if start:
+        r = _git_in(worktree, "merge-base", "HEAD", start)
+        base = r.stdout.strip() if r.returncode == 0 else None
+    base = base or _resolve_base(worktree, t.get("parent"))
+    if not base:
+        return []
+    r = _git_in(worktree, "rev-list", f"{base}..HEAD")
+    return r.stdout.split() if r.returncode == 0 else []
+
+
+def _post_failed_or_timeout_commits(task_id, reason, executed_by):
+    """A worker timeout that left commits is not a failure: post done with a synthetic result so the normal gate
+    decides (T-1802 committed a green fix and was failed at 900s). A timeout without commits still fails."""
+    commits = _timeout_commits(task_id) if str(reason).startswith("timeout") else []
+    if not commits:
+        bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
+        return
+    pipeline = dict(bus.get(task_id).get("pipeline") or {})
+    pipeline["timeout_with_commits"] = {"reason": reason[:300], "commits": commits[:20]}
+    bus.update(task_id, pipeline=pipeline)
+    bus.post_result(task_id, spawn.fit_result({
+        "summary": f"worker {reason[:200]} but left {len(commits)} commit(s) on its task branch "
+                   f"({', '.join(c[:8] for c in commits[:5])}); gating them",
+        "commit": commits[0],
+        "commits": commits[:20],
+        "executed_by": executed_by,
+        "timeout_with_commits": True,
+        "provenance": ["repo"],
+    }), "done")
+    print(f"[daemon] {task_id}: timeout_with_commits ({len(commits)}); sent to the gate", file=sys.stderr)
+
+
 @_track_dispatch
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     epoch = worker_control.launch_epoch(task_id)
@@ -652,7 +696,8 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
                     "usage": r.get("usage"),
                 }), "done")
             elif r["status"] == "failed":
-                bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+                _post_failed_or_timeout_commits(task_id, r["reason"],
+                                                "codex:" + str(bus.get(task_id).get("executor")))
             elif r["status"] in ("held", "budget"):
                 with bus.locked():
                     task = bus.get(task_id)
@@ -723,7 +768,7 @@ def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
                 "thread": r["thread"], "usage": r.get("usage"),
             }), "done")
         elif r["status"] == "failed":
-            bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+            _post_failed_or_timeout_commits(task_id, r["reason"], "codex:" + str(bus.get(parent_id).get("executor")))
         elif r["status"] == "held":
             bus.post_result(task_id, spawn.fit_result({"reason": "budget"}), "held")
             clear_stage(task_id, "dispatched_at", status="held", hold_reason="budget")
