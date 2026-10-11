@@ -221,5 +221,24 @@ class PlannerRouting(PlannerRunsBase):
         self.ask.assert_not_called()
 
 
+    def test_run_group_launches_gate_red_decision_on_sonnet_model(self):
+        self.pool.cfg["planner"]["routing"]["mode"] = "active"
+        self.pool.cfg["models"]["sonnet"] = "test-sonnet"
+        goal = self.goal()
+        self.execute_child(goal, status="held", hold_reason="gate_red", complexity=4)
+        sections = self.sections(goal)
+        self.assertEqual(sections[0][1]["hold_reason"], "gate_red")
+        self.assertIn("failure_kind", sections[0][1])
+        self.assertEqual(sections[0][2].name, "escalate")
+        with patch.object(planner_scorecard, "class_evidence",
+                          return_value={"n": 0, "noninferior": None, "reescalation_rate": None}):
+            self.assertTrue(PR.run_group(sections, self.pool)["launched"])
+        argv = self.popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "test-sonnet")
+        self.assertEqual(self.rows()[-1]["tier"], "sonnet")
+        route = next(r for r in self.rows("decisions") if r["kind"] == "planner_route")
+        self.assertEqual(route["candidates"], ["sonnet", "opus", "fable"])
+        self.assertEqual(route["selected"], "sonnet")
+
 if __name__ == "__main__":
     unittest.main()

@@ -192,3 +192,85 @@ class PlannerRouterTests(unittest.TestCase):
                              availability={"custom": {"available": True}})
         self.assertEqual(custom.candidates, ("custom", "premium"))
         self.assertEqual(custom.tier, "custom")
+
+    def test_cheap_kind_gate_red_routes_to_sonnet_by_default(self):
+        availability = {**self.availability, "sonnet": {"available": True, "reason": ""}}
+        for mode in ("shadow", "active"):
+            with self.subTest(mode=mode):
+                result = self.choose(mode=mode, ctx={"hold_reason": "gate_red", "complexity": 5},
+                                     availability=availability)
+                self.assertEqual(result.tier, "sonnet")
+                self.assertEqual(result.reasons, ("cheap_kind:gate_red:sonnet",))
+                self.assertEqual(result.candidates, ("sonnet", "opus", "fable"))
+                self.assertFalse(result.hold or result.hard)
+        result = self.choose(ctx={"hold_reason": "rebase_conflict"}, availability=availability)
+        self.assertEqual(result.reasons, ("cheap_kind:conflict:sonnet",))
+        result = self.choose(ctx={"hold_reason": "manual", "failure_kind": "merge_conflict"},
+                             availability=availability)
+        self.assertEqual(result.tier, "sonnet")
+        plain = self.choose(ctx={"hold_reason": "manual"}, availability=availability)
+        self.assertEqual(plain.tier, "opus")
+        self.assertEqual(plain.candidates, ("opus", "fable"))
+        disabled = self.choose(ctx={"hold_reason": "gate_red"}, availability=availability,
+                               cfg={"cheap_kinds": []})
+        self.assertEqual(disabled.tier, "opus")
+        self.assertEqual(disabled.reasons, ("evidence_noninferior",))
+
+    def test_cheap_kind_falls_back_when_floor_not_met(self):
+        availability = {**self.availability, "sonnet": {"available": True, "reason": ""}}
+        ctx = {"hold_reason": "gate_red"}
+        good = {"n": 30, "noninferior": True, "reescalation_rate": 0.1}
+        result = self.choose(ctx=ctx, availability=availability, tier_evidence={
+            "sonnet": {"n": 30, "noninferior": False, "reescalation_rate": 0.0}, "opus": good})
+        self.assertEqual((result.tier, result.reasons), ("opus", ("cheap_kind:gate_red:opus",)))
+        result = self.choose(ctx=ctx, availability=availability, tier_evidence={
+            "sonnet": {"n": 30, "noninferior": True, "reescalation_rate": 0.5}, "opus": good})
+        self.assertEqual(result.tier, "opus")
+        result = self.choose(ctx=ctx, availability=availability, cfg={"cheap_min_samples": 10},
+                             tier_evidence={"sonnet": {"n": 3, "noninferior": True,
+                                                       "reescalation_rate": 0.0}, "opus": good})
+        self.assertEqual(result.tier, "opus")
+        result = self.choose(ctx=ctx, availability=self.availability)
+        self.assertEqual((result.tier, result.reasons), ("opus", ("cheap_kind:gate_red:opus",)))
+        bad = {"n": 30, "noninferior": False, "reescalation_rate": 0.9}
+        result = self.choose(ctx=ctx, availability=availability,
+                             tier_evidence={"sonnet": bad, "opus": bad, "fable": bad})
+        self.assertEqual(result.tier, "fable")
+        self.assertFalse(result.reasons[0].startswith("cheap_kind"))
+        self.assertEqual(result.candidates, ("sonnet", "opus", "fable"))
+
+    def test_hard_escalation_beats_cheap_kind(self):
+        availability = {**self.availability, "sonnet": {"available": True, "reason": ""}}
+        cases = [
+            ({}, {"complexity": 9}, "complexity"),
+            ({}, {"security_trigger": True}, "security"),
+            ({"decision_type": "ambiguous_requirement"}, {}, "architectural_or_ambiguous"),
+            ({}, {"spec_review_request_changes": 2}, "repeated_spec_rejection"),
+        ]
+        for extra, ctx, reason in cases:
+            with self.subTest(reason=reason):
+                result = self.choose(classification={**self.classification, **extra},
+                                     ctx={"hold_reason": "gate_red", **ctx}, availability=availability)
+                self.assertEqual(result.tier, "fable")
+                self.assertTrue(result.hard)
+                self.assertIn(reason, result.hard_reasons)
+
+    def test_load_cfg_validates_cheap_keys(self):
+        cfg = router.load_cfg({})
+        self.assertEqual((cfg["cheap_tier"], cfg["cheap_kinds"], cfg["cheap_reescalation_max"],
+                          cfg["cheap_min_samples"]), ("sonnet", ["gate_red", "conflict"], 0.3, 0))
+        good = router.load_cfg({"planner": {"routing": {
+            "cheap_tier": "haiku", "cheap_kinds": [], "cheap_reescalation_max": 0.1,
+            "cheap_min_samples": 5}}})
+        self.assertEqual((good["cheap_tier"], good["cheap_kinds"], good["cheap_reescalation_max"],
+                          good["cheap_min_samples"]), ("haiku", [], 0.1, 5))
+        router._WARNED.clear()
+        with patch.object(router.notify, "notify") as notify:
+            bad = router.load_cfg({"planner": {"routing": {
+                "cheap_tier": 3, "cheap_kinds": "gate_red", "cheap_reescalation_max": "x",
+                "cheap_min_samples": float("nan")}}})
+            router.load_cfg({"planner": {"routing": {"cheap_tier": 3}}})
+        self.assertEqual((bad["cheap_tier"], bad["cheap_kinds"], bad["cheap_reescalation_max"],
+                          bad["cheap_min_samples"]), ("sonnet", ["gate_red", "conflict"], 0.3, 0))
+        self.assertEqual(notify.call_count, 4)
+        router._WARNED.clear()

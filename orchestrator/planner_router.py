@@ -1,7 +1,7 @@
 """Pure Planner tier policy; callers resolve aliases and gather all state.
 
 Configuration key -> consumer (load_cfg is the single [planner.routing] reader):
-mode/default_tier/escalation_tier/hard_*/min_samples/soft_threshold -> this module
+mode/default_tier/escalation_tier/hard_*/min_samples/soft_threshold/cheap_* -> this module
 shadow_sample_rate -> this module and planner_shadow.eligible
 fable_reserve_share -> fable_reserve_ok, called by planner_runs for availability
 jev_mode -> jev_planner
@@ -30,6 +30,10 @@ _DEFAULTS = {
     "fable_reserve_share": 0.2,
     "jev_mode": "shadow",
     "soft_threshold": 0.5,
+    "cheap_tier": "sonnet",
+    "cheap_kinds": ["gate_red", "conflict"],
+    "cheap_reescalation_max": 0.3,
+    "cheap_min_samples": 0,
 }
 _WARNED = set()
 
@@ -43,6 +47,10 @@ def load_cfg(pool_cfg):
         valid = True
         if key in ("mode", "jev_mode"):
             valid = value in ("off", "shadow", "active")
+        elif type(default) is str:
+            valid = type(value) is str and bool(value)
+        elif type(default) is list:
+            valid = type(value) is list and all(type(item) is str for item in value)
         elif type(default) in (int, float):
             valid = type(value) in (int, float)
             if valid and isinstance(value, float):
@@ -130,10 +138,28 @@ def soft_score(classification, ctx, evidence, jev_signal=None):
     return max(0.0, min(1.0, score))
 
 
-def decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0):
+def cheap_kind(ctx, cfg):
+    """Return the configured cheap kind this held decision matches, or None."""
+    kinds = cfg.get("cheap_kinds", [])
+    hold = str(ctx.get("hold_reason") or "")
+    failure = str(ctx.get("failure_kind") or "")
+    if "gate_red" in kinds and hold == "gate_red":
+        return "gate_red"
+    if "conflict" in kinds and ("conflict" in hold or "conflict" in failure):
+        return "conflict"
+    return None
+
+
+def decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0,
+           tier_evidence=None):
+    """tier_evidence maps tier -> scorecard evidence for cheap-kind floors; evidence is the default tier's."""
     mode = cfg.get("mode", "shadow")
     default = cfg.get("default_tier", "opus")
     escalation = cfg.get("escalation_tier", "fable")
+    kind = cheap_kind(ctx, cfg)
+    candidates = (default, escalation)
+    if kind:
+        candidates = tuple(dict.fromkeys((cfg.get("cheap_tier", "sonnet"), default, escalation)))
 
     def available(tier):
         return availability.get(tier, {}).get("available", False)
@@ -142,7 +168,7 @@ def decide(classification, ctx, route, *, cfg, availability, evidence, jev_signa
         return RouterDecision(
             tier=tier, mode=mode, hard=bool(hard_reasons), hold=hold_reason is not None,
             hold_reason=hold_reason, reasons=tuple(reasons), hard_reasons=tuple(hard_reasons),
-            soft_score=score, shadow_tier=shadow, candidates=(default, escalation),
+            soft_score=score, shadow_tier=shadow, candidates=candidates,
             evidence=dict(evidence), decision_type=classification.get("decision_type", "other"),
         )
 
@@ -158,6 +184,15 @@ def decide(classification, ctx, route, *, cfg, availability, evidence, jev_signa
                           hold_reason=f"fable_unavailable:{why}")
         return result(escalation, hard, hard_reasons=hard)
     score = soft_score(classification, ctx, evidence, jev_signal)
+    if kind:
+        per_tier = {default: evidence} if tier_evidence is None else tier_evidence
+        for tier in candidates:
+            facts = per_tier.get(tier) or {}
+            if (available(tier) and facts.get("noninferior") is not False
+                    and (facts.get("reescalation_rate") or 0) <= cfg.get("cheap_reescalation_max", 0.3)
+                    and (cfg.get("cheap_min_samples", 0) <= 0
+                         or (facts.get("n") or 0) >= cfg.get("cheap_min_samples", 0))):
+                return result(tier, (f"cheap_kind:{kind}:{tier}",), score=score)
     if mode == "shadow":
         reasons = ["shadow_production_fable"]
         shadow = None

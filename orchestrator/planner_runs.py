@@ -1278,7 +1278,7 @@ def build_ctx(point, pool=None):
                        bool((r.get("inputs") or [])[:1] and r["inputs"][0] in chain_ids)
                        and (r.get("review_verdict") or (r.get("result") or {}).get("verdict")) == "request_changes"
                        for r in bus.read(role="spec_review")),
-                   hold_reason=task.get("hold_reason"))
+                   hold_reason=task.get("hold_reason"), failure_kind=kind)
         ctx.update({f"touches_{area}": value for area, value in failures.touch_areas(task, cfg).items()})
     elif point["kind"] == "scouts_done":
         review = cfg.get("review", {})
@@ -1584,7 +1584,8 @@ def run_group(sections, pool):
         rcfg = planner_router.load_cfg(pool.cfg)
         models = pool.cfg.get("models", {})
         availability = {}
-        for tier in (rcfg["default_tier"], rcfg["escalation_tier"]):
+        tiers = list(dict.fromkeys((rcfg["cheap_tier"], rcfg["default_tier"], rcfg["escalation_tier"])))
+        for tier in tiers:
             configured = bool(models.get("planner" if tier == "fable" else tier))
             availability[tier] = {"available": configured and account is not None,
                                   "reason": "ok" if configured else "model_not_configured"}
@@ -1593,6 +1594,12 @@ def run_group(sections, pool):
         availability["fable_reserve_ok"] = planner_router.fable_reserve_ok(headroom, rcfg)
         evidence = _class_evidence(models.get("planner" if rcfg["default_tier"] == "fable"
                                               else rcfg["default_tier"]), classification, pool)
+        tier_evidence = {rcfg["default_tier"]: evidence}
+        if planner_router.cheap_kind(ctx, rcfg):
+            for tier in tiers:
+                if tier not in tier_evidence:
+                    tier_evidence[tier] = _class_evidence(
+                        models.get("planner" if tier == "fable" else tier), classification, pool)
         history = [row for row in planner_telemetry.read_invocations(root=STATE)
                    if row.get("goal_id") == goal_id]
         latest = max(history, key=lambda row: row.get("started_at") or 0, default={})
@@ -1604,16 +1611,18 @@ def run_group(sections, pool):
             ctx["reescalation"] = True
         hard = planner_router.hard_escalation(classification, ctx, route, rcfg)
         signal = None
-        if jev_planner.should_ask(rcfg["mode"], rcfg["jev_mode"], hard, availability, route.name)[0]:
+        jev_availability = {key: value for key, value in availability.items()
+                            if key in (rcfg["default_tier"], rcfg["escalation_tier"], "fable_reserve_ok")}
+        if jev_planner.should_ask(rcfg["mode"], rcfg["jev_mode"], hard, jev_availability, route.name)[0]:
             signal = jev_planner.ask(
                 classification, ctx, bus.get(goal_id), cfg=rcfg, router_mode=rcfg["mode"],
-                hard_reasons=hard, availability=availability, route=route.name,
+                hard_reasons=hard, availability=jev_availability, route=route.name,
                 state_version=version, task=_decision_task(goal_id, leader["kind"], leader["payload_key"])
                 if leader["kind"] == "held" else None, ask_fn=jev.ask, root=STATE)
         sample = random.random()
         routed = planner_router.decide(classification, ctx, route, cfg=rcfg,
                                        availability=availability, evidence=evidence,
-                                       jev_signal=signal, sample=sample)
+                                       jev_signal=signal, sample=sample, tier_evidence=tier_evidence)
         planner_router.record(routed, subject=goal_id, route=route, jev_signal=signal, root=STATE)
         with bus.locked():
             records = _load_records()
