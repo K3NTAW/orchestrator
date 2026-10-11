@@ -62,3 +62,37 @@ scoped_task_gates = true  # default; revert: false
 ```
 
 With `false` every gate path runs `ORCH_GATE_MODE=full` (today's behaviour, plus the variables).
+
+## Waiting registry entry
+
+Added 2026-10-11 (T-1852, part B1 of T-1792 item 2). A gate queued for the machine heavy-gate slot keeps
+`<STATE>/gates/<key>.json` while it waits. `gate.write_waiting_entry(key, *, task_id, worktree, mode, base)` writes:
+
+```json
+{"state": "waiting", "task_id": "T-1", "worktree": "/path", "owner_pid": 123, "owner_start": "...",
+ "waiting_for": "machine_slot", "waiting_since": 1800000000.0, "mode": "task", "base": "<sha>"}
+```
+
+`owner_*` come from `gate._owner()`; `owner_start` may be null. The entry has no `pid`, `pgid`, `proc_start`,
+`started_at` or `timeout_s`: no gate process exists yet. Nothing writes a waiting entry in production until the
+lease wait loop (part B2) lands.
+
+Every registry write goes through `gate._write_registry`: write `<key>.tmp`, then `os.replace`. `register()` in
+`_run_gate` uses it too, so it can overwrite a waiting entry in place with no moment where the key is in no
+registry. Readers glob `*.json`, so a `.tmp` file is never read.
+
+Predicates:
+
+- `gate.is_waiting(entry)`: `entry` is a dict and `entry["state"] == "waiting"`.
+- `gate._owner_alive(entry)`: `owner_pid` is an int, `machine._pid_alive(owner_pid)`, and `owner_start` is null or
+  `machine.process_start(owner_pid)` is null or equals it. Never calls `_group_alive`.
+
+Every reader branches on a waiting entry before it touches `entry["pid"]`:
+
+| Reader | Waiting entry | Behaviour change |
+|---|---|---|
+| `gate._live_registry_keys` | counted when `_owner_alive`, else skipped | new: a queued heavy gate keeps the per-repo `[gate].max_parallel` slot it already took; other processes see it here. Intended. |
+| `gate.running_gates` | skipped (not nearing a timeout; it has none) | none, was skipped through the missing `started_at`; now explicit |
+| `gate.reap_orphans` | never signals; unlinked when not `_owner_alive` (dead owner, reused pid, or a stale entry with this process's pid but another start); kept when the owner lives | new: such an entry used to be skipped on `KeyError` and leaked |
+| `gate.terminate_own` | unlinked when `owner_pid` is this process | none (already did so) |
+| `watchdog.gate_live` | not live | none, was not live through the missing `pid`; now explicit |
