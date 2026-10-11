@@ -1481,7 +1481,7 @@ def _reconcile_infra(record, records):
     return True
 
 
-FAST_LANE_ESCALATE_KINDS = {"conflict", "environment", "permissions", "quota"}
+FAST_LANE_ESCALATE_KINDS = {"conflict", "environment", "permissions", "quota", "flaky"}
 
 
 def fast_lane_candidate(task, cfg, chain=None):

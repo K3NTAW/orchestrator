@@ -112,6 +112,7 @@ class GoalContainers(unittest.TestCase):
                          mock.patch.object(bus, "RUNS", self.root / "runs")]
         for patcher in self.patchers:
             patcher.start(); self.addCleanup(patcher.stop)
+        self.addCleanup(bus._close_db)
 
     def goal(self, status="queued"):
         task = bus.create_task("GOAL", "container", ["children merge"], ["x.py"], role="execute",
@@ -177,6 +178,7 @@ class JevRouteDispatch(unittest.TestCase):
                          mock.patch.object(bus, "RUNS", root / "runs")]
         for patcher in self.patchers:
             patcher.start(); self.addCleanup(patcher.stop)
+        self.addCleanup(bus._close_db)
         self.task = bus.create_task("route", "spec", ["passes"], ["x.py"], role="execute", complexity=3)
 
     def run_worker(self, classification=None, chosen="terra"):
@@ -1617,6 +1619,7 @@ class Daemon(unittest.TestCase):
                             ("RUNS", self.sandbox / "runs")):
             self.swap(bus, name, value)
         self.addCleanup(shutil.rmtree, self.sandbox, True)
+        self.addCleanup(bus._close_db)                    # one cached bus.sqlite handle per sandbox; the gate runs at 256 fds
         P.PERSIST.unlink(missing_ok=True)                 # a cooldown another test persisted would zero free_slots
         self.addCleanup(P.PERSIST.unlink, True)
         self.started, self.workers, self.merged = [], [], []
@@ -2008,6 +2011,7 @@ class Daemon(unittest.TestCase):
         bus.update(tid, worktree=str(self.sandbox))
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 2
+        pool.cfg["daemon"]["fast_lane_max_complexity"] = 0  # normal routed path, not the fast lane
         runs = []
 
         def probe(cmd, **kwargs):
@@ -2044,6 +2048,7 @@ class Daemon(unittest.TestCase):
         bus.update(tid, worktree=str(self.sandbox))
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["flaky_rerun_timeout_s"] = 17
+        pool.cfg["daemon"]["fast_lane_max_complexity"] = 0  # normal routed path, not the fast lane
 
         def probe(cmd, **kwargs):
             if cmd[-2:] == ["-c", "import pytest"]:
@@ -3544,9 +3549,9 @@ class Daemon(unittest.TestCase):
         self.assertIn(f"Tests-green log: {log}\n", gate_output)
         self.assertIn(".claude/hooks/tests-green.sh . </dev/null", gate_output)
         held = bus.get(tid)
-        self.assertEqual(daemon._fix_round_spec(held, 1, None, []), daemon._fix_round_spec(held, 1, None, []))
+        self.assertEqual(daemon._fix_round_spec(held, 1, None, [], True), daemon._fix_round_spec(held, 1, None, [], True))
         bus.update(tid, resume_hint={"failures": "x" * 5000})
-        data = daemon._fix_round_spec(bus.get(tid), 1, None, []).split("## Gate output\n", 1)[1]
+        data = daemon._fix_round_spec(bus.get(tid), 1, None, [], True).split("## Gate output\n", 1)[1]
         self.assertIn("x" * 4000 + "\n```", data)
         self.assertNotIn("x" * 4001, data)
         self.assertIn("Tests-green log: (none)", data)

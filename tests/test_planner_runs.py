@@ -25,6 +25,7 @@ class PlannerRunsBase(unittest.TestCase):
             (PR, "STATE", sandbox),
         ):
             self.swap(mod, name, value)
+        self.addCleanup(bus._close_db)  # one cached bus.sqlite handle per sandbox; the gate runs at 256 fds
         P.PERSIST.unlink(missing_ok=True)
         self.addCleanup(P.PERSIST.unlink, True)
         self.clear_env("ORCH_NOTIFY_URL")

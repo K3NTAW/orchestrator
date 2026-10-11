@@ -144,7 +144,7 @@ def _fix_parent(task):
 
 
 
-def _fix_round_spec(held, round_no, failed_ids, comments):
+def _fix_round_spec(held, round_no, failed_ids, comments, fast=False):
     prompt = (Path(__file__).resolve().parents[1] / ".orchestrator" / "prompts" / "fix-round.md").read_text()
     criteria = held.get("acceptance") or []
     selected = [c for c in criteria if any(i in c for i in (failed_ids or []))] or criteria
@@ -171,7 +171,7 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
     failure_text = fence_data(str(failures)[:3000])
     review_lines = [f"{c.get('path', '')}:{c.get('line', '')} {c.get('issue', '')}" for _, cs in comments for c in cs]
     gate_output = ""
-    if not failed_ids and str(failures).strip():
+    if fast and not failed_ids and str(failures).strip():
         # No parsed test ids: hand the executor the raw gate output and the run log instead. Deterministic for the
         # same inputs (no timestamps) so a re-filed round carries the same spec.
         log_lines = [line.strip() for line in str(failures).splitlines() if ".orchestrator/runs/tests/" in line]
@@ -212,16 +212,14 @@ def auto_fix_round(pool):
             continue
         reason = held.get("hold_reason", "")
         # Fast lane (2026-10-11, goal T-1792): a small task's first gate_red gets its fix round from this
-        # template with no flaky rerun probe and no headless Planner; exceptions fall through to the normal path.
-        fast = False
-        if planner_runs.fast_lane_candidate(held, pool.cfg, chain):
-            kind = failure_kind(held, held.get("worktree"), rerun_max=0)
-            fast = planner_runs.fast_lane_exception(held, kind, pool.cfg) is None
-        if not fast:
-            kind = failure_kind(held, held.get("worktree"),
-                                rerun_max=pool.cfg.get("daemon", {}).get("flaky_rerun_max", 1),
-                                rerun_timeout=min(pool.cfg.get("daemon", {}).get("flaky_rerun_timeout_s", 600),
-                                                  gate.settings(pool.cfg)["timeout_s"]))
+        # template with no headless Planner; flaky and other exceptions fall through to the normal path.
+        # The flaky rerun probe still runs first: a flaky first red escalates instead of filing a round.
+        kind = failure_kind(held, held.get("worktree"),
+                            rerun_max=pool.cfg.get("daemon", {}).get("flaky_rerun_max", 1),
+                            rerun_timeout=min(pool.cfg.get("daemon", {}).get("flaky_rerun_timeout_s", 600),
+                                              gate.settings(pool.cfg)["timeout_s"]))
+        fast = (planner_runs.fast_lane_candidate(held, pool.cfg, chain)
+                and planner_runs.fast_lane_exception(held, kind, pool.cfg) is None)
         with bus.locked():
             current = bus.get(held["id"])
             pipeline = dict(current.get("pipeline") or {})
@@ -269,7 +267,7 @@ def auto_fix_round(pool):
                     continue
                 n = rounds + 1
                 bus.create_task(
-                    f"fix round {n}: {root(current)['title']}", _fix_round_spec(current, n, ids, comments),
+                    f"fix round {n}: {root(current)['title']}", _fix_round_spec(current, n, ids, comments, fast),
                     current["acceptance"], current["scope"], role="execute", parent=current.get("parent"),
                     tier=current["tier"], complexity=current["complexity"],
                     inputs=[current["id"]] + [r["id"] for r, _ in comments],
