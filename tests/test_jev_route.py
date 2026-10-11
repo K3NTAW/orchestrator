@@ -1,3 +1,4 @@
+import _harness
 import json, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
