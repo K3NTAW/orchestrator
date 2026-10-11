@@ -532,7 +532,7 @@ class RunClaudeNormalisedUsage(unittest.TestCase):
         result = spawn.run_claude(P.Pool(), account, task, "prompt", "claude-sonnet-5",
                                   spawn.TOOLS["execute"], 2.0, 60)
         self.assertEqual(result["status"], "done")
-        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        row = json.loads(max(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
         self.assertEqual(row["goal_id"], goal["id"])
         self.assertEqual(row["provider"], "claude")
         self.assertEqual({key: row[key] for key in ("input_uncached_tokens", "cache_read_tokens",
