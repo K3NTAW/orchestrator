@@ -1789,10 +1789,12 @@ def _start_gate(t, worktree, pool):
             gate_runner.release_slot(slot)
     if not claimed:
         return None
-    thread = threading.Thread(target=_gate_worker, name=f"gate-{tid}", daemon=True,
-                              args=(run, gate.run_gate, worktree, merge.TESTS_GREEN, pool.cfg))
-    run["thread"] = thread
     try:
+        # resolved before the worker starts so the runner begins as soon as the thread does
+        run["mode"], run["base"] = _gate_scope(run, worktree, pool.cfg)
+        thread = threading.Thread(target=_gate_worker, name=f"gate-{tid}", daemon=True,
+                                  args=(run, gate.run_gate, worktree, merge.TESTS_GREEN, pool.cfg))
+        run["thread"] = thread
         thread.start()
     except Exception:
         with _LIVE_GATES_LOCK:
@@ -1818,7 +1820,7 @@ def _gate_worker(run, runner, worktree, script, cfg):
     outcome = {"error": RuntimeError("gate worker exited without a result")}
     token = gate_runner._HELD.set(run["slot"])  # _start_gate holds this gate's slot; run_gate must not wait on it
     try:
-        mode, base = _gate_scope(run, worktree, cfg)
+        mode, base = (run["mode"], run["base"]) if "mode" in run else _gate_scope(run, worktree, cfg)
         outcome = {"result": runner(worktree, script=script, task_id=run["task_id"], cfg=cfg, mode=mode, base=base)}
     except Exception as e:
         outcome = {"error": e}
