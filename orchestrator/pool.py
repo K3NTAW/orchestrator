@@ -1,6 +1,6 @@
 """Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with-headroom selection. State persists to
 pool_state.json so MCP server restarts don't forget cooldowns."""
-import fcntl, json, os, re, statistics, sys, time, tomllib
+import copy, fcntl, json, os, re, statistics, sys, time, tomllib
 from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
@@ -23,8 +23,24 @@ def encode_project_dir(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+_parsed = {}
+
+
+def _cached_parse(path, parse):
+    """parse(text) of path, reused while the file's (mtime, size, inode) is unchanged; keyed by absolute path so a
+    patched CFG/STATE never sees another root's parse. Callers get a deep copy they may mutate. A daemon tick
+    builds a fresh Pool() and re-read pool.toml and pool_state.json every time without this."""
+    st = path.stat()
+    key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    apath = (os.path.abspath(path), parse)
+    cached = _parsed.get(apath)
+    if cached is None or cached[0] != key:
+        cached = _parsed[apath] = (key, parse(path.read_text()))
+    return copy.deepcopy(cached[1])
+
+
 def config():
-    return tomllib.loads(CFG.read_text())
+    return _cached_parse(CFG, tomllib.loads)
 
 
 # [planner] keys read through planner_setting(); a missing or unreadable pool.toml yields these defaults.
@@ -42,7 +58,7 @@ def planner_setting(name, cfg=None):
 
 def _load_planner_usage():
     try:
-        return json.loads(PLANNER_USAGE.read_text())
+        return _cached_parse(PLANNER_USAGE, json.loads)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
@@ -230,7 +246,7 @@ class Pool:
     # persistence -------------------------------------------------------------------------------
     def _load(self):
         if PERSIST.exists():
-            st = json.loads(PERSIST.read_text())
+            st = _cached_parse(PERSIST, json.loads)
             for a in self.accounts:
                 a.__dict__.update({k: v for k, v in st.get("accounts", {}).get(a.id, {}).items()
                                    if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget",

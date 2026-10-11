@@ -22,6 +22,36 @@ class BusSandbox(unittest.TestCase):
 
 class Bus(BusSandbox):
 
+    def test_get_reuses_parse_until_file_changes(self):
+        tid = bus.create_task("cached", "spec", ["works"], ["x.py"])["id"]
+        real_read_text = Path.read_text
+        reads = []
+
+        def read_text(path, *a, **k):
+            if path.suffix == ".json":
+                reads.append(path.name)
+            return real_read_text(path, *a, **k)
+
+        with patch.object(Path, "read_text", read_text):
+            first = bus.get(tid)
+            second = bus.get(tid)
+            self.assertEqual(reads, [f"{tid}.json"])          # second get served from the cached parse
+            self.assertIsNot(first, second)                   # each caller gets its own top-level dict
+            first["status"] = "mutated"
+            self.assertEqual(bus.get(tid)["status"], "queued")
+            events = len(second["events"])
+            bus.update(tid, status="running")                 # rename-replace: new inode/mtime/size -> re-parse
+            self.assertEqual(len(second["events"]), events)   # update never appends to the cached list in place
+            self.assertEqual(bus.get(tid)["status"], "running")
+            self.assertEqual(reads.count(f"{tid}.json"), 2)   # update's own get hit the cache; the next get re-read
+        with self.assertRaises(KeyError):
+            bus.get("T-9999")
+        other = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="bus-other-")))
+        (other / "tasks").mkdir()
+        (other / "tasks" / f"{tid}.json").write_text(json.dumps({**bus.get(tid), "status": "elsewhere"}))
+        with patch.object(bus, "TASKS", other / "tasks"):
+            self.assertEqual(bus.get(tid)["status"], "elsewhere")   # keyed by absolute path, never another root's parse
+
     def test_reindex_adds_missing_json_rows(self):
         task = {"id": "T-0001", "status": "queued", "role": "execute", "tier": "sonnet"}
         bus.TASKS.mkdir(parents=True)

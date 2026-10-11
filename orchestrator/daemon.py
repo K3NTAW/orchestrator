@@ -921,6 +921,38 @@ def reap_orphaned_reviews(now=None):
     return reaped
 
 
+_depth_tick_cache = {}
+
+
+def _depth_inputs(root):
+    """(name, mtime, size, inode) of every file harness_depth.history_table parses (scorecard.efficiency: hot
+    tasks/*.json, runs/*.jsonl, runs/jev/*.jsonl); stat only, no reads. None when a file vanishes mid-listing."""
+    root = Path(root)
+    paths = [*(root / "tasks").glob("*.json"), *(root / "runs").glob("*.jsonl"), *(root / "runs" / "jev").glob("*.jsonl")]
+    try:
+        return os.path.abspath(root), tuple(sorted((str(p), st.st_mtime_ns, st.st_size, st.st_ino)
+                                                   for p in paths for st in (p.stat(),)))
+    except OSError:
+        return None
+
+
+def _begin_depth_tick(pool):
+    """harness_depth.begin_tick re-parses every hot task and run log on each dispatch. Outside active mode its result
+    is (mode, history) and history depends only on those files, so an idle tick reuses it while they are unchanged.
+    Active mode always re-evaluates its promotion gate."""
+    mode = promotion.mode("fast_path", pool.cfg)
+    inputs = _depth_inputs(bus.STATE) if mode != "active" else None
+    key = (harness_depth.begin_tick, harness_depth.history_table, mode, inputs)
+    hit = _depth_tick_cache.get("tick")
+    if inputs is not None and hit is not None and hit[0] == key:
+        pool.harness_depth_tick = {"mode": hit[1]["mode"], "history": hit[1]["history"]}
+        return pool.harness_depth_tick
+    depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
+    if inputs is not None and isinstance(depth_tick, dict) and depth_tick.get("mode") == mode:
+        _depth_tick_cache["tick"] = (key, depth_tick)
+    return depth_tick
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     try:
@@ -931,7 +963,7 @@ def dispatch(pool):
         clear_stale_dispatch_stamps(pool)
     except Exception as e:
         print(f"[daemon] clear_stale_dispatch_stamps failed: {e}", file=sys.stderr)
-    depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
+    depth_tick = _begin_depth_tick(pool)
     scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)

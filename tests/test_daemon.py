@@ -1637,6 +1637,37 @@ class Daemon(unittest.TestCase):
         self.swap(daemon, "_code_review_warned", False)   # one test triggers the bad-code_review-value notice
         self.gate_green(True)
 
+    def test_idle_tick_does_not_reread_unchanged_task_files(self):
+        """A tick over an unchanged bus reads no task json: bus.get/_scan serve the cached parse and the harness
+        depth history is reused while no task or run file changed."""
+        done = [self.task(f"done {i}") for i in range(5)]
+        for tid in done:
+            bus.update(tid, status="done")
+        held = self.task("held fix", constraints={"fix_round_for": done[0]})
+        bus.update(held, status="held", hold_reason="human")
+        daemon.tick()   # the first tick classifies the held fix round once (a write); the bus is stable after it
+        daemon.tick()
+        stamps = {p.name: (p.stat().st_mtime_ns, p.stat().st_size, p.stat().st_ino) for p in bus.TASKS.glob("*.json")}
+        tasks_dir = os.path.abspath(bus.TASKS)
+        reads = []
+        real_read_text, real_open = Path.read_text, open
+
+        def read_text(path, *a, **k):
+            if os.path.abspath(path).startswith(tasks_dir):
+                reads.append(str(path))
+            return real_read_text(path, *a, **k)
+
+        def opener(file, *a, **k):
+            if isinstance(file, (str, os.PathLike)) and os.path.abspath(file).startswith(tasks_dir):
+                reads.append(str(file))
+            return real_open(file, *a, **k)
+
+        with mock.patch.object(Path, "read_text", read_text), mock.patch("builtins.open", opener):
+            daemon.tick()
+        self.assertEqual({p.name: (p.stat().st_mtime_ns, p.stat().st_size, p.stat().st_ino) for p in bus.TASKS.glob("*.json")}, stamps)   # still unchanged
+        self.assertEqual(reads, [])
+        self.assertEqual(bus.get(held)["status"], "held")
+
     def swap(self, mod, name, value):
         orig = getattr(mod, name)
         setattr(mod, name, value)

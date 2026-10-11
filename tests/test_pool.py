@@ -24,6 +24,37 @@ def _user(ts):
     return json.dumps({"type": "user", "timestamp": ts, "message": {"usage": {"input_tokens": 999}}}) + "\n"
 
 
+class ConfigCache(unittest.TestCase):
+    def test_config_is_cached_by_mtime_and_invalidates_on_change(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="pool-cfg-")))
+        cfg = root / "pool.toml"
+        cfg.write_text('window_cap_tokens = 1\n[review]\nmode = "a"\n')
+        real_read_text = Path.read_text
+        reads = []
+
+        def read_text(path, *a, **k):
+            reads.append(path.name)
+            return real_read_text(path, *a, **k)
+
+        with mock.patch.object(P, "CFG", cfg), mock.patch.object(Path, "read_text", read_text):
+            first = P.config()
+            first["review"]["mode"] = "mutated"                  # a caller's copy never leaks into the cache
+            second = P.config()
+            self.assertEqual(reads, ["pool.toml"])
+            self.assertEqual(second, {"window_cap_tokens": 1, "review": {"mode": "a"}})
+            st = cfg.stat()
+            cfg.write_text('window_cap_tokens = 2\n[review]\nmode = "a"\n')   # same size: mtime decides
+            os.utime(cfg, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            self.assertEqual(P.config()["window_cap_tokens"], 2)
+            self.assertEqual(reads, ["pool.toml", "pool.toml"])
+            other = root / "other.toml"
+            other.write_text("window_cap_tokens = 3\n")
+            with mock.patch.object(P, "CFG", other):
+                self.assertEqual(P.config()["window_cap_tokens"], 3)   # keyed by absolute path
+        with mock.patch.object(P, "CFG", root / "missing.toml"), self.assertRaises(FileNotFoundError):
+            P.config()
+
+
 class PoolSel(unittest.TestCase):
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()

@@ -72,6 +72,8 @@ def db():
         try:
             c.execute("create table if not exists tasks(id text primary key, status, role, tier, assigned_to, updated real)")
             c.execute("create table if not exists events(seq integer primary key autoincrement, task_id, ts real, kind, data)")
+            # per-task lookups (planner_runs.state_version: max(seq) per child every tick) were full table scans
+            c.execute("create index if not exists events_task_seq on events(task_id, seq)")
         except BaseException:
             c.close()
             raise
@@ -100,14 +102,15 @@ def _event(tid, kind, data=None):
 
 
 def get(tid):
-    """One task from disk; an archived id falls back to tasks/archive/."""
+    """One task from disk; an archived id falls back to tasks/archive/. Reuses the last parse of an unchanged file
+    (_load_cached): the returned top-level dict is the caller's own, nested values must not be mutated in place."""
     with locked():
-        p = TASKS / f"{tid}.json"
-        if not p.exists():
-            p = TASKS / ARCHIVE_DIR / f"{tid}.json"
-            if not p.exists():
-                raise KeyError(tid)
-        return json.loads(p.read_text())
+        for p in (TASKS / f"{tid}.json", TASKS / ARCHIVE_DIR / f"{tid}.json"):
+            try:
+                return _load_cached(p)
+            except FileNotFoundError:
+                continue
+        raise KeyError(tid)
 
 
 def next_id():
@@ -156,7 +159,7 @@ def update(tid, **fields):
             if k in {"spec", "acceptance", "scope", "complexity", "depends_on"}:
                 raise PermissionError(f"only the Planner may set {k}; create a new task instead")
             t[k] = v
-        t["events"].append({"ts": time.time(), **fields})
+        t["events"] = [*t["events"], {"ts": time.time(), **fields}]   # the nested list is shared with get()'s cache
         _save(t); _event(tid, "update", fields)
     return t
 
@@ -253,17 +256,23 @@ def _scan(ids=None):
 _parsed = {}
 
 
-def _load_hot(task_id):
-    """A hot task, reusing the last parse while the file's (mtime, size, inode) is unchanged: json.loads of the
-    multi-MB event logs dominates a scan. _save replaces files by rename, so every write re-parses. The caller
-    gets its own top-level dict; nested values are shared with the cache and must not be mutated in place."""
-    path = TASKS / f"{task_id}.json"
-    st = path.stat()   # FileNotFoundError (an OSError) for an index row without a hot file
-    key = (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
-    cached = _parsed.get(task_id)
+def _load_cached(path):
+    """A task file, reusing the last parse while the file's (mtime, size, inode) is unchanged: json.loads of the
+    multi-MB event logs dominates a scan. Keyed by absolute path, so a patched TASKS/STATE never sees another
+    root's parse. _save replaces files by rename, so every write re-parses. The caller gets its own top-level
+    dict; nested values are shared with the cache and must not be mutated in place."""
+    st = path.stat()   # FileNotFoundError (an OSError) for a missing file
+    key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    apath = os.path.abspath(path)
+    cached = _parsed.get(apath)
     if cached is None or cached[0] != key:
-        cached = _parsed[task_id] = (key, json.loads(path.read_text()))
+        cached = _parsed[apath] = (key, json.loads(path.read_text()))
     return dict(cached[1])
+
+
+def _load_hot(task_id):
+    """A hot task through the parse cache; FileNotFoundError for an index row without a hot file."""
+    return _load_cached(TASKS / f"{task_id}.json")
 
 
 class Snapshot:
@@ -411,7 +420,7 @@ def archive(tasks=None, now=None, max_age_s=ARCHIVE_AFTER_S):
             raise
         c.execute("commit")
         for tid in moved:
-            _parsed.pop(tid, None)
+            _parsed.pop(os.path.abspath(TASKS / f"{tid}.json"), None)
             if _snapshot is not None:
                 _snapshot.drop(tid)
     if moved:
