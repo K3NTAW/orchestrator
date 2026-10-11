@@ -1706,8 +1706,8 @@ class Daemon(unittest.TestCase):
         self.swap(daemon.gate, "run_gate", fake_gate)
 
     def task(self, title, complexity=2, role="execute", **fields):
-        t = bus.create_task(title, "spec", ["works"], ["x.py"], role=role, complexity=complexity,
-                            parent="T-0043", **fields)
+        fields.setdefault("parent", "T-0043")
+        t = bus.create_task(title, "spec", ["works"], ["x.py"], role=role, complexity=complexity, **fields)
         return t["id"]
 
     def settle(self, want, seconds=5):
