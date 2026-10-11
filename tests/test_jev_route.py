@@ -1,3 +1,4 @@
+import _harness
 import json, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
@@ -111,7 +112,7 @@ class JevRoute(unittest.TestCase):
         self.assertEqual(set(rows), {"newest", "added"})
 
     def test_pool_toml_jev_routing_table_follows_jev(self):
-        path = Path(__file__).parents[1] / ".orchestrator" / "pool.toml"
+        path = _harness.FIXTURE_POOL
         lines = path.read_text().splitlines()
         jev = lines.index("[jev]")
         routing = lines.index("[jev.routing]")

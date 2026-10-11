@@ -9,7 +9,7 @@ import hashlib, os, subprocess, tempfile, tomllib
 from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_jev_gate.py` doesn't add this dir itself
-from _harness import REPO, TMP, hook
+from _harness import FIXTURE_POOL, REPO, TMP, hook
 from orchestrator import bus, jev, jev_gate
 
 BLOCK_CFG = {"enabled": True, "gate_mode": "block"}
@@ -242,7 +242,7 @@ class JevGateTests(unittest.TestCase):
             self.assertEqual(self._run(payload, task), 0)
 
     def test_hook_honours_sample_defaults(self):
-        config = tomllib.loads((REPO / ".orchestrator/pool.toml").read_text())["jev"]
+        config = tomllib.loads(FIXTURE_POOL.read_text())["jev"]
         self.assertEqual((config["gate_mode"], config["sample_rate"], config["block_repeats"]),
                          ("sample", 0.1, False))
         task = self._task()["id"]

@@ -1662,14 +1662,17 @@ def gate(pool):
 
 def _start_gate(t, worktree, pool):
     """Reserve a live-gate slot, stamp the in-flight marker and start gate.run_gate on a worker thread. Returns
-    None, with nothing stamped, when [gate].max_parallel is full or another gate already runs in this worktree."""
+    None, with nothing stamped, when [gate].max_parallel is full or another gate already runs in this worktree.
+    The cap is the repo-wide gate slot count (gate.try_acquire_slot), shared with merge and ship gates."""
     tid = t["id"]
     key = str(Path(worktree).resolve())
-    cap = gate_runner.settings(pool.cfg)["max_parallel"]
-    run = {"task_id": tid, "worktree": key, "run_id": uuid.uuid4().hex, "started_at": time.time(), "thread": None}
+    slot = gate_runner.slot_key(worktree, tid)
+    run = {"task_id": tid, "worktree": key, "run_id": uuid.uuid4().hex, "started_at": time.time(), "thread": None,
+           "slot": slot}
     with _LIVE_GATES_LOCK:
-        if (tid in _LIVE_GATES or len(_LIVE_GATES) >= cap
-                or any(entry["worktree"] == key for entry in _LIVE_GATES.values())):
+        if tid in _LIVE_GATES or any(entry["worktree"] == key for entry in _LIVE_GATES.values()):
+            return None
+        if not gate_runner.try_acquire_slot(slot, pool.cfg):
             return None
         _LIVE_GATES[tid] = run
     claimed = False
@@ -1688,6 +1691,7 @@ def _start_gate(t, worktree, pool):
         if not claimed:
             with _LIVE_GATES_LOCK:
                 _LIVE_GATES.pop(tid, None)
+            gate_runner.release_slot(slot)
     if not claimed:
         return None
     thread = threading.Thread(target=_gate_worker, name=f"gate-{tid}", daemon=True,
@@ -1698,6 +1702,7 @@ def _start_gate(t, worktree, pool):
     except Exception:
         with _LIVE_GATES_LOCK:
             _LIVE_GATES.pop(tid, None)
+        gate_runner.release_slot(slot)
         clear_stage(tid, "gate_started_at", clear_pipeline_keys=GATE_MARKER_KEYS)
         raise
     return run
@@ -1706,11 +1711,14 @@ def _start_gate(t, worktree, pool):
 def _gate_worker(run, runner, worktree, script, cfg):
     """Background half of a gate: only the test subprocess. Everything that touches the bus runs in _reap_gates."""
     outcome = {"error": RuntimeError("gate worker exited without a result")}
+    token = gate_runner._HELD.set(run["slot"])  # _start_gate holds this gate's slot; run_gate must not wait on it
     try:
         outcome = {"result": runner(worktree, script=script, task_id=run["task_id"], cfg=cfg)}
     except Exception as e:
         outcome = {"error": e}
     finally:
+        gate_runner._HELD.reset(token)
+        gate_runner.release_slot(run["slot"])
         with _LIVE_GATES_LOCK:
             _GATE_RESULTS[run["task_id"]] = {"run_id": run["run_id"], **outcome}
             if _LIVE_GATES.get(run["task_id"]) is run:
