@@ -1486,13 +1486,13 @@ FAST_LANE_ESCALATE_KINDS = {"conflict", "environment", "permissions", "quota", "
 
 def fast_lane_candidate(task, cfg, chain=None):
     """Cheap half of the fast lane (2026-10-11, goal T-1792): a held execute task at or below
-    [daemon].fast_lane_max_complexity, held gate_red, on its first red with no fix round anywhere in its lineage.
+    [daemon].fast_lane_max_complexity (absent key: 0, lane off), held gate_red, on its first red with no fix round anywhere in its lineage.
     The daemon files that first fix round itself; a second red goes through the normal routing."""
     if not task or task.get("role") != "execute" or task.get("status") != "held":
         return False
     if task.get("hold_reason") != "gate_red":
         return False
-    limit = (cfg.get("daemon") or {}).get("fast_lane_max_complexity", 3)
+    limit = (cfg.get("daemon") or {}).get("fast_lane_max_complexity", 0)
     try:
         if int(task.get("complexity") or 0) < 1 or int(task["complexity"]) > int(limit):
             return False
