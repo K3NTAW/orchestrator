@@ -408,7 +408,7 @@ class GateTimeoutTest(unittest.TestCase):
         script = self.script("exit 0\n")
         with mock.patch.object(gate.os, "replace", side_effect=replace):
             path = gate.write_waiting_entry("T-9", task_id="T-9", worktree="/w", mode=None, base=None)
-            result = gate.run_gate(self.root, script=script, task_id="T-8", cfg={"gate": {"timeout_s": 30}})
+            result = gate.run_gate(self.root, script=script, task_id="T-8", cfg={"gate": {"timeout_s": 30, "max_parallel": 2}})
         self.assertEqual(result["returncode"], 0)
         self.assertEqual([(src.name, dst.name, existed) for src, dst, existed in seen],
                          [("T-9.tmp", "T-9.json", True), ("T-8.tmp", "T-8.json", True)])
