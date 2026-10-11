@@ -135,7 +135,9 @@ class PlannerRouterTests(unittest.TestCase):
             "hard_complexity_min": 9, "hard_security": True,
             "hard_spec_review_request_changes_min": 2, "hard_ambiguous": True,
             "min_samples": 20, "shadow_sample_rate": 1.0, "fable_reserve_share": 0.2,
-            "jev_mode": "shadow", "soft_threshold": 0.5,
+            "jev_mode": "shadow", "soft_threshold": 0.5, "cheap_tier": "sonnet",
+            "cheap_kinds": ["gate_red", "conflict"], "cheap_reescalation_max": 0.3,
+            "cheap_min_samples": 0,
         })
         with patch.object(router, "_WARNED", set()), patch.object(router.notify, "notify") as notify, \
                 patch.object(router.notify.bus, "locked", side_effect=AssertionError("bus access")):
@@ -233,7 +235,7 @@ class PlannerRouterTests(unittest.TestCase):
         result = self.choose(ctx=ctx, availability=self.availability)
         self.assertEqual((result.tier, result.reasons), ("opus", ("cheap_kind:gate_red:opus",)))
         bad = {"n": 30, "noninferior": False, "reescalation_rate": 0.9}
-        result = self.choose(ctx=ctx, availability=availability,
+        result = self.choose(ctx=ctx, availability=availability, evidence=bad,
                              tier_evidence={"sonnet": bad, "opus": bad, "fable": bad})
         self.assertEqual(result.tier, "fable")
         self.assertFalse(result.reasons[0].startswith("cheap_kind"))
