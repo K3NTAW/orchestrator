@@ -564,7 +564,10 @@ class HotSet(BusSandbox):
         with patch.object(bus.fcntl, "flock", wraps=bus.fcntl.flock) as flock:
             rows = bus.read()
         self.assertEqual(len(rows), 5)
-        self.assertEqual(flock.call_count, 1)
+        # T-1820: locked() keeps one shared descriptor and releases with an explicit
+        # LOCK_UN, so count LOCK_EX acquisitions rather than raw flock calls.
+        acquires = [c for c in flock.call_args_list if c.args[1] & bus.fcntl.LOCK_EX]
+        self.assertEqual(len(acquires), 1)
 
     def test_archive_moves_old_closed_tasks_and_get_still_finds_them(self):
         old = time.time() - 8 * 86400
