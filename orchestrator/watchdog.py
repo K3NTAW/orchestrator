@@ -306,6 +306,8 @@ def gate_live(repos):
     for repo in repos:
         for path in (Path(repo) / ".orchestrator" / "gates").glob("*.json"):
             entry = _json(path, None)
+            if isinstance(entry, dict) and entry.get("state") == "waiting":
+                continue  # a gate queued for the machine slot has no process yet
             pid = entry.get("pid") if isinstance(entry, dict) else None
             if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < MAX_PID and machine._pid_alive(pid):
                 return True

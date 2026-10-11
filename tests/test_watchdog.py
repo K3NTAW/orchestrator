@@ -547,6 +547,18 @@ class WatchdogTests(unittest.TestCase):
             self.assertEqual(self.real_sweep([str(repo)]), 0)
         sub.assert_not_called()
 
+    def test_gate_live_ignores_waiting_entry(self):
+        repo = self.repo()
+        gates = repo / ".orchestrator" / "gates"
+        gates.mkdir()
+        (gates / "T-1.json").write_text(json.dumps({"state": "waiting", "owner_pid": os.getpid(),
+                                                     "pid": os.getpid()}))
+        with mock.patch.object(machine, "_pid_alive", return_value=True) as alive:
+            self.assertFalse(watchdog.gate_live([str(repo)]))
+        alive.assert_not_called()
+        (gates / "T-2.json").write_text(json.dumps({"pid": os.getpid()}))
+        self.assertTrue(watchdog.gate_live([str(repo)]))
+
     def test_l8_plist_paths_escaped(self):
         root = self.root / "a&b<c>"
         root.mkdir()

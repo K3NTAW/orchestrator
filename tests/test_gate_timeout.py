@@ -10,6 +10,7 @@ from unittest import mock
 
 import _harness  # noqa: F401 - use the suite's single shared ORCH_ROOT
 from orchestrator import bus, daemon, decision, failures, gate, merge, planner_runs
+from orchestrator import machine as gate_machine
 
 
 class GateTimeoutTest(unittest.TestCase):
@@ -360,6 +361,119 @@ class GateTimeoutTest(unittest.TestCase):
         result = gate.running_gates(now=181)
         self.assertEqual([entry["task_id"] for entry in result], ["old"])
         self.assertEqual(result[0]["elapsed_s"], 81)
+
+    # waiting registry entry --------------------------------------------------------------------------------
+    def waiting(self, key="T-9", **fields):
+        gates = self.state / "gates"
+        gates.mkdir(exist_ok=True)
+        entry = {"state": "waiting", "task_id": key, "worktree": "/w", "owner_pid": 4242, "owner_start": "S",
+                 "waiting_for": "machine_slot", "waiting_since": 1.0, "mode": "task", "base": "abc", **fields}
+        path = gates / f"{key}.json"
+        path.write_text(json.dumps(entry))
+        return path
+
+    def owner(self, alive=True, start="S"):
+        return mock.patch.multiple(gate_machine, _pid_alive=mock.Mock(return_value=alive),
+                                   process_start=mock.Mock(return_value=start))
+
+    def test_is_waiting_entry_predicate(self):
+        self.assertTrue(gate.is_waiting({"state": "waiting"}))
+        for entry in ({}, {"state": "running"}, {"pid": 1}, None, [], "waiting"):
+            self.assertFalse(gate.is_waiting(entry))
+        self.assertEqual(gate.WAITING, "waiting")
+
+    def test_write_waiting_entry_shape_has_no_pid_or_timeout(self):
+        with mock.patch.object(gate.time, "time", return_value=123.0):
+            path = gate.write_waiting_entry("T-9", task_id="T-9", worktree=Path("/w"), mode="task", base="abc")
+        self.assertEqual(path, self.state / "gates" / "T-9.json")
+        entry = json.loads(path.read_text())
+        owner = gate._owner()
+        self.assertEqual(entry, {"state": "waiting", "task_id": "T-9", "worktree": "/w",
+                                 "owner_pid": owner["pid"], "owner_start": owner["start"],
+                                 "waiting_for": "machine_slot", "waiting_since": 123.0,
+                                 "mode": "task", "base": "abc"})
+        for key in ("pid", "pgid", "proc_start", "started_at", "timeout_s"):
+            self.assertNotIn(key, entry)
+        self.assertTrue(gate.is_waiting(entry))
+
+    def test_registry_writes_are_atomic_and_leave_no_tmp(self):
+        gates = self.state / "gates"
+        seen = []
+        real_replace = os.replace
+
+        def replace(src, dst):
+            seen.append((Path(src), Path(dst), Path(src).exists()))
+            real_replace(src, dst)
+
+        script = self.script("exit 0\n")
+        with mock.patch.object(gate.os, "replace", side_effect=replace):
+            path = gate.write_waiting_entry("T-9", task_id="T-9", worktree="/w", mode=None, base=None)
+            result = gate.run_gate(self.root, script=script, task_id="T-8", cfg={"gate": {"timeout_s": 30}})
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual([(src.name, dst.name, existed) for src, dst, existed in seen],
+                         [("T-9.tmp", "T-9.json", True), ("T-8.tmp", "T-8.json", True)])
+        self.assertTrue(path.exists())
+        self.assertEqual(list(gates.glob("*.tmp")), [])
+        self.assertEqual(sorted(p.name for p in gates.iterdir()), ["T-9.json"])
+
+    def test_live_registry_counts_waiting_entry_of_live_owner(self):
+        self.waiting()
+        with self.owner(), mock.patch.object(gate, "_group_alive") as group:
+            self.assertEqual(gate._live_registry_keys(), {"T-9"})
+            self.assertEqual(gate.live_slots(), 1)
+        group.assert_not_called()
+        self.waiting(owner_start=None)
+        with self.owner(start="other"):
+            self.assertEqual(gate._live_registry_keys(), {"T-9"})
+
+    def test_live_registry_skips_waiting_entry_of_dead_or_reused_owner(self):
+        self.waiting()
+        with self.owner(alive=False), mock.patch.object(gate, "_group_alive") as group:
+            self.assertEqual(gate._live_registry_keys(), set())
+        group.assert_not_called()
+        with self.owner(start="other"):
+            self.assertEqual(gate._live_registry_keys(), set())
+        self.waiting(owner_pid="4242")
+        with self.owner():
+            self.assertEqual(gate._live_registry_keys(), set())
+
+    def test_running_gates_skips_waiting_entry(self):
+        self.waiting(waiting_since=0)
+        self.assertEqual(gate.running_gates(now=10_000), [])
+
+    def test_reap_orphans_unlinks_waiting_entry_of_dead_owner_without_signal(self):
+        path = self.waiting()
+        with self.owner(alive=False), mock.patch.object(gate.os, "killpg") as killpg, \
+                mock.patch.object(gate, "_stop_group") as stop:
+            self.assertEqual(gate.reap_orphans(grace_s=0), [])
+        killpg.assert_not_called()
+        stop.assert_not_called()
+        self.assertFalse(path.exists())
+
+    def test_reap_orphans_unlinks_stale_own_pid_waiting_entry_with_other_start(self):
+        path = self.waiting(owner_pid=os.getpid(), owner_start="old-start")
+        with mock.patch.object(gate_machine, "process_start", return_value="new-start"), \
+                mock.patch.object(gate.os, "killpg") as killpg, mock.patch.object(gate, "_stop_group") as stop:
+            self.assertEqual(gate.reap_orphans(grace_s=0), [])
+        killpg.assert_not_called()
+        stop.assert_not_called()
+        self.assertFalse(path.exists())
+
+    def test_reap_orphans_keeps_waiting_entry_of_live_owner(self):
+        path = self.waiting()
+        with self.owner(), mock.patch.object(gate.os, "killpg") as killpg, \
+                mock.patch.object(gate, "_stop_group") as stop:
+            self.assertEqual(gate.reap_orphans(grace_s=0), [])
+        killpg.assert_not_called()
+        stop.assert_not_called()
+        self.assertTrue(path.exists())
+
+    def test_terminate_own_unlinks_own_waiting_entry(self):
+        own = self.waiting("T-1", owner_pid=os.getpid())
+        other = self.waiting("T-2")
+        self.assertEqual(gate.terminate_own(grace_s=0), [])
+        self.assertFalse(own.exists())
+        self.assertTrue(other.exists())
 
 
 if __name__ == "__main__":

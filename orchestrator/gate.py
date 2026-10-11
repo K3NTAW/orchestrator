@@ -32,6 +32,9 @@ _SLOTS = {}
 _SLOTS_LOCK = threading.Lock()
 _HELD = ContextVar("gate_slot_held", default=None)
 SLOT_POLL_S = 5
+# Registry entry state of a gate queued for the machine heavy-gate slot (docs/gate-contract.md): no gate process
+# exists yet, so the entry carries only its owner, never pid, pgid, proc_start, started_at or timeout_s.
+WAITING = "waiting"
 
 
 class Aborted(RuntimeError):
@@ -46,6 +49,39 @@ def _owner():
         _OWNER.clear()
         _OWNER.update(pid=os.getpid(), start=machine.process_start(os.getpid()))
     return _OWNER
+
+
+def _write_registry(path, entry):
+    """Write a registry entry atomically: a reader sees the old entry or the new one, never a partial file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entry))
+    os.replace(tmp, path)
+    return path
+
+
+def write_waiting_entry(key, *, task_id, worktree, mode, base):
+    """Register a gate that waits for the machine heavy-gate slot. Returns the registry path."""
+    owner = _owner()
+    return _write_registry(STATE / "gates" / f"{key}.json",
+                           {"state": WAITING, "task_id": task_id, "worktree": str(worktree),
+                            "owner_pid": owner["pid"], "owner_start": owner["start"],
+                            "waiting_for": "machine_slot", "waiting_since": time.time(),
+                            "mode": mode, "base": base})
+
+
+def is_waiting(entry):
+    return isinstance(entry, dict) and entry.get("state") == WAITING
+
+
+def _owner_alive(entry):
+    """The process that wrote entry still runs: pid alive and, when recorded, the same start time."""
+    from . import machine
+    pid = entry.get("owner_pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or not machine._pid_alive(pid):
+        return False
+    return entry.get("owner_start") is None or machine.process_start(pid) in (None, entry["owner_start"])
 
 
 def settings(cfg=None):
@@ -172,12 +208,17 @@ def slot_key(worktree, task_id=None):
 
 
 def _live_registry_keys():
-    """Registry keys whose gate process group still runs (a reused pid with another start time does not)."""
+    """Registry keys whose gate process group still runs (a reused pid with another start time does not). A
+    waiting entry counts while its owner lives: a gate queued for the machine slot keeps its repo slot."""
     from . import machine
     keys = set()
     for path in (STATE / "gates").glob("*.json"):
         try:
             entry = json.loads(path.read_text())
+            if is_waiting(entry):
+                if _owner_alive(entry):
+                    keys.add(path.stem)
+                continue
             pid = int(entry["pid"])
             pgid = int(entry.get("pgid") or pid)
         except (OSError, ValueError, KeyError, TypeError):
@@ -266,12 +307,11 @@ def _run_gate(worktree, *, script, task_id, cfg, env, key, mode=None, base=None)
         def register(pid):
             from . import machine
             owner = _owner()
-            gates_dir.mkdir(parents=True, exist_ok=True)
-            registry.write_text(json.dumps({"task_id": task_id, "worktree": str(worktree),
+            _write_registry(registry, {"task_id": task_id, "worktree": str(worktree),
                                             "pid": pid, "pgid": pid, "proc_start": machine.process_start(pid),
                                             "owner_pid": owner["pid"], "owner_start": owner["start"],
                                             "started_at": time.time(), "timeout_s": opts["timeout_s"],
-                                            "mode": mode, "base": base}))
+                                            "mode": mode, "base": base})
 
         token = _ON_START.set(register)
         try:
@@ -304,6 +344,8 @@ def running_gates(now=None, threshold=0.8):
     for path in (STATE / "gates").glob("*.json"):
         try:
             entry = json.loads(path.read_text())
+            if is_waiting(entry):
+                continue
             elapsed = now - entry["started_at"]
             if elapsed > threshold * entry["timeout_s"]:
                 entries.append({**entry, "elapsed_s": elapsed})
@@ -368,12 +410,16 @@ def reap_orphans(grace_s=KILL_GRACE_S):
     when its owner pid is dead or reused (start time differs), or, for entries written before owner_pid
     existed, when the gate was reparented to init. A gate pid now used by another process (start time differs)
     is forgotten, not killed. Gates of a live owner (a CLI merge, another process) are left alone. Returns the
-    killed entries."""
+    killed entries. A waiting entry has no process to signal: it is unlinked when its owner is gone."""
     from . import machine
     killed = []
     for path in (STATE / "gates").glob("*.json"):
         try:
             entry = json.loads(path.read_text())
+            if is_waiting(entry):
+                if not _owner_alive(entry):
+                    path.unlink(missing_ok=True)
+                continue
             pid = int(entry["pid"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
