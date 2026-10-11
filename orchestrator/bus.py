@@ -20,13 +20,68 @@ STATUSES = {"queued", "held", "running", "done", "failed"}
 LOCK_NAME = "bus.lock"
 LOCK = STATE / LOCK_NAME
 _held = threading.local()
+# 2026-10-11, T-1820: one process-wide lock for bus.lock. flock keys on the open file description, so two threads
+# that each open bus.lock and flock it block each other (the daemon hung with three fds on it). The RLock
+# serializes threads inside the process; one shared descriptor carries the flock for the outermost holder only.
+_rlock = threading.RLock()
+_fh = None  # (pid, path, file) of the shared descriptor; pid guards a forked child from reusing the parent's
+_holder = None  # (thread name, stage) of the current outermost holder, for the long-wait warning
+LOCK_WAIT_WARN_S = 60.0  # default for [daemon].lock_wait_warn_s
+_LOCK_POLL_S = 0.05
+_warn_cache = {}
+
+
+def lock_wait_warn_s():
+    """[daemon].lock_wait_warn_s from STATE/pool.toml, cached by mtime; the default when missing or unreadable."""
+    path = STATE / "pool.toml"
+    try:
+        mtime = path.stat().st_mtime_ns
+        if _warn_cache.get("key") != (str(path), mtime):
+            import tomllib
+            value = tomllib.loads(path.read_text()).get("daemon", {}).get("lock_wait_warn_s", LOCK_WAIT_WARN_S)
+            _warn_cache.update(key=(str(path), mtime), value=float(value))
+        return _warn_cache["value"]
+    except Exception:  # an unreadable pool.toml must never stop a bus write
+        return LOCK_WAIT_WARN_S
+
+
+def _descriptor():
+    """The one open descriptor on LOCK for this process (re-opened when LOCK moves or after a fork). Callers hold
+    _rlock."""
+    global _fh
+    path = Path(LOCK)
+    if _fh is not None and _fh[0] == os.getpid() and _fh[1] == path and not _fh[2].closed:
+        return _fh[2]
+    if _fh is not None and _fh[0] == os.getpid():
+        try:
+            _fh[2].close()
+        except OSError:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _fh = (os.getpid(), path, open(path, "a+"))
+    return _fh[2]
+
+
+def _warn_wait(stage, waited, holder):
+    print(f"[bus] lock wait {waited:.1f}s: stage {stage} thread {threading.current_thread().name} waits on "
+          f"bus.lock held by {holder}", file=sys.stderr)
+
+
+def _caller_stage():
+    try:
+        frame = sys._getframe(3)
+        return f"{Path(frame.f_code.co_filename).stem}.{frame.f_code.co_name}"
+    except (ValueError, AttributeError):
+        return "?"
 
 
 @contextlib.contextmanager
-def locked():
-    """Serialize bus writes across the daemon, its worker threads and the Planner: an flock on .orchestrator/bus.lock,
-    the same pattern as merge.lock. Reentrant per thread — flock keys on the open file description, so update() ->
-    _save() opening the lock a second time would block on itself without the depth counter."""
+def locked(stage=None):
+    """Serialize bus writes across the daemon, its worker threads and the Planner: an flock on .orchestrator/bus.lock.
+    Re-entrant within a thread (a depth counter: update() -> _save() nests), serialized across threads by one
+    process-wide RLock, and across processes by one shared descriptor's flock taken once per outermost holder.
+    A wait past [daemon].lock_wait_warn_s logs the waiting stage and the holder once."""
+    global _holder
     depth = getattr(_held, "depth", 0)
     if depth:
         _held.depth = depth + 1
@@ -35,14 +90,46 @@ def locked():
         finally:
             _held.depth = depth
         return
-    STATE.mkdir(parents=True, exist_ok=True)
-    with open(LOCK, "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    stage = stage or _caller_stage()
+    warn_s = lock_wait_warn_s()
+    started = time.monotonic()
+    warned = False
+    if not _rlock.acquire(timeout=warn_s):
+        holder = _holder
+        _warn_wait(stage, time.monotonic() - started, f"thread {holder[0]} stage {holder[1]}" if holder else "?")
+        warned = True
+        _rlock.acquire()
+    try:
+        fh = _descriptor()
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not warned and time.monotonic() - started > warn_s:
+                    try:
+                        fh.seek(0)
+                        holder = fh.read().strip() or "another process"
+                    except OSError:
+                        holder = "another process"
+                    _warn_wait(stage, time.monotonic() - started, holder)
+                    warned = True
+                time.sleep(_LOCK_POLL_S)
+        try:
+            name = threading.current_thread().name
+            fh.seek(0); fh.truncate(); fh.write(f"pid {os.getpid()} thread {name} stage {stage}\n"); fh.flush()
+        except OSError:
+            pass
+        _holder = (threading.current_thread().name, stage)
         _held.depth = 1
         try:
             yield
         finally:
             _held.depth = 0
+            _holder = None
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        _rlock.release()
 
 
 _connections = threading.local()

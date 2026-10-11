@@ -8,6 +8,7 @@ import resource
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -81,15 +82,33 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# 2026-10-11, T-1820: flock keys on the open file description, so two daemon threads that each open machine.lock
+# block each other and a nested call hangs on itself. A process-wide RLock serializes threads and makes nesting
+# re-entrant; only the outermost holder opens the file and takes the flock.
+_STATE_LOCK = threading.RLock()
+_state_depth = threading.local()
+
+
 @contextmanager
 def _machine_state():
-    MACHINE_DIR.mkdir(parents=True, exist_ok=True)
-    with LOCK.open("a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    with _STATE_LOCK:
+        depth = getattr(_state_depth, "n", 0)
+        if depth:
+            _state_depth.n = depth + 1
+            try:
+                yield
+            finally:
+                _state_depth.n = depth
+            return
+        MACHINE_DIR.mkdir(parents=True, exist_ok=True)
+        with LOCK.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _state_depth.n = 1
+            try:
+                yield
+            finally:
+                _state_depth.n = 0
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _read(path: Path, default):

@@ -185,6 +185,38 @@ class WatchdogTests(unittest.TestCase):
         self.run_once()
         self.assertEqual(len(self.sent), 1)  # still dead: restart retried, not re-notified
 
+    def test_restarts_hung_daemon(self):
+        repo = self.repo()
+        machine.register_repo(repo)
+        (repo / ".orchestrator" / "daemon.lock").write_text("4242 cli\n")
+        beat = repo / ".orchestrator" / "daemon_tick.json"
+        beat.write_text(json.dumps({"pid": 4242, "finished_at": NOW - watchdog.HUNG_S + 60}))
+        stopped = []
+
+        def once():
+            with mock.patch.object(watchdog, "daemon_alive", return_value=True):
+                return watchdog.run_once(now=NOW, start=lambda r: self.started.append(str(r)) or "log",
+                                         confirm=lambda r: True, send=self.sent.append, stop=stopped.append)
+
+        once()  # ticked 14 min ago: not hung
+        self.assertEqual((stopped, self.started, self.sent), ([], [], []))
+        beat.write_text(json.dumps({"pid": 4242, "finished_at": NOW - watchdog.HUNG_S - 1}))
+        out = once()
+        self.assertEqual(stopped, [4242])
+        self.assertEqual(self.started, [str(repo.resolve())])
+        self.assertIn(f"{repo.resolve()}:daemon_hung", out["conditions"])
+        self.assertIn("no tick finished for 15 min", self.sent[0])
+        self.assertIn("restarted", self.sent[0])
+        beat.write_text(json.dumps({"pid": 999, "finished_at": NOW - 10 * watchdog.HUNG_S}))
+        once()  # heartbeat from another pid is never stale
+        self.assertEqual(stopped, [4242])
+
+    def test_tick_writes_heartbeat(self):
+        beat = self.root / "daemon_tick.json"
+        with mock.patch.object(daemon, "TICK_HEARTBEAT", beat), mock.patch.object(daemon, "STATE", self.root):
+            daemon.write_tick_heartbeat(now=123.0)
+        self.assertEqual(json.loads(beat.read_text()), {"pid": os.getpid(), "finished_at": 123.0})
+
     def test_no_restart_without_work(self):
         repo = self.repo()
         machine.register_repo(repo)

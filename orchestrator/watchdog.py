@@ -2,7 +2,7 @@
 
 Read-only on each repo's .orchestrator state (it never writes any repo's bus); its own state lives in the machine
 dir. Each condition is notified once and again only after it cleared and came back."""
-import fcntl, json, os, re, subprocess, sys, time, tomllib
+import fcntl, json, os, re, signal, subprocess, sys, time, tomllib
 from pathlib import Path
 from xml.sax.saxutils import escape
 from . import STATE, claude_cli, machine, notify
@@ -12,6 +12,8 @@ SPAWN_WINDOW_S = 30 * 60
 STALL_S = 60 * 60
 CONFIRM_S = 20
 DEFAULT_TIMEOUT_S = 900
+HUNG_S = 15 * 60  # 2026-10-11, T-1820: a live daemon with no finished tick for this long is hung; restart it
+HUNG_GRACE_S = 10
 SPAWN_MARKERS = ("claude CLI not found", "not found on PATH", "no_cli", "launch_error")
 WORK_STATUSES = {"queued", "running", "held"}
 CLOSED_GOALS = {"exited", "stopped", "done", "failed", "closed"}
@@ -332,6 +334,37 @@ def sweep_simulators(repos):
 
 # one pass -----------------------------------------------------------------------------------------------------
 
+def tick_stale(repo, now):
+    """The daemon pid when daemon.lock's pid wrote the tick heartbeat (daemon_tick.json) more than HUNG_S ago,
+    else None. A heartbeat from another pid (a --once run, an older daemon) or a missing one is never stale."""
+    lock = read_lock(repo)
+    beat = _json(Path(repo) / ".orchestrator" / "daemon_tick.json", {})
+    if lock is None or not isinstance(beat, dict) or beat.get("pid") != lock[0]:
+        return None
+    try:
+        finished = float(beat.get("finished_at"))
+    except (TypeError, ValueError):
+        return None
+    return lock[0] if now - finished > HUNG_S else None
+
+
+def stop_daemon(pid, *, grace=HUNG_GRACE_S, sleep=time.sleep):
+    """SIGTERM a hung daemon, SIGKILL it if it is still alive after grace seconds (a thread stuck in flock may
+    never reach the handler)."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(int(grace)):
+        if not machine._pid_alive(pid):
+            return
+        sleep(1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def evaluate(repo, now, *, registered):
     """Conditions that hold for repo right now: {condition: message}."""
     tasks = load_tasks(repo)
@@ -345,6 +378,10 @@ def evaluate(repo, now, *, registered):
         alive = True
     elif not alive and has_work(repo, tasks) and (lock_exists or registered):
         found["daemon_dead"] = f"{repo}: daemon not running with work queued"
+    if alive:
+        hung = tick_stale(repo, now)
+        if hung:
+            found["daemon_hung"] = f"{repo}: daemon {hung} alive but no tick finished for {HUNG_S // 60} min"
     stuck = running_too_long(tasks, now, alive)
     if stuck:
         found["running_stalled"] = f"{repo}: running past 2x timeout with no daemon: {', '.join(stuck)}"
@@ -357,11 +394,12 @@ def evaluate(repo, now, *, registered):
     return found
 
 
-def run_once(*, now=None, config=None, start=None, confirm=None, send=None):
-    """Evaluate every repo, restart dead daemons, clear resolved keys, then notify new conditions."""
+def run_once(*, now=None, config=None, start=None, confirm=None, send=None, stop=None):
+    """Evaluate every repo, restart dead and hung daemons, clear resolved keys, then notify new conditions."""
     now = time.time() if now is None else now
     start = start or start_daemon
     confirm = confirm or confirm_alive
+    stop = stop or stop_daemon
     send = send or notify.notify
     registered, extras, missing = watched_repos(config)
     current = {}
@@ -373,8 +411,13 @@ def run_once(*, now=None, config=None, start=None, confirm=None, send=None):
             print(f"[watchdog] {repo}: evaluate failed: {e!r}", file=sys.stderr)
     for repo in registered + extras:
         key = f"{repo}:daemon_dead"
+        hung = f"{repo}:daemon_hung"
+        if hung in current:
+            key = hung
         if key in current:
             try:
+                if key == hung:
+                    stop(daemon_pid(repo))
                 log = start(repo)
                 ok = confirm(repo)
             except Exception as e:

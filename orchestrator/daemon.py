@@ -71,6 +71,7 @@ _code_review_warned = False  # notify() the first time pool.toml carries an unre
 _security_paths_empty_warned = False  # notify() the first time security_paths is empty under code_review="security_paths"
 _goal_container_notified = False
 LOCK_PATH = STATE / "daemon.lock"
+TICK_HEARTBEAT = STATE / "daemon_tick.json"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
 STAGE_LEASE_S = 900
@@ -2235,12 +2236,15 @@ def _handover_last_at():
         return 0
 
 
+_HANDOVER_STATE_LOCK = threading.Lock()
+
+
 def _save_handover_last_at(now):
     """Read-modify-write .orchestrator/handover_state.json under an flock on the file itself, the same pattern
     as pool._save_planner_account -- so a concurrent tick (another thread, or another daemon process briefly
     racing the lock file) can't clobber this timestamp with a stale read."""
     HANDOVER_STATE.parent.mkdir(parents=True, exist_ok=True)
-    with open(HANDOVER_STATE, "a+") as fh:
+    with _HANDOVER_STATE_LOCK, open(HANDOVER_STATE, "a+") as fh:  # threads first: flock is per descriptor
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             fh.seek(0)
@@ -2453,6 +2457,19 @@ def tick(pool=None, stop_event=None):
         elapsed = time.monotonic() - started
         if elapsed > SLOW_TICK_S:
             print(f"[daemon] slow tick {elapsed:.1f}s", file=sys.stderr)
+        write_tick_heartbeat()
+
+
+def write_tick_heartbeat(now=None):
+    """STATE/daemon_tick.json: {"pid", "finished_at"} after every tick (and once at lock acquisition). The
+    watchdog restarts a live daemon whose heartbeat is older than watchdog.HUNG_S (2026-10-11, T-1820)."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        tmp = TICK_HEARTBEAT.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"pid": os.getpid(), "finished_at": time.time() if now is None else now}))
+        os.replace(tmp, TICK_HEARTBEAT)
+    except OSError as e:
+        print(f"[daemon] tick heartbeat write failed: {e}", file=sys.stderr)
 
 
 def _tick(pool=None, stop_event=None):
@@ -2538,6 +2555,7 @@ def acquire_lock(kind="cli"):
     start = machine.process_start(os.getpid())
     marker = f"{os.getpid()} {kind}" + (f" {start}" if start else "")
     fh.seek(0); fh.truncate(); fh.write(marker + "\n"); fh.flush()
+    write_tick_heartbeat()
     try:
         machine.register_repo(STATE.parent)
     except OSError as e:
