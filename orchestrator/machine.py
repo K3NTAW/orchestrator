@@ -113,27 +113,95 @@ def _write(path: Path, value) -> None:
             os.unlink(temporary)
 
 
-def _sweep(leases: dict, kind: str | None = None) -> bool:
+_START_CACHE: dict = {}
+START_CACHE_S = 5.0
+
+
+def _cached_start(pid):
+    """process_start(pid), cached per pid for START_CACHE_S. Callers hold the machine flock, so `ps` (10 s
+    timeout) can still run under the flock, but at most once per pid per START_CACHE_S."""
+    now = time.time()
+    hit = _START_CACHE.get(pid)
+    if hit is not None and now - hit[0] < START_CACHE_S:
+        return hit[1]
+    value = process_start(pid)
+    _START_CACHE[pid] = (now, value)
+    return value
+
+
+def _entry_dead(entry: dict, check_start: bool = True) -> bool:
+    """Dead when the pid is dead, or when the entry carries a non-empty proc_start and process_start(pid) is a
+    different non-None string. process_start None keeps the entry alive; entries without proc_start use pid
+    liveness only."""
+    pid = entry.get("pid")
+    if not _pid_alive(pid):
+        return True
+    recorded = entry.get("proc_start")
+    if not check_start or not recorded:
+        return False
+    current = _cached_start(pid)
+    return current is not None and current != recorded
+
+
+def _sweep(leases: dict, kind: str | None = None, check_start: bool = True) -> bool:
     dead = [lease_id for lease_id, lease in leases.items()
             if (kind is None or lease.get("kind") == kind)
-            and not _pid_alive(lease.get("holder", {}).get("pid"))]
+            and _entry_dead(lease.get("holder") or {}, check_start)]
     for lease_id in dead:
         del leases[lease_id]
     return bool(dead)
 
 
-def acquire(kind: str, cap: int, holder: dict) -> str | None:
-    """Acquire a slot of *kind*, returning its lease id when capacity permits."""
+def _waiters_path(kind: str) -> Path:
+    return MACHINE_DIR / f"waiters-{kind}.json"
+
+
+def _read_waiters(kind: str) -> list:
+    waiters = _read(_waiters_path(kind), [])
+    return [w for w in waiters if isinstance(w, dict)] if isinstance(waiters, list) else []
+
+
+def _sweep_waiters(waiters: list, check_start: bool = True) -> list:
+    return [w for w in waiters if not _entry_dead(w, check_start)]
+
+
+def _count(leases: dict, kind: str) -> int:
+    return sum(lease.get("kind") == kind for lease in leases.values())
+
+
+def _blocked(leases: dict, waiters: list, kind: str, cap: int, ticket) -> bool:
+    if _count(leases, kind) >= cap:
+        return True
+    if ticket is None:
+        return False
+    return not waiters or waiters[0].get("ticket") != ticket
+
+
+def acquire(kind: str, cap: int, holder: dict, ticket: str | None = None) -> str | None:
+    """Acquire a slot of *kind*, returning its lease id when capacity permits.
+
+    With *ticket*, the slot is granted only to the oldest live waiter ticket of *kind* (FIFO), and the ticket
+    is removed on success. A free slot never runs `ps`: proc_start checks (cached) run only when blocked."""
     with _machine_state():
         leases = _read(LEASES, {})
-        changed = _sweep(leases, kind)
-        if sum(lease.get("kind") == kind for lease in leases.values()) >= cap:
+        waiters = _read_waiters(kind) if ticket is not None else []
+        before = len(waiters)
+        changed = _sweep(leases, kind, check_start=False)
+        waiters = _sweep_waiters(waiters, check_start=False)
+        if _blocked(leases, waiters, kind, cap, ticket):
+            changed = _sweep(leases, kind) or changed
+            waiters = _sweep_waiters(waiters)
+        if _blocked(leases, waiters, kind, cap, ticket):
             if changed:
                 _write(LEASES, leases)
+            if len(waiters) != before:
+                _write(_waiters_path(kind), waiters)
             return None
         lease_id = uuid.uuid4().hex
-        leases[lease_id] = {"kind": kind, "holder": dict(holder)}
+        leases[lease_id] = {"kind": kind, "holder": {**holder, "since": time.time()}}
         _write(LEASES, leases)
+        if ticket is not None:
+            _write(_waiters_path(kind), waiters[1:])
         return lease_id
 
 
@@ -144,6 +212,35 @@ def release(lease_id: str) -> None:
         if lease_id in leases:
             del leases[lease_id]
             _write(LEASES, leases)
+
+
+def holders(kind: str) -> list:
+    """Holder dicts of the live leases of *kind* (copies; sweeps first)."""
+    with _machine_state():
+        leases = _read(LEASES, {})
+        if _sweep(leases, kind):
+            _write(LEASES, leases)
+        return [dict(lease.get("holder") or {}) for lease in leases.values() if lease.get("kind") == kind]
+
+
+def wait_ticket(kind: str, holder: dict) -> str:
+    """Register a FIFO waiter for *kind* and return its ticket; pass it to acquire, drop it with drop_ticket."""
+    with _machine_state():
+        waiters = _sweep_waiters(_read_waiters(kind))
+        ticket = uuid.uuid4().hex
+        waiters.append({"ticket": ticket, "pid": holder.get("pid"), "proc_start": holder.get("proc_start"),
+                        "since": time.time()})
+        _write(_waiters_path(kind), waiters)
+        return ticket
+
+
+def drop_ticket(kind: str, ticket: str) -> None:
+    """Remove a waiter ticket; dropping an unknown ticket is harmless."""
+    with _machine_state():
+        waiters = _read_waiters(kind)
+        kept = [w for w in waiters if w.get("ticket") != ticket]
+        if len(kept) != len(waiters):
+            _write(_waiters_path(kind), kept)
 
 
 def count(kind: str) -> int:
