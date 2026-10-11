@@ -266,9 +266,10 @@ class PlannerRouting(PlannerRunsBase):
         sections = self.sections(goal)
         with patch.object(planner_scorecard, "class_evidence", return_value=self.PASSING):
             self.assertTrue(PR.run_group(sections, self.pool)["launched"])
-        argv = self.popen.call_args.args[0]
-        self.assertEqual(argv[argv.index("--model") + 1], "test-fable")
-        self.assertEqual(self.rows()[-1]["tier"], "fable")
+        models = [c.args[0][c.args[0].index("--model") + 1] for c in self.popen.call_args_list]
+        self.assertEqual(models[0], "test-fable")
+        self.assertNotIn("test-sonnet", models)
+        self.assertEqual(self.rows()[0]["tier"], "fable")
         route = next(r for r in self.rows("decisions") if r["kind"] == "planner_route")
         self.assertEqual(route["selected"], "fable")
         self.assertNotIn("cheap_kind", route["reason"])
