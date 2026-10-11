@@ -99,14 +99,15 @@ def locked(stage=None):
             _held.depth = depth
         return
     stage = stage or _caller_stage()
-    warn_s = lock_wait_warn_s()
-    started = time.monotonic()
+    started = warn_s = None  # the uncontended path never reads the clock or pool.toml
     warned = False
-    if not _rlock.acquire(timeout=warn_s):
-        holder = _holder
-        _warn_wait(stage, time.monotonic() - started, f"thread {holder[0]} stage {holder[1]}" if holder else "?")
-        warned = True
-        _rlock.acquire()
+    if not _rlock.acquire(blocking=False):
+        started, warn_s = time.monotonic(), lock_wait_warn_s()
+        if not _rlock.acquire(timeout=warn_s):
+            holder = _holder
+            _warn_wait(stage, time.monotonic() - started, f"thread {holder[0]} stage {holder[1]}" if holder else "?")
+            warned = True
+            _rlock.acquire()
     try:
         fh = _descriptor()
         while True:
@@ -114,6 +115,8 @@ def locked(stage=None):
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
+                if started is None:
+                    started, warn_s = time.monotonic(), lock_wait_warn_s()
                 if not warned and time.monotonic() - started > warn_s:
                     try:
                         fh.seek(0)
