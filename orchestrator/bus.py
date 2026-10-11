@@ -66,6 +66,12 @@ def db():
         connections = _connections.by_path = {}
     if path in connections:
         return connections[path]
+    for stale in [p for p in connections if p != path]:
+        # STATE moved (test sandboxes): drop the old path's connection so fds don't pile up.
+        try:
+            connections.pop(stale).close()
+        except sqlite3.Error:
+            pass
     with _connection_lock:
         STATE.mkdir(exist_ok=True); TASKS.mkdir(exist_ok=True)
         c = sqlite3.connect(path, isolation_level=None)

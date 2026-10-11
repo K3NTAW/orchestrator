@@ -1,5 +1,5 @@
 """Bus rules: acceptance is required, immutable fields, oversize results rejected, events, id sequencing."""
-import contextlib, gc, io, json, sys, tempfile, threading, time, unittest, warnings
+import contextlib, gc, io, json, os, sqlite3, sys, tempfile, threading, time, unittest, warnings
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_bus.py` doesn't add this dir itself
@@ -523,6 +523,38 @@ class Bus(BusSandbox):
             with patch.object(bus, "read", return_value=[{} for _ in range(201)]):
                 self.assertEqual(bus_mcp.bus_read()[0],
                                  {"notice": "201 rows; pass parent=<goal id> or ids=[...] to narrow"})
+
+
+class DbConnections(BusSandbox):
+    @staticmethod
+    def _open_fds():
+        return len(os.listdir("/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"))
+
+    def _switch_state(self):
+        state = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="bus-db-")))
+        for name, path in {"STATE": state, "TASKS": state / "tasks",
+                           "RUNS": state / "runs", "LOCK": state / bus.LOCK_NAME}.items():
+            self.enterContext(patch.object(bus, name, path))
+
+    def test_db_reuses_connection_for_same_state(self):
+        self.assertIs(bus.db(), bus.db())
+
+    def test_db_closes_connection_when_state_changes(self):
+        first = bus.db()
+        self._switch_state()
+        second = bus.db()
+        self.assertIsNot(first, second)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            first.execute("select 1")
+        self.assertEqual(len(bus._connections.by_path), 1)
+
+    def test_db_switching_state_does_not_leak_fds(self):
+        bus.db()
+        before = self._open_fds()
+        for _ in range(50):
+            self._switch_state()
+            bus.db()
+        self.assertLessEqual(self._open_fds() - before, 2)
 
 
 class HotSet(BusSandbox):
