@@ -11,8 +11,14 @@ os.environ["ORCH_ROOT"] = str(TMP)
 MACHINE = Path(tempfile.mkdtemp(prefix="orch-machine-"))
 os.environ["ORCH_MACHINE_DIR"] = str(MACHINE)
 (TMP / ".orchestrator").mkdir()
-for f in ("pool.toml",):
-    config = (REPO / ".orchestrator" / f).read_text()
+# The checkout's .orchestrator/pool.toml is live operator config (PR 50 committed it with every Codex row disabled),
+# so the suite never reads it. FIXTURE_POOL is the documented pool.toml as committed at 569f4b1; tests that check
+# pool.toml contents read FIXTURE_POOL, and POOL_TOML (its sanitized form below) is the shared root's pool.toml.
+FIXTURE_POOL = Path(__file__).resolve().parent / "fixtures" / "pool.toml"
+
+
+def _sanitized_pool():
+    config = FIXTURE_POOL.read_text()
     # Tests opt into autonomous planning explicitly; never inherit the live repository setting.
     sections = re.split(r"(?m)(?=^\[)", config)
     for index, section in enumerate(sections):
@@ -29,8 +35,11 @@ for f in ("pool.toml",):
             # Selection fixtures assume A alone plans; live B planner affinity must not leak into tests.
             section = re.sub(r'(?m)^(role_affinity\s*=\s*\[)"planner",\s*', r'\1', section)
         sections[index] = section
-    config = "".join(sections)
-    (TMP / ".orchestrator" / f).write_text(config)
+    return "".join(sections)
+
+
+POOL_TOML = _sanitized_pool()
+(TMP / ".orchestrator" / "pool.toml").write_text(POOL_TOML)
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))

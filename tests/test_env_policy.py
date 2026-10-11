@@ -69,7 +69,7 @@ class EnvPolicy(unittest.TestCase):
             self.assertEqual(env, {})
 
     def test_extra_always_overrides_base_and_pool_toml_parses(self):
-        cfg = tomllib.loads((_harness.REPO / ".orchestrator/pool.toml").read_text())
+        cfg = tomllib.loads(_harness.FIXTURE_POOL.read_text())
         self.assertEqual(cfg["secrets"]["env_mode"], "shadow")
         self.assertEqual(cfg["secrets"]["env_passthrough"], list(env_policy.DEFAULT_PASSTHROUGH))
         for mode in ("off", "shadow", "active"):

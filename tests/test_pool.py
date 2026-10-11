@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_pool.py` doesn't add this dir itself
-from _harness import REPO, TMP  # noqa: F401
+from _harness import FIXTURE_POOL, REPO, TMP  # noqa: F401
 from orchestrator import planner_router, pool as P, spawn
 
 
@@ -118,7 +118,7 @@ class PoolSel(unittest.TestCase):
         self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
 
     def test_pool_toml_documents_roadmap_defaults(self):
-        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        cfg = tomllib.loads(FIXTURE_POOL.read_text())
         self.assertEqual(cfg["scheduler"]["mode"], "shadow")
         self.assertEqual(cfg["scheduler"], {
             **cfg["scheduler"],
@@ -155,7 +155,7 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(cfg["promotion"], {"min_samples": 20})
 
     def test_shipped_pool_toml_claude_opus_row_is_valid(self):
-        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        cfg = tomllib.loads(FIXTURE_POOL.read_text())
         pool = P.Pool(cfg)
         executor = pool.executors["claude:opus"]
         self.assertEqual(executor.provider, "claude")
@@ -164,7 +164,7 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(executor.model, "claude-opus-5-5")
 
     def test_repo_config_has_claude_rows(self):
-        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        cfg = tomllib.loads(FIXTURE_POOL.read_text())
         rows = {row["id"]: row for row in cfg["executors"]}
         self.assertEqual((rows["claude:sonnet"]["complexity_min"], rows["claude:sonnet"]["complexity_max"]), (1, 5))
         self.assertEqual(rows["claude:sonnet"]["model"], "claude-sonnet-5-5")
@@ -179,15 +179,15 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(pool.pick_executor("execute", 8).id, "claude:opus")
 
     def test_daemon_respawn_max_documented(self):
-        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        cfg = tomllib.loads(FIXTURE_POOL.read_text())
         self.assertEqual(cfg["daemon"]["respawn_max"], 3)
-        daemon_lines = (REPO / ".orchestrator" / "pool.toml").read_text().splitlines()
+        daemon_lines = FIXTURE_POOL.read_text().splitlines()
         respawn_after = next(i for i, line in enumerate(daemon_lines) if line.startswith("respawn_after_s"))
         respawn_max = next(i for i, line in enumerate(daemon_lines) if line.startswith("respawn_max"))
         self.assertEqual(respawn_max, respawn_after + 1)
 
     def test_planner_routing_table_documented_defaults(self):
-        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        cfg = tomllib.loads(FIXTURE_POOL.read_text())
         self.assertEqual(cfg["planner"]["routing"], planner_router._DEFAULTS)
         self.assertEqual(cfg["limits"]["max_budget_usd"]["planner_shadow"], 1.5)
         with mock.patch.object(planner_router.notify, "notify") as notify:
