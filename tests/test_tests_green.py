@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -23,7 +24,7 @@ class TestsGreenHook(unittest.TestCase):
     def test_pass_prints_ok_shape(self):
         result, _, _ = self.run_hook("import unittest\nclass T(unittest.TestCase):\n def test_ok(self): self.assertTrue(True)\n")
         self.assertEqual(result.returncode, 0)
-        self.assertRegex(result.stderr.strip(), r"^tests-green: OK [0-9-]+ [0-9a-f]{7} [0-9]+s$")
+        self.assertRegex(result.stderr.strip(), r"^tests-green: OK [0-9-]+ [0-9a-f]{7} [0-9]+s mode=\S+ base=\S+$")
 
     def test_fail_prints_log_path(self):
         result, root, log_exists = self.run_hook("import unittest\nclass T(unittest.TestCase):\n def test_bad(self): self.fail('bad')\n")
@@ -32,6 +33,20 @@ class TestsGreenHook(unittest.TestCase):
         self.assertTrue(log_path.endswith(".log"))
         self.assertTrue(log_exists)
         self.assertTrue(str(root / ".orchestrator/runs/tests") in log_path)
+
+    def test_dry_run_reports_gate_mode_and_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tests").mkdir()
+            (root / "tests/test_sample.py").write_text("")
+            base = {k: v for k, v in os.environ.items() if not k.startswith("ORCH_GATE_")}
+            env = {**base, "TESTS_GREEN_DRY": "1", "ORCH_GATE_MODE": "task", "ORCH_GATE_BASE": "abc1234"}
+            result = subprocess.run([str(HOOK), str(root)], text=True, capture_output=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.strip().endswith("mode=task base=abc1234"), result.stdout)
+            result = subprocess.run([str(HOOK), str(root)], text=True, capture_output=True,
+                                    env={**base, "TESTS_GREEN_DRY": "1"})
+            self.assertTrue(result.stdout.strip().endswith("mode=unset base=unset"), result.stdout)
 
 
 if __name__ == "__main__":

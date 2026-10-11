@@ -1763,7 +1763,7 @@ def _start_gate(t, worktree, pool):
     key = str(Path(worktree).resolve())
     slot = gate_runner.slot_key(worktree, tid)
     run = {"task_id": tid, "worktree": key, "run_id": uuid.uuid4().hex, "started_at": time.time(), "thread": None,
-           "slot": slot}
+           "slot": slot, "parent": t.get("parent")}
     with _LIVE_GATES_LOCK:
         if tid in _LIVE_GATES or any(entry["worktree"] == key for entry in _LIVE_GATES.values()):
             return None
@@ -1803,12 +1803,23 @@ def _start_gate(t, worktree, pool):
     return run
 
 
+def _gate_scope(run, worktree, cfg):
+    """(mode, base) for a daemon task gate: task mode against merge-base(goal/<parent>, HEAD), or the target
+    merge.merge would use without a parent. Full when [gate].scoped_task_gates is false or no base resolves."""
+    if not gate_runner.settings(cfg)["scoped_task_gates"]:
+        return "full", None
+    parent = run.get("parent")
+    base = gate_runner.task_base(worktree, f"goal/{parent}" if parent else "integration")
+    return ("task", base) if base else ("full", None)
+
+
 def _gate_worker(run, runner, worktree, script, cfg):
     """Background half of a gate: only the test subprocess. Everything that touches the bus runs in _reap_gates."""
     outcome = {"error": RuntimeError("gate worker exited without a result")}
     token = gate_runner._HELD.set(run["slot"])  # _start_gate holds this gate's slot; run_gate must not wait on it
     try:
-        outcome = {"result": runner(worktree, script=script, task_id=run["task_id"], cfg=cfg)}
+        mode, base = _gate_scope(run, worktree, cfg)
+        outcome = {"result": runner(worktree, script=script, task_id=run["task_id"], cfg=cfg, mode=mode, base=base)}
     except Exception as e:
         outcome = {"error": e}
     finally:

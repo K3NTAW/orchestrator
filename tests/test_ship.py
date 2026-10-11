@@ -332,6 +332,24 @@ class Ship(unittest.TestCase):
         self.assertEqual(seen[0]["env"]["PATH"], os.environ["PATH"])
         self.assertIs(seen[0]["cfg"], self.cfg)
 
+    def test_ship_gate_runs_mode_full(self):
+        gid = self.goal()
+        seen = []
+        real = ship.gate.run_gate
+        with mock.patch.object(ship.gate, "run_gate", side_effect=lambda *a, **k: seen.append(k) or real(*a, **k)):
+            self.advance(gid)
+        target = ship.settings(self.cfg)["target"]
+        self.assertEqual((seen[0]["mode"], seen[0]["base"]), ("full", f"origin/{target}"))
+        self.assertEqual(seen[0]["env"]["ORCH_GATE_MODE"], "full")
+        self.assertEqual(seen[0]["env"]["ORCH_GATE_BASE"], f"origin/{target}")
+        seen.clear()
+        self.cfg["ship"]["gate_env"] = {"ORCH_GATE_BASE": "origin/release"}
+        gid2 = self.goal()
+        with mock.patch.object(ship.gate, "run_gate", side_effect=lambda *a, **k: seen.append(k) or real(*a, **k)):
+            self.advance(gid2)
+        self.assertEqual(seen[0]["env"]["ORCH_GATE_BASE"], "origin/release")
+        self.assertEqual(seen[0]["base"], "origin/release")
+
     def test_gate_env_from_config(self):
         gid = self.goal()
         self.cfg["ship"]["gate_env"]["LUNA_GATE_FULL"] = "1"

@@ -321,7 +321,36 @@ class MergeQueue(unittest.TestCase):
         with patch("orchestrator.merge.gate.run_gate", return_value=completed) as gated:
             result = merge.merge(task["id"], target="goal/gate")
         self.assertEqual(result["status"], "merged", result)
-        gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"])
+        gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"],
+                                      mode="task", base=g("rev-parse", "goal/gate^", cwd=wt).stdout.strip())
+
+    def test_merge_gate_runs_mode_task_with_target_base(self):
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        task = bus.create_task("scoped", "s", ["a"], ["scoped.py"], role="execute")
+        wt = spawn.ensure_worktree(task["id"], base="HEAD"); bus.update(task["id"], worktree=str(wt))
+        (wt / "scoped.py").write_text("VALUE = 1\n")
+        g("add", "-A", cwd=wt); g("commit", "-qm", "scoped", cwd=wt)
+        seen = {}
+
+        def gated(worktree, **kwargs):
+            seen.update(kwargs, target=g("rev-parse", "goal/scoped").stdout.strip(),
+                        merge_base=g("merge-base", "goal/scoped", "HEAD", cwd=worktree).stdout.strip())
+            return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False, "attempts": 1, "timeouts": 0}
+        with patch("orchestrator.merge.gate.run_gate", side_effect=gated):
+            result = merge.merge(task["id"], target="goal/scoped")
+        self.assertEqual(result["status"], "merged", result)
+        self.assertEqual(seen["mode"], "task")
+        self.assertEqual(seen["base"], seen["target"])
+        self.assertEqual(seen["base"], seen["merge_base"])
+        with patch("orchestrator.merge.gate.settings", return_value={"scoped_task_gates": False}), \
+                patch("orchestrator.merge.gate.run_gate", side_effect=gated):
+            task2 = bus.create_task("full", "s", ["a"], ["full.py"], role="execute")
+            wt2 = spawn.ensure_worktree(task2["id"], base="HEAD"); bus.update(task2["id"], worktree=str(wt2))
+            (wt2 / "full.py").write_text("VALUE = 2\n")
+            g("add", "-A", cwd=wt2); g("commit", "-qm", "full", cwd=wt2)
+            merge.merge(task2["id"], target="goal/scoped")
+        self.assertEqual(seen["mode"], "full")
 
 
 if __name__ == "__main__":

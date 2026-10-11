@@ -160,8 +160,11 @@ def _record_decision(title, fact, goal_id):
 
 
 def _gate(root, wt, task_id, cfg):
-    env = {**os.environ, **settings(cfg)["gate_env"]}
-    r = gate.run_gate(wt, script=merge.TESTS_GREEN, task_id=task_id, cfg=cfg, env=env)
+    target = settings(cfg)["target"]
+    env = {**os.environ, "ORCH_GATE_MODE": "full", "ORCH_GATE_BASE": f"origin/{target}"}
+    env.update(settings(cfg)["gate_env"])  # [ship].gate_env wins on a key clash
+    r = gate.run_gate(wt, script=merge.TESTS_GREEN, task_id=task_id, cfg=cfg, env=env,
+                      mode=env["ORCH_GATE_MODE"], base=env["ORCH_GATE_BASE"])
     tail = (r.get("stdout", "") + r.get("stderr", ""))[-4000:]
     return (not r["timed_out"] and r["returncode"] == 0), ("gate timeout" if r["timed_out"] else "gate red"), tail
 

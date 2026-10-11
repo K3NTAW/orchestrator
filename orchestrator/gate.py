@@ -67,9 +67,27 @@ def settings(cfg=None):
     max_parallel = gate_cfg.get("max_parallel", 1)
     if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
         max_parallel = 1
+    scoped = gate_cfg.get("scoped_task_gates", True)
     return {"timeout_s": timeout_s, "cleanup_cmd": cleanup_cmd,
             "cleanup_timeout_s": cleanup_timeout_s, "post_cmd": post_cmd,
-            "max_parallel": max_parallel}
+            "max_parallel": max_parallel, "scoped_task_gates": scoped is not False}
+
+
+def task_base(worktree, target):
+    """The base a task-mode gate diffs against: merge-base of target and HEAD in worktree, target itself when
+    merge-base fails but target resolves, None when target does not resolve. Never raises."""
+    def git(*args):
+        try:
+            r = subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    if not target:
+        return None
+    sha = git("merge-base", str(target), "HEAD")
+    if sha:
+        return sha
+    return str(target) if git("rev-parse", "--verify", "--quiet", f"{target}^{{commit}}") else None
 
 
 def _run(argv, *, cwd, timeout_s, input, kill_grace_s, env=None):
@@ -216,23 +234,31 @@ def _post(opts, worktree, task_id):
               f"timed_out={result['timed_out']}", file=sys.stderr)
 
 
-def run_gate(worktree, *, script, task_id=None, cfg=None, env=None):
+def run_gate(worktree, *, script, task_id=None, cfg=None, env=None, mode=None, base=None):
     """Run a repository gate, cleaning up and retrying once after a timeout. Takes a [gate].max_parallel slot
-    first, waiting until one frees, unless the calling context already holds the slot for this gate."""
+    first, waiting until one frees, unless the calling context already holds the slot for this gate.
+    mode (task | full) and base reach the gate as ORCH_GATE_MODE / ORCH_GATE_BASE when not None
+    (docs/gate-contract.md); env None inherits os.environ."""
     key = _gate_key(worktree, task_id)
     held = _HELD.get() == key
     if not held:
         while not try_acquire_slot(key, cfg):
             time.sleep(SLOT_POLL_S)
     try:
-        return _run_gate(worktree, script=script, task_id=task_id, cfg=cfg, env=env, key=key)
+        return _run_gate(worktree, script=script, task_id=task_id, cfg=cfg, env=env, key=key, mode=mode, base=base)
     finally:
         if not held:
             release_slot(key)
 
 
-def _run_gate(worktree, *, script, task_id, cfg, env, key):
+def _run_gate(worktree, *, script, task_id, cfg, env, key, mode=None, base=None):
     opts = settings(cfg)
+    if mode is not None or base is not None:
+        env = dict(env if env is not None else os.environ)
+        if mode is not None:
+            env["ORCH_GATE_MODE"] = str(mode)
+        if base is not None:
+            env["ORCH_GATE_BASE"] = str(base)
     gates_dir = STATE / "gates"
     registry = gates_dir / f"{key}.json"
     timeouts = 0
@@ -244,7 +270,8 @@ def _run_gate(worktree, *, script, task_id, cfg, env, key):
             registry.write_text(json.dumps({"task_id": task_id, "worktree": str(worktree),
                                             "pid": pid, "pgid": pid, "proc_start": machine.process_start(pid),
                                             "owner_pid": owner["pid"], "owner_start": owner["start"],
-                                            "started_at": time.time(), "timeout_s": opts["timeout_s"]}))
+                                            "started_at": time.time(), "timeout_s": opts["timeout_s"],
+                                            "mode": mode, "base": base}))
 
         token = _ON_START.set(register)
         try:
@@ -259,7 +286,7 @@ def _run_gate(worktree, *, script, task_id, cfg, env, key):
         if not result["timed_out"]:
             _post(opts, worktree, task_id)
             return {**{k: result[k] for k in ("returncode", "stdout", "stderr", "timed_out")},
-                    "attempts": attempt, "timeouts": timeouts}
+                    "attempts": attempt, "timeouts": timeouts, "mode": mode, "base": base}
         timeouts += 1
         if opts["cleanup_cmd"]:
             run_bounded(["bash", "-c", opts["cleanup_cmd"]], cwd=worktree,
@@ -267,7 +294,7 @@ def _run_gate(worktree, *, script, task_id, cfg, env, key):
         _post(opts, worktree, task_id)
         notify.notify(f"gate timeout: task_id={task_id} attempt={attempt} timeout_s={opts['timeout_s']}")
     return {"returncode": None, "stdout": result["stdout"], "stderr": result["stderr"],
-            "timed_out": True, "attempts": 2, "timeouts": timeouts}
+            "timed_out": True, "attempts": 2, "timeouts": timeouts, "mode": mode, "base": base}
 
 
 def running_gates(now=None, threshold=0.8):

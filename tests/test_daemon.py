@@ -1699,7 +1699,7 @@ class Daemon(unittest.TestCase):
             if argv[:1] == ["osascript"]:
                 return FakeProc("", 0)
             return REAL_RUN(*a, **k)
-        def fake_gate(worktree, *, script, task_id=None, cfg=None):
+        def fake_gate(worktree, *, script, task_id=None, cfg=None, **_):
             return {"returncode": 0 if green else 1, "stdout": "", "stderr": "",
                     "timed_out": False, "attempts": 1, "timeouts": 0}
         self.swap(daemon.subprocess, "run", fake)
@@ -3453,6 +3453,37 @@ class Daemon(unittest.TestCase):
         self.assertTrue(held["hold_reason"].startswith("gate failed"), held["hold_reason"])
         self.assertIn("merge blew up", held["pipeline"]["gated_error"])
 
+    def capture_gate_scope(self, base="b4se5ha"):
+        seen, bases = [], []
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon.gate_runner, "task_base", lambda wt, target: (bases.append((wt, target)), base)[1])
+        self.swap(daemon.gate, "run_gate", lambda worktree, **kwargs: (seen.append(kwargs), {
+            "returncode": 0, "stdout": "", "stderr": "", "timed_out": False, "attempts": 1, "timeouts": 0})[1])
+        return seen, bases
+
+    def test_daemon_task_gate_runs_mode_task_with_goal_base(self):
+        seen, bases = self.capture_gate_scope()
+        t = self.task("scoped gate", parent="T-0042")
+        bus.update(t, status="done", worktree=str(self.sandbox))
+        daemon.gate(P.Pool())
+        self.assertEqual(bases, [(str(self.sandbox), "goal/T-0042")])
+        self.assertEqual((seen[0]["mode"], seen[0]["base"]), ("task", "b4se5ha"))
+        self.assertEqual(daemon._gate_scope({"parent": None}, str(self.sandbox), {}), ("task", "b4se5ha"))
+        self.assertEqual(bases[-1], (str(self.sandbox), "integration"))
+        self.swap(daemon.gate_runner, "task_base", lambda wt, target: None)
+        self.assertEqual(daemon._gate_scope({"parent": "T-0042"}, str(self.sandbox), {}), ("full", None))
+
+    def test_scoped_task_gates_off_runs_full(self):
+        seen, bases = self.capture_gate_scope()
+        t = self.task("full gate", parent="T-0042")
+        bus.update(t, status="done", worktree=str(self.sandbox))
+        pool = P.Pool()
+        pool.cfg.setdefault("gate", {})["scoped_task_gates"] = False
+        daemon.gate(pool)
+        self.assertEqual(bases, [])
+        self.assertEqual((seen[0]["mode"], seen[0]["base"]), ("full", None))
+
     def test_gate_skips_task_without_worktree_and_continues(self):
         not_directory = self.sandbox / "not-a-directory"
         not_directory.write_text("file")
@@ -3465,7 +3496,7 @@ class Daemon(unittest.TestCase):
                 gate_calls = []
                 previous = daemon.gate.run_gate
 
-                def run_gate(worktree, *, script, task_id=None, cfg=None):
+                def run_gate(worktree, *, script, task_id=None, cfg=None, **_):
                     gate_calls.append((worktree, script, task_id))
                     return previous(worktree, script=script, task_id=task_id, cfg=cfg)
 
@@ -4071,7 +4102,7 @@ class Daemon(unittest.TestCase):
         self.swap(daemon, "_open_reviews", lambda *args, **kwargs: [])
         release, calls = threading.Event(), []
 
-        def run_gate(worktree, *, script, task_id=None, cfg=None):
+        def run_gate(worktree, *, script, task_id=None, cfg=None, **_):
             calls.append(task_id)
             release.wait(30)
             outcome = (results or {}).get(task_id)

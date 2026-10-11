@@ -54,7 +54,11 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             return {"status": "failed", "reason": reason}
         if reviewed and before_diff != after_diff:
             return {"status": "rebase_changed_diff"}
-        result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)
+        # after the rebase merge-base(target, HEAD) is the target tip: the task gate diffs against it
+        base = git("rev-parse", target, cwd=wt, check=False).stdout.strip() or None
+        result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id,
+                               mode="task" if base and gate.settings()["scoped_task_gates"] else "full",
+                               base=base)
         if result["timed_out"]:
             bus.update(task_id, status="held", hold_reason="gate_timeout",
                        pipeline={**(t.get("pipeline") or {}), "infra_failure": "gate_timeout"},

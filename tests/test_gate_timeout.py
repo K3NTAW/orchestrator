@@ -293,6 +293,47 @@ class GateTimeoutTest(unittest.TestCase):
             notify.assert_not_called()
             self.assertFalse((self.state / "gates" / "T-1.json").exists())
 
+    def test_run_gate_exports_mode_and_base_env(self):
+        script = self.script('echo "mode=${ORCH_GATE_MODE:-unset} base=${ORCH_GATE_BASE:-unset} x=${X:-}"\n'
+                             'sleep 0.5; cat "$ORCH_ROOT_GATES"/*.json\n', "env.sh")
+        env = {**os.environ, "X": "kept", "ORCH_ROOT_GATES": str(self.state / "gates")}
+        result = gate.run_gate(self.root, script=script, task_id="T-env", cfg={}, env=env, mode="task", base="abc123")
+        self.assertIn("mode=task base=abc123 x=kept", result["stdout"])
+        self.assertIn('"mode": "task"', result["stdout"])
+        self.assertIn('"base": "abc123"', result["stdout"])
+        self.assertEqual((result["mode"], result["base"]), ("task", "abc123"))
+        self.assertNotIn("ORCH_GATE_MODE", env)
+        result = gate.run_gate(self.root, script=script, cfg={}, env=env, mode="full")
+        self.assertIn("mode=full base=unset", result["stdout"])
+
+    def test_run_gate_without_mode_exports_nothing(self):
+        script = self.script('echo "mode=${ORCH_GATE_MODE:-unset} base=${ORCH_GATE_BASE:-unset}"\n', "plain.sh")
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("ORCH_GATE_")}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            result = gate.run_gate(self.root, script=script, cfg={})
+        self.assertIn("mode=unset base=unset", result["stdout"])
+        self.assertEqual((result["mode"], result["base"]), (None, None))
+        self.assertTrue(gate.settings({})["scoped_task_gates"])
+        self.assertFalse(gate.settings({"gate": {"scoped_task_gates": False}})["scoped_task_gates"])
+
+    def test_task_base_merge_base_fallbacks(self):
+        repo = _harness.scratch_repo(self.root / "repo")
+        git = lambda *a: __import__("subprocess").run(["git", *a], cwd=repo, capture_output=True, text=True,
+                                                      check=True).stdout.strip()
+        fork = git("rev-parse", "HEAD")
+        git("branch", "goal/G")
+        git("checkout", "-q", "-b", "task")
+        (repo / "t.txt").write_text("t\n")
+        git("add", "t.txt")
+        git("-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "task")
+        self.assertEqual(gate.task_base(repo, "goal/G"), fork)
+        self.assertIsNone(gate.task_base(repo, "goal/missing"))
+        self.assertIsNone(gate.task_base(repo, None))
+        self.assertIsNone(gate.task_base(self.root / "nowhere", "goal/G"))
+        with mock.patch.object(gate.subprocess, "run", side_effect=lambda argv, **k: SimpleNamespace(
+                returncode=1 if argv[1] == "merge-base" else 0, stdout="x\n")):
+            self.assertEqual(gate.task_base(repo, "goal/G"), "goal/G")
+
     def test_settings_defaults_and_override(self):
         self.assertEqual(gate.settings({}), {"timeout_s": 2700, "cleanup_cmd": None,
                                              "cleanup_timeout_s": 300, "post_cmd": None,
