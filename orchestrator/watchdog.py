@@ -412,6 +412,7 @@ def run(once=False, **kw):
     except OSError:
         fh.close()
         return 0
+    machine.raise_nofile(label="watchdog")  # the daemons it starts inherit the raised limit
     try:
         while True:
             try:

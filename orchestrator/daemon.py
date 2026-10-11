@@ -2667,6 +2667,7 @@ def _sigterm(signum, frame):
 
 
 def main(interval=30, once=False):
+    machine.raise_nofile(label="daemon")  # launchd's soft limit 256 makes gates fail with EMFILE
     if once:
         pool = Pool()
         try:

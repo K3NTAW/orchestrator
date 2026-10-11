@@ -4,7 +4,9 @@ import errno
 import fcntl
 import json
 import os
+import resource
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -18,6 +20,46 @@ ACCOUNTS = MACHINE_DIR / "accounts.json"
 LOCK = MACHINE_DIR / "machine.lock"
 REPOS = MACHINE_DIR / "repos.json"
 WINDOW_S = 5 * 3600
+NOFILE_SOFT_DEFAULT = 65536  # [daemon].nofile_soft; 0 leaves the limit alone
+
+
+def _nofile_setting(cfg) -> int:
+    if cfg is None:
+        try:
+            from .pool import config
+            cfg = config()
+        except Exception:
+            cfg = {}
+    value = (cfg.get("daemon") or {}).get("nofile_soft", NOFILE_SOFT_DEFAULT)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return NOFILE_SOFT_DEFAULT
+    return value
+
+
+def raise_nofile(cfg=None, *, label: str = "orchestrator", log=None):
+    """Raise the soft RLIMIT_NOFILE to min(hard, [daemon].nofile_soft) at daemon/watchdog start.
+
+    launchd starts agents with a soft limit of 256, which gates and workers inherit and then hit EMFILE.
+    Children spawned afterwards inherit the raised limit. Never lowers a higher soft limit.
+    Returns (old, new) when the limit changed, else None."""
+    target = _nofile_setting(cfg)
+    if target == 0:
+        return None
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return None
+    if hard != resource.RLIM_INFINITY:
+        target = min(target, hard)
+    if soft == resource.RLIM_INFINITY or soft >= target:
+        return None
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError) as exc:
+        print(f"[{label}] could not raise open-file soft limit {soft} -> {target}: {exc}", file=log or sys.stderr)
+        return None
+    print(f"[{label}] open-file soft limit {soft} -> {target}", file=log or sys.stderr)
+    return soft, target
 
 
 def _day_key(now: float) -> str:
