@@ -1,0 +1,172 @@
+{
+  "id": "T-0523",
+  "created_at": 1789947206.739017,
+  "parent": "T-0503",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2: execution waves in daemon.dispatch behind [scheduler].mode = shadow|active|off \u2014 interference-compatible wave logged to runs/sched/waves.jsonl, applied only in active mode",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P3 (select the best set of mutually compatible ready tasks; respect depends_on, capacity, budgets, cooldowns, safety policy) and Evaluation (retain what baseline scheduling would have done). Base goal/T-0503 with S0a (schedlog, dispatch.jsonl considered rows, first_ready_at) and S1 (interference.select_wave) merged. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nFacts: daemon.dispatch walks queued execute tasks in id order and dispatches first-come until free_slots (daemon.py free_slots); _load_review_cfg(pool) (daemon.py:217) shows how a pool.toml table is read into module globals with defaults; interference.select_wave(ready, running, tasks, capacity, order=None, graph=None, rules=None) -> {wave, deferred}.\n1. _load_scheduler_cfg(pool): table [scheduler] with defaults mode = \"shadow\" (off|shadow|active), soft_conflict_policy = \"defer\", max_wave = 0 (0 = capacity). Add the table to .orchestrator/pool.toml with comments (default shadow: dispatch unchanged, waves only logged; active dispatches the wave; off disables both) and to install.py's scaffold only if pool.toml is templated there (check; otherwise leave install.py alone).\n2. In dispatch, once per tick: candidates = ready, non-stale queued execute tasks that would dispatch this tick (spec approved or below SPEC_REVIEW_MIN, fallback tier available), in the existing order; running = execute tasks with status running plus dispatched-but-unclaimed ones; order = _wave_order(candidate_ids, tasks), a module-level hook that returns its input unchanged (a later task replaces it with critical-path ranking); result = interference.select_wave(candidate_ids, running_ids, tasks, capacity=min(slots, max_wave or slots), order=order, rules={soft_conflict_policy}). When mode != off and candidates exist, schedlog.append(\"waves\", {\"ts\",\"mode\",\"ready\": candidate_ids,\"running\": running_ids,\"baseline_order\": the first-come ids that would dispatch within slots,\"wave\": result[\"wave\"],\"deferred\": result[\"deferred\"],\"predicted\": interference.pairwise of the wave tasks,\"priority\": {},\"applied\": mode == \"active\"}).\n3. mode off or shadow: dispatch exactly as before (first-come). mode active: dispatch the wave in wave order and no other task this tick; each deferred candidate is recorded in the dispatch.jsonl considered row as skipped with reason \"predicted_interference\" (hard or soft deferral) or \"executor_capacity\" (capacity deferral). Invariants in every mode: never more dispatches than slots, never a task whose dependencies are not merged, never a hard-conflicting pair co-dispatched in active mode; spec-review creation and the review respawn loop are unchanged.\n4. README Pipeline section: one paragraph on [scheduler] modes and the waves log.\n5. Tests tests/test_daemon.py: test_scheduler_cfg_defaults, test_dispatch_shadow_logs_wave_and_keeps_first_come, test_dispatch_active_defers_hard_conflict_with_running_task, test_dispatch_active_respects_slots_and_dependencies, test_dispatch_mode_off_writes_no_wave_rows. Existing tests stay green.",
+  "inputs": [
+    "T-0507"
+  ],
+  "acceptance": [
+    "[scheduler] mode defaults to shadow: dispatch order and set are unchanged and every tick with candidates appends a waves.jsonl row with ready, running, baseline_order, wave, deferred, predicted and applied false",
+    "mode active dispatches only the selected wave, never a hard-conflicting pair together, never beyond free slots or unmet dependencies, and records deferred candidates in dispatch.jsonl as predicted_interference or executor_capacity",
+    "mode off writes no waves rows and dispatches as before; spec-review creation and review respawn are untouched",
+    "tests test_scheduler_cfg_defaults, test_dispatch_shadow_logs_wave_and_keeps_first_come, test_dispatch_active_defers_hard_conflict_with_running_task, test_dispatch_active_respects_slots_and_dependencies, test_dispatch_mode_off_writes_no_wave_rows pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "orchestrator/install.py",
+    "README.md",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0523",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "_load_review_cfg(pool) (cited in Facts as the pattern to mirror) is only called from tick() (daemon.py:1253), never from dispatch() itself. Every existing Daemon test in tests/test_daemon.py calls daemon.dispatch(pool) directly, never tick(). If _load_scheduler_cfg(pool) mirrors that same tick()-only call site, the five new acceptance tests (which per the established test idiom will call daemon.dispatch(pool) directly, e.g. via the dispatch_telemetry() helper at test_daemon.py:82) can never observe a pool.toml [scheduler] mode of 'active' or 'off' unless they also call _load_scheduler_cfg(pool) first -- something the spec never mentions and no existing test does for _load_review_cfg. This will either make the acceptance tests unwritable as scoped or force an undocumented extra step.",
+        "severity": "high",
+        "line": 1253
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Spec step 2 defines candidates as 'ready, non-stale queued execute tasks that would dispatch this tick,' but the existing dispatch() loop iterates over bus.read(status='queued', role='execute') + retry_held (daemon.py:603-605), where retry_held are budget-held tasks eligible for immediate re-dispatch. The spec never says whether these budget-retry tasks are included in the wave-selection candidate/order set or bypass interference selection entirely. Left ambiguous, an executor could either drop budget-retries from active-mode scheduling (silently changing existing retry behavior) or crash/mishandle them since retry_held tasks have status='held', not 'queued', and the candidate definition says 'queued'.",
+        "severity": "med",
+        "line": 605
+      },
+      {
+        "path": "orchestrator/interference.py",
+        "issue": "select_wave's returned wave/deferred/candidate_ids are plain task-id strings, but interference.pairwise(tasks_list, **kwargs) expects an iterable of task mappings (it calls _task_id/_scope on each item directly). Spec step 2's 'predicted: interference.pairwise of the wave tasks' does not say the wave ids must first be resolved back to task dicts (e.g. via the same tasks lookup already built for select_wave) before calling pairwise, which is an easy point to get wrong.",
+        "severity": "low",
+        "line": 195
+      }
+    ],
+    "suggested_spec_changes": [
+      "State explicitly where _load_scheduler_cfg(pool) is invoked: either call it at the top of dispatch(pool) itself (so tests calling daemon.dispatch(pool) directly, matching the existing Daemon test class idiom, pick up [scheduler] changes without going through tick()), or require every new test to call daemon._load_scheduler_cfg(pool) before daemon.dispatch(pool) and say so.",
+      "Clarify whether retry_held (budget-held, dispatch-eligible) tasks are included in the wave-selection candidate/order computation in step 2, and if included, how their status='held' (not 'queued') is reconciled with the 'queued execute tasks' candidate definition.",
+      "Add one line noting that wave/deferred/candidate ids from select_wave must be mapped back to task dicts via the tasks lookup before being passed to interference.pairwise for the 'predicted' field."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789947209.338379,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0523",
+      "claimed_at": 1789947209.335959
+    },
+    {
+      "ts": 1789947209.342347,
+      "account": "B"
+    },
+    {
+      "ts": 1789947211.240404,
+      "pid": 39782,
+      "account": "B"
+    },
+    {
+      "ts": 1789947320.084032,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "_load_review_cfg(pool) (cited in Facts as the pattern to mirror) is only called from tick() (daemon.py:1253), never from dispatch() itself. Every existing Daemon test in tests/test_daemon.py calls daemon.dispatch(pool) directly, never tick(). If _load_scheduler_cfg(pool) mirrors that same tick()-only call site, the five new acceptance tests (which per the established test idiom will call daemon.dispatch(pool) directly, e.g. via the dispatch_telemetry() helper at test_daemon.py:82) can never observe a pool.toml [scheduler] mode of 'active' or 'off' unless they also call _load_scheduler_cfg(pool) first -- something the spec never mentions and no existing test does for _load_review_cfg. This will either make the acceptance tests unwritable as scoped or force an undocumented extra step.",
+            "severity": "high",
+            "line": 1253
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Spec step 2 defines candidates as 'ready, non-stale queued execute tasks that would dispatch this tick,' but the existing dispatch() loop iterates over bus.read(status='queued', role='execute') + retry_held (daemon.py:603-605), where retry_held are budget-held tasks eligible for immediate re-dispatch. The spec never says whether these budget-retry tasks are included in the wave-selection candidate/order set or bypass interference selection entirely. Left ambiguous, an executor could either drop budget-retries from active-mode scheduling (silently changing existing retry behavior) or crash/mishandle them since retry_held tasks have status='held', not 'queued', and the candidate definition says 'queued'.",
+            "severity": "med",
+            "line": 605
+          },
+          {
+            "path": "orchestrator/interference.py",
+            "issue": "select_wave's returned wave/deferred/candidate_ids are plain task-id strings, but interference.pairwise(tasks_list, **kwargs) expects an iterable of task mappings (it calls _task_id/_scope on each item directly). Spec step 2's 'predicted: interference.pairwise of the wave tasks' does not say the wave ids must first be resolved back to task dicts (e.g. via the same tasks lookup already built for select_wave) before calling pairwise, which is an easy point to get wrong.",
+            "severity": "low",
+            "line": 195
+          }
+        ],
+        "suggested_spec_changes": [
+          "State explicitly where _load_scheduler_cfg(pool) is invoked: either call it at the top of dispatch(pool) itself (so tests calling daemon.dispatch(pool) directly, matching the existing Daemon test class idiom, pick up [scheduler] changes without going through tick()), or require every new test to call daemon._load_scheduler_cfg(pool) before daemon.dispatch(pool) and say so.",
+          "Clarify whether retry_held (budget-held, dispatch-eligible) tasks are included in the wave-selection candidate/order computation in step 2, and if included, how their status='held' (not 'queued') is reconciled with the 'queued execute tasks' candidate definition.",
+          "Add one line noting that wave/deferred/candidate ids from select_wave must be mapped back to task dicts via the tasks lookup before being passed to interference.pairwise for the 'predicted' field."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789947320.085624,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_load_review_cfg(pool) (cited in Facts as the pattern to mirror) is only called from tick() (daemon.py:1253), never from dispatch() itself. Every existing Daemon test in tests/test_daemon.py calls daemon.dispatch(pool) directly, never tick(). If _load_scheduler_cfg(pool) mirrors that same tick()-only call site, the five new acceptance tests (which per the established test idiom will call daemon.dispatch(pool) directly, e.g. via the dispatch_telemetry() helper at test_daemon.py:82) can never observe a pool.toml [scheduler] mode of 'active' or 'off' unless they also call _load_scheduler_cfg(pool) first -- something the spec never mentions and no existing test does for _load_review_cfg. This will either make the acceptance tests unwritable as scoped or force an undocumented extra step.",
+          "severity": "high",
+          "line": 1253
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec step 2 defines candidates as 'ready, non-stale queued execute tasks that would dispatch this tick,' but the existing dispatch() loop iterates over bus.read(status='queued', role='execute') + retry_held (daemon.py:603-605), where retry_held are budget-held tasks eligible for immediate re-dispatch. The spec never says whether these budget-retry tasks are included in the wave-selection candidate/order set or bypass interference selection entirely. Left ambiguous, an executor could either drop budget-retries from active-mode scheduling (silently changing existing retry behavior) or crash/mishandle them since retry_held tasks have status='held', not 'queued', and the candidate definition says 'queued'.",
+          "severity": "med",
+          "line": 605
+        },
+        {
+          "path": "orchestrator/interference.py",
+          "issue": "select_wave's returned wave/deferred/candidate_ids are plain task-id strings, but interference.pairwise(tasks_list, **kwargs) expects an iterable of task mappings (it calls _task_id/_scope on each item directly). Spec step 2's 'predicted: interference.pairwise of the wave tasks' does not say the wave ids must first be resolved back to task dicts (e.g. via the same tasks lookup already built for select_wave) before calling pairwise, which is an easy point to get wrong.",
+          "severity": "low",
+          "line": 195
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789947209.335959,
+  "account": "B",
+  "pid": 39782,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_load_review_cfg(pool) (cited in Facts as the pattern to mirror) is only called from tick() (daemon.py:1253), never from dispatch() itself. Every existing Daemon test in tests/test_daemon.py calls daemon.dispatch(pool) directly, never tick(). If _load_scheduler_cfg(pool) mirrors that same tick()-only call site, the five new acceptance tests (which per the established test idiom will call daemon.dispatch(pool) directly, e.g. via the dispatch_telemetry() helper at test_daemon.py:82) can never observe a pool.toml [scheduler] mode of 'active' or 'off' unless they also call _load_scheduler_cfg(pool) first -- something the spec never mentions and no existing test does for _load_review_cfg. This will either make the acceptance tests unwritable as scoped or force an undocumented extra step.",
+      "severity": "high",
+      "line": 1253
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec step 2 defines candidates as 'ready, non-stale queued execute tasks that would dispatch this tick,' but the existing dispatch() loop iterates over bus.read(status='queued', role='execute') + retry_held (daemon.py:603-605), where retry_held are budget-held tasks eligible for immediate re-dispatch. The spec never says whether these budget-retry tasks are included in the wave-selection candidate/order set or bypass interference selection entirely. Left ambiguous, an executor could either drop budget-retries from active-mode scheduling (silently changing existing retry behavior) or crash/mishandle them since retry_held tasks have status='held', not 'queued', and the candidate definition says 'queued'.",
+      "severity": "med",
+      "line": 605
+    },
+    {
+      "path": "orchestrator/interference.py",
+      "issue": "select_wave's returned wave/deferred/candidate_ids are plain task-id strings, but interference.pairwise(tasks_list, **kwargs) expects an iterable of task mappings (it calls _task_id/_scope on each item directly). Spec step 2's 'predicted: interference.pairwise of the wave tasks' does not say the wave ids must first be resolved back to task dicts (e.g. via the same tasks lookup already built for select_wave) before calling pairwise, which is an easy point to get wrong.",
+      "severity": "low",
+      "line": 195
+    }
+  ]
+}

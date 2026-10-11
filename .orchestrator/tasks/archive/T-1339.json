@@ -1,0 +1,61 @@
+{
+  "id": "T-1339",
+  "created_at": 1790191240.22112,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S2 v2: Dispatch provider=\"claude\" executor rows through run_worker with the row's model",
+  "spec": "Respec of T-1336 (depends_on moved to S1 v2 T-1338). Goal T-1334. After S1, pick_executor can return a provider=\"claude\" row, but executor.start (executor.py:487) sends every non-codex pick to _exhausted(), which runs a fallback tier (sonnet/opus by complexity), not the routed model. Plug and play means a Claude row runs as itself.\n\nWhat:\n1. orchestrator/executor.py start(): when ex.provider == \"claude\": acct = pool.pick(\"execute\"); None -> bus.update status held, hold_reason \"no account with headroom\", return {\"status\": \"held\"}. Otherwise bus.update(task, executor=ex.id, tier=ex.id), ex.roll_day(); ex.day_tasks += 1; pool.save(), then run spawn.run_worker(task_id, account_id=acct.id) in a background thread registered in _fallback_threads exactly like _exhausted() (executor.py:535-569), set handed_off=True so the dispatch reservation passes to run_worker. Return {\"status\": \"dispatched\", \"executor\": ex.id, \"provider\": \"claude\"}. No fallback/review_rule fields. ex is None keeps calling _exhausted(). Unknown provider -> held, hold_reason \"unknown executor provider <p>\".\n2. orchestrator/spawn.py run_worker: model (spawn.py:1538) = the row's model when pool.executor_identity(t[\"tier\"]) has provider \"claude\" and a model, else cfg[\"models\"][t[\"tier\"]] as today. Execute branch (spawn.py:1564): executor = row id for a row-routed task, legacy f\"claude:{tier}\" otherwise; the \"Claude fallback executor (Codex is unavailable)\" prompt line only for legacy fallback, row-routed gets a neutral \"You are the routed executor\" line. executed_by (spawn.py:1657) uses t[\"executor\"]. Claim stays \"claude:<acct>\" (spawn.py:1603).\n3. orchestrator/daemon.py _codex_available (daemon.py:454, \"any execute executor available\", drives fallback mode): a provider=\"claude\" row counts only when not cooling and pool.pick(\"execute\") returns an account. pool.codex_available stays Codex-only (S1).\n4. Fix rounds: executor.resume_plan returns fresh for non-codex parents (executor.py:279); keep it, cover it with a test.\n5. README.md \"Executors and routing\" (README.md:278): document provider=\"claude\" rows (id, model = full model id, quota_group, roles, complexity band), that Claude headroom comes from [[claude_accounts]], the review rule (reviewer never runs the executing model), and the plug-and-play recipe: add a row to add a model; enabled=false on every codex row to run without Codex.\nNo .orchestrator/pool.toml edit (Planner adds the opus55 row after merge). No new dependencies. Additive; revert with git revert.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_executor.py::ClaudeRowDispatch::test_start_runs_claude_row_with_its_model: with only a provider=claude row eligible, executor.start calls spawn.run_worker with an account_id, sets executor and tier to the row id, and does not call _exhausted",
+    "tests/test_executor.py::ClaudeRowDispatch::test_claude_row_holds_without_headroom: every account cooling -> status held, hold_reason 'no account with headroom'",
+    "tests/test_executor.py::ClaudeRowDispatch::test_fix_round_for_claude_row_is_fresh: resume_plan on a parent executed by a claude row returns mode fresh",
+    "tests/test_spawn.py::ClaudeRowModel::test_run_worker_uses_row_model: a task whose tier is a provider=claude row id launches claude with --model equal to the row's model and records executor = row id; a legacy tier 'sonnet' still resolves through [models]",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_executor.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [
+    "T-1338"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 80,
+    "timeout_s": 3000,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1336",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/bus.py",
+      "orchestrator/worker_control.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Uses S1 (T-1338): pool.executor_identity(field, cfg), Pool.executor_identity(field), Pool.is_claude_executor(field). A claude-row task has executor == tier == row id; its bus claim stays 'claude:<account id>' so running_claude_workers and max_parallel_claude_workers keep counting it."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790191366.291827,
+      "status": "superseded",
+      "hold_reason": "respec T-1342: depends_on S1 v3 T-1341, adds capacity.py"
+    },
+    {
+      "ts": 1790191370.530967,
+      "hold_reason": "respec T-1343: depends_on S1 v3 T-1341, adds capacity.py"
+    }
+  ],
+  "hold_reason": "respec T-1343: depends_on S1 v3 T-1341, adds capacity.py"
+}

@@ -1,0 +1,151 @@
+{
+  "id": "T-0714",
+  "created_at": 1789999680.418654,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Q12 v4: orchestrator/jev_planner.py \u2014 Jev as a shadow routing signal for Planner tier choice: typed batched questions over redacted structured state, fail open, never bypasses hard escalation (P12)",
+  "spec": "Why: the brief (P12) allows Jev to provide probabilistic decision characteristics to the Planner router, shadow first, as a signal and never as authority. jev_points.py (T-0586) shows the pattern: typed options, redacted evidence, mode per point, fail open. Nothing asks Jev about Planner routing. Three spec review rounds (T-0687, of T-0694, of T-0702) are folded in: classification producer, explicit state_version, signals source, cache rows, classification fingerprint including ambiguous, subject-scoped cache key, task parameter, jev_mode source, confidence aggregation, availability shape. The Planner waived a fourth spec review.\nWhat: new module orchestrator/jev_planner.py; jev.ask injected as ask_fn so tests never hit the network. Inputs are dicts read with .get(): classification = planner_taxonomy.classify output (orchestrator/planner_taxonomy.py, already on goal/T-0674: decision_type, architectural, ambiguous, risk_class, signals list[str], band, task_class); ctx = decision.route's ctx dict; goal and task = bus task dicts (task None for goal-level decisions). cfg = the dict returned by planner_router.load_cfg(pool_cfg) (planner_router.py is task T-0700 in this goal; this module never imports it): this module reads only cfg.get(\"jev_mode\", \"shadow\"); pool.toml wiring is [planner.routing].jev_mode. availability has the router contract shape {tier: {\"available\": bool, \"reason\": str}, \"fable_reserve_ok\": bool}, built by planner_runs in Wave B; should_ask counts tiers whose value is a dict with available True.\n- QUESTIONS = OrderedDict of five typed yes/no questions keyed routine_localized, architectural_reasoning, requirements_ambiguous, long_horizon, fable_improves_outcome, one sentence each.\n- subject(goal, task) -> the task dict when task is not None else goal; subject_id = subject[\"id\"].\n- state(classification, ctx, goal, task=None) -> bounded redacted dict: decision_type, band, task_class, architectural, ambiguous, risk_class from classification; signals = classification signals[:10], each jev.redact'ed and capped 100 chars; subject_id, subject_title = jev.redact(subject title)[:200], spec_excerpt = jev.redact(first 300 chars of subject spec), goal_title = jev.redact(goal title)[:200]; scope_count = len(subject scope); scout_count, failing_test_count (len(ctx failing_ids)), spec_review_request_changes, auto_fix_rounds_used, signature_repeated from ctx. Never file contents, diffs or review comment bodies; json.dumps(state) <= 4000 chars, truncating spec_excerpt then signals until it fits.\n- fingerprint(classification) -> sha256(json.dumps({decision_type, risk_class, architectural, ambiguous, band, task_class}, sort_keys=True))[:12].\n- should_ask(router_mode, jev_mode, hard_reasons, availability, route) -> (bool, reason): False with jev_off (jev_mode == \"off\"), hard_decision (hard_reasons non-empty), single_tier (fewer than two available tiers), deterministic (route name != \"escalate\"), cannot_affect (router_mode == \"off\"); else (True, \"eligible\"). Shadow and active both ask; applying the signal is the router's job.\n- ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route, state_version, task=None, ask_fn=jev.ask, cache=None, root=None) -> {\"asked\": bool, \"reason\", \"mode\": jev_mode, \"signals\": {key: float|None}, \"soft_adjust\": float, \"confidence\": float|None, \"cached\": bool}. One ask_fn(state, questions, task=subject_id) call carrying all five questions. Each answer parsed as jev_points._answer does: probability float(answer[\"noul\"]) in [0, 1] else None, confidence answer.get(\"confidence\"); confidence = None if any per-question confidence is None else their mean. soft_adjust = clamp(0.2 * mean(p_architectural, p_ambiguous, p_long_horizon, p_fable) - 0.2 * p_routine, -0.2, 0.2); ask_fn returning None -> asked True, reason jev_unavailable, soft_adjust 0.0, signals all None; unparsable answers -> reason jev_malformed, soft_adjust 0.0. cache: dict keyed (subject_id, state_version, fingerprint(classification)); a hit returns the cached result with cached True and no ask_fn call; two held tasks under one goal never share an entry; a changed risk_class, ambiguous or architectural under the same state_version misses. Every call (asked, skipped or cached) appends one row via schedlog.append(\"planner_jev\", {goal_id, subject_id, decision_type, state_version, fingerprint, asked, cached, reason, signals, soft_adjust, confidence, mode}) with no question text and no state text.\n- summary(root=None) -> {\"n\", \"asked\", \"cached\", \"skip_reasons\": dict, \"mean_soft_adjust\"} via schedlog.read_with_malformed, tolerant of malformed lines.",
+  "inputs": [
+    "T-0706"
+  ],
+  "acceptance": [
+    "tests/test_jev_planner.py::test_off_and_hard_and_single_tier_never_ask \u2014 jev_mode off, hard_reasons ['security'], one available tier and a routine route each give asked False with the documented reason, no ask_fn call, and still one planner_jev row",
+    "tests/test_jev_planner.py::test_batched_single_call_soft_adjust_and_confidence \u2014 exactly one ask_fn call carries five questions; noul 1.0 for architectural/ambiguous/long_horizon/fable and 0 routine give soft_adjust 0.2; all routine gives -0.2; never outside [-0.2, 0.2]; confidence is the mean of five confidences and None when one is missing",
+    "tests/test_jev_planner.py::test_malformed_and_timeout_fail_open \u2014 ask_fn returning None and ask_fn returning {'answers': 'garbage'} both yield soft_adjust 0.0 with reasons jev_unavailable / jev_malformed, and a row is recorded",
+    "tests/test_jev_planner.py::test_state_is_redacted_bounded_and_task_scoped \u2014 a task spec with a token-like secret and 20k chars and a classification with 30 signals yields spec_excerpt <= 300 chars taken from the task (not the goal), at most 10 signals, the secret redacted, no key named diff/contents/comments, json <= 4000 chars, and decision_type/band/risk_class/ambiguous copied from the classification",
+    "tests/test_jev_planner.py::test_cache_key_is_subject_scoped_with_fingerprint \u2014 a second ask for the same subject, state_version and classification returns cached True with zero extra ask_fn calls and appends a row with cached True; a different held task under the same goal with identical state_version and classification asks again; the same subject with risk_class high or ambiguous True asks again; summary counts asked, cached and skip reasons over rows including one malformed line"
+  ],
+  "scope": [
+    "orchestrator/jev_planner.py",
+    "tests/test_jev_planner.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0714",
+  "codex_thread": null,
+  "result": {
+    "summary": "Traced jev_planner.py against every spec clause and all five acceptance tests: QUESTIONS ordering, subject()/state() redaction and 4000-char bound (verified against jev.redact's KEY=VALUE regex, which safely absorbs the test's embedded secret before the 300-char cap), fingerprint() field set and sort_keys hashing, should_ask()'s five-reason precedence (jev_off, hard_decision, single_tier, deterministic, cannot_affect) including correct exclusion of the non-dict fable_reserve_ok entry from the tier-availability count, ask()'s cache-key scoping by (subject_id, state_version, fingerprint), soft_adjust/confidence math (0.2*mean(architectural,ambiguous,long_horizon,fable) - 0.2*routine, clamped; confidence None on any missing per-question value), fail-open behavior for None/malformed ask_fn results, unconditional schedlog row on every path, and summary()'s tolerant read. The root-redirection trick in _sched_call mutates schedlog.SCHED_DIR globally, but that's an existing codebase idiom (decision_log.py, sched_scorecard.py already do it) rather than something this diff introduces, so not flagged. No correctness or acceptance-criteria gaps found.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "3cbbf1cdffe5",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789999680.419582,
+      "reviewed_sha": "44cab16634c010edbdfa8f194245fc19a45afb71"
+    },
+    {
+      "ts": 1789999683.245867,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0714",
+      "claimed_at": 1789999683.245279
+    },
+    {
+      "ts": 1789999683.247036,
+      "account": "B"
+    },
+    {
+      "ts": 1789999683.744616,
+      "pid": 77584,
+      "account": "B"
+    },
+    {
+      "ts": 1789999854.8858361,
+      "status": "done",
+      "result": {
+        "summary": "Traced jev_planner.py against every spec clause and all five acceptance tests: QUESTIONS ordering, subject()/state() redaction and 4000-char bound (verified against jev.redact's KEY=VALUE regex, which safely absorbs the test's embedded secret before the 300-char cap), fingerprint() field set and sort_keys hashing, should_ask()'s five-reason precedence (jev_off, hard_decision, single_tier, deterministic, cannot_affect) including correct exclusion of the non-dict fable_reserve_ok entry from the tier-availability count, ask()'s cache-key scoping by (subject_id, state_version, fingerprint), soft_adjust/confidence math (0.2*mean(architectural,ambiguous,long_horizon,fable) - 0.2*routine, clamped; confidence None on any missing per-question value), fail-open behavior for None/malformed ask_fn results, unconditional schedlog row on every path, and summary()'s tolerant read. The root-redirection trick in _sched_call mutates schedlog.SCHED_DIR globally, but that's an existing codebase idiom (decision_log.py, sched_scorecard.py already do it) rather than something this diff introduces, so not flagged. No correctness or acceptance-criteria gaps found.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "3cbbf1cdffe5",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789999854.88741,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789999854.974215,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "44cab16634c010edbdfa8f194245fc19a45afb71",
+        "packet_version": "3cbbf1cdffe5",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "44cab16634c010edbdfa8f194245fc19a45afb71",
+      "packet_version": "3cbbf1cdffe5",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "44cab16634c010edbdfa8f194245fc19a45afb71",
+  "claimed_at": 1789999683.245279,
+  "account": "B",
+  "pid": 77584,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "44cab16634c010edbdfa8f194245fc19a45afb71",
+    "packet_version": "3cbbf1cdffe5",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "3cbbf1cdffe5",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

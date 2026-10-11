@@ -1,0 +1,208 @@
+{
+  "id": "T-0200",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): D3 fix round 2 on task/T-0199 \u2014 delta 2ad6297..2190aa5 (T-0199, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0199 delta: `git diff 2ad6297 2190aa5` in worktree wt/T-0199 (orchestrator/planner_runs.py, tests/test_planner_runs.py, .gitignore). Fix round for review T-0198; confirm: (1) any failure between claim and launch flips the row to failed_launch (error capped), stale claimed rows age out after 120 s, failed_launch counts toward gave_up and the key is retried (tests); (2) held payload_key = task_id + held_at only; the rendered decision prompt carries kind, goal_id, payload_key only, validated against ^[A-Za-z0-9_.:\\-]+$ before render; hold_reason never reaches the prompt (test with an injection string); (3) .gitignore covers planner_session.json, planner_usage.json, handover_state.json (planner_runs.json is under runs/) with a test; (4) non-int or missing pid in the session file \u2192 treated as absent, no exception (test); (5) tick() with autonomous=true launches at most one decision per tick and runs after the stages (test). Re-confirm the T-0192/T-0197 guarantees (env and live-file guards, account guard, claim under bus.locked, atomic ledger with corrupt backup, skip rows updated in place, gave_up terminal, registration from the entrypoint only) and the security checklist on the launch path. Run `uv run python -m unittest tests.test_planner_runs -q` once. This is the third code review of D3; per the Planner's escalation rule a request_changes here hands the task to the human, so request changes only for a defect that could launch a Planner alongside a human, double-launch, block a key forever, or carry untrusted text into the prompt; everything else as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0199"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five T-0198 groups confirmed resolved or named unresolved with evidence",
+    "Earlier D3 guarantees and the security checklist re-confirmed"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/mcp.py",
+    "tests/test_planner_runs.py",
+    ".gitignore"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0192",
+      "T-0197",
+      "T-0199"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0200",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 81,
+        "issue": "_held_at prefers pipeline.review_held_at / spec_review_held_at over the newest status=held event, and daemon.stamp() refuses to re-stamp a stage that already exists. So a task held twice by two different stages keeps the FIRST stamp as its held_at: e.g. T-X held at spec_review (spec_review_held_at=t1), a decision runs and is recorded exited_ok/gave_up, the task is later requeued, dispatched and held again on gate_red (which stamps gated_at, not a *_held_at field). _held_at still returns t1, _held_key returns the identical payload_key, and the old blocking record suppresses the new decision forever, silently -- the same\u6c38-block class the T-0198 item-1 fix closed for claimed rows. The new test (test_held_key_changes_with_each_new_hold) only exercises the events fallback (it sets status=held via bus.update with no pipeline dict), so the stamped path is untested. Fix: take max() over review_held_at, spec_review_held_at and the latest held event ts rather than a fixed priority (the event ts is always >= the stamp for the same hold, since stamp() writes it inside bus.update).",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 553,
+        "issue": "The `break` fires after every planner_runs.run() call, not only after a launch. A decision point whose run() skips permanently therefore starves every later decision point in the generator. The two global guards (planner session attached, no account headroom) are harmless because they suppress everything anyway, but the 'unsafe decision key' guard (planner_runs.py:257) is per-key and permanent: one key that fails _SAFE_KEY -- e.g. a held_at that is a string rather than a float, so repr() adds quotes -- makes decision_points() yield it first every tick, run() skip, break, and no other goal's scouts_done/held/closable decision ever runs again. Only break when run() actually launched, or skip keys whose last record is status=skipped with reason 'unsafe decision key'.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 154,
+        "issue": "T-0198 item 4 was fixed for a non-int pid but not for a non-dict body. Probed: planner_session.json containing `[]`, `null` or `\"hello\"` makes data.get() raise AttributeError. run() now catches it (BaseException), so it no longer permanently burns a claimed row, but it counts as a failed launch; two ticks later the key is gave_up and the decision is abandoned for good plus a misleading 'launch failed' notify. Treat a non-dict body the same as a missing file (return False) inside _session_attached, and the same in mcp.deregister_planner_session, which catches only FileNotFoundError/JSONDecodeError.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 268,
+        "issue": "`except BaseException` records the failure and returns without re-raising, so a KeyboardInterrupt or SystemExit arriving between _claim() and _record_running() is swallowed: Ctrl-C during `orchestrator daemon --once` is converted into a failed_launch row and the tick carries on instead of stopping. Record the failure, then `raise` for KeyboardInterrupt/SystemExit and swallow only Exception.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 323,
+        "issue": "_condition_resolved's held branch only accepts a new task with depends_on=[held_id] or constraints.fix_round_for as proof of success. A decision Planner that legitimately concludes no fix round is needed (stale hold, already superseded, posts to the bus and finishes) exits cleanly, gets scored exited_early, is relaunched at the full planner_decision budget, then stamped gave_up with a false 'gave up after 2 attempts' notify -- $6 and a wrong alert for a correct decision. Let the decision Planner record its own outcome (e.g. a bus event or a marker the record can read) so 'decided, nothing to do' is distinguishable from an early exit.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789767807.818184,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0200",
+      "claimed_at": 1789767807.817738
+    },
+    {
+      "ts": 1789767807.8572428,
+      "pid": 41325,
+      "account": "A"
+    },
+    {
+      "ts": 1789767822.786232,
+      "status": "held",
+      "hold_reason": "rate_limit on A, cooling 1800s"
+    },
+    {
+      "ts": 1789808669.778503,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0200",
+      "claimed_at": 1789808669.778181
+    },
+    {
+      "ts": 1789808748.990159,
+      "status": "queued",
+      "pid": null,
+      "reason": "process died; requeued"
+    },
+    {
+      "ts": 1789808778.617571,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0200",
+      "claimed_at": 1789808778.617312
+    },
+    {
+      "ts": 1789808778.619741,
+      "account": "A"
+    },
+    {
+      "ts": 1789808850.978396,
+      "status": "queued",
+      "pid": null,
+      "hold_reason": null,
+      "reason": "Planner: claude CLI missing on this machine (dangling homebrew symlink); re-spawn once the human reinstalls the CLI"
+    },
+    {
+      "ts": 1789809048.008312,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0200",
+      "claimed_at": 1789809048.008011
+    },
+    {
+      "ts": 1789809048.0109,
+      "account": "A"
+    },
+    {
+      "ts": 1789809048.05833,
+      "pid": 51515,
+      "account": "A"
+    },
+    {
+      "ts": 1789809361.386525,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 81,
+            "issue": "_held_at prefers pipeline.review_held_at / spec_review_held_at over the newest status=held event, and daemon.stamp() refuses to re-stamp a stage that already exists. So a task held twice by two different stages keeps the FIRST stamp as its held_at: e.g. T-X held at spec_review (spec_review_held_at=t1), a decision runs and is recorded exited_ok/gave_up, the task is later requeued, dispatched and held again on gate_red (which stamps gated_at, not a *_held_at field). _held_at still returns t1, _held_key returns the identical payload_key, and the old blocking record suppresses the new decision forever, silently -- the same\u6c38-block class the T-0198 item-1 fix closed for claimed rows. The new test (test_held_key_changes_with_each_new_hold) only exercises the events fallback (it sets status=held via bus.update with no pipeline dict), so the stamped path is untested. Fix: take max() over review_held_at, spec_review_held_at and the latest held event ts rather than a fixed priority (the event ts is always >= the stamp for the same hold, since stamp() writes it inside bus.update).",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 553,
+            "issue": "The `break` fires after every planner_runs.run() call, not only after a launch. A decision point whose run() skips permanently therefore starves every later decision point in the generator. The two global guards (planner session attached, no account headroom) are harmless because they suppress everything anyway, but the 'unsafe decision key' guard (planner_runs.py:257) is per-key and permanent: one key that fails _SAFE_KEY -- e.g. a held_at that is a string rather than a float, so repr() adds quotes -- makes decision_points() yield it first every tick, run() skip, break, and no other goal's scouts_done/held/closable decision ever runs again. Only break when run() actually launched, or skip keys whose last record is status=skipped with reason 'unsafe decision key'.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 154,
+            "issue": "T-0198 item 4 was fixed for a non-int pid but not for a non-dict body. Probed: planner_session.json containing `[]`, `null` or `\"hello\"` makes data.get() raise AttributeError. run() now catches it (BaseException), so it no longer permanently burns a claimed row, but it counts as a failed launch; two ticks later the key is gave_up and the decision is abandoned for good plus a misleading 'launch failed' notify. Treat a non-dict body the same as a missing file (return False) inside _session_attached, and the same in mcp.deregister_planner_session, which catches only FileNotFoundError/JSONDecodeError.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 268,
+            "issue": "`except BaseException` records the failure and returns without re-raising, so a KeyboardInterrupt or SystemExit arriving between _claim() and _record_running() is swallowed: Ctrl-C during `orchestrator daemon --once` is converted into a failed_launch row and the tick carries on instead of stopping. Record the failure, then `raise` for KeyboardInterrupt/SystemExit and swallow only Exception.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 323,
+            "issue": "_condition_resolved's held branch only accepts a new task with depends_on=[held_id] or constraints.fix_round_for as proof of success. A decision Planner that legitimately concludes no fix round is needed (stale hold, already superseded, posts to the bus and finishes) exits cleanly, gets scored exited_early, is relaunched at the full planner_decision budget, then stamped gave_up with a false 'gave up after 2 attempts' notify -- $6 and a wrong alert for a correct decision. Let the decision Planner record its own outcome (e.g. a bus event or a marker the record can read) so 'decided, nothing to do' is distinguishable from an early exit.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789809361.391063,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789809371.425212,
+      "pipeline": {
+        "merged_at": 1789809371.42511
+      }
+    }
+  ],
+  "claimed_at": 1789809048.008011,
+  "pid": 51515,
+  "account": "A",
+  "hold_reason": null,
+  "reason": "Planner: claude CLI missing on this machine (dangling homebrew symlink); re-spawn once the human reinstalls the CLI",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789809371.42511
+  }
+}

@@ -1,0 +1,830 @@
+{
+  "id": "T-0606",
+  "created_at": 1789972865.650511,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "R14a v3: jev_route active ranking (Phase I P5) \u2014 bounded Jev suitability adjustment on hypothetical()'s single favoured executor, shrunk by a shared per-class sample count; cold start and failure reproduce baseline",
+  "spec": "Why: [jev.routing].mode accepts \"active\" but jev_route.shadow_context (orchestrator/jev_route.py:165-176) only emits a notify() stub; hypothetical() (146-163) is the shadow heuristic. Phase I P5 requires active mode to modify ranking among eligible candidates as candidate_score = configured_weight x empirical_score x jev_suitability_adjustment, with extreme probabilities unable to overwhelm strong empirical evidence, cold start safe, failure reproducing baseline. v3 after spec reviews T-0590 and T-0604.\nWhat (the executor.start hook that feeds adjusted scores into pool.pick_executor is a later integration task). Tests are unittest.TestCase methods in the named files.\n- scorecard.py: extract the resolved-task filter of class_success (scorecard.py:73-91: tasks with execute run rows, role execute, executor id, task_class, merged or failed) into a private helper _class_resolved(executor_id, task_class_name, root) -> list; class_success calls it and keeps its behaviour and signature; new class_sample_size(executor_id, task_class_name, root=STATE) -> int returns len(_class_resolved(...)). jev_route.evidence_for() adds \"n\": class_sample_size(...) per executor.\n- jev_route.adjustment(signals, evidence, eligible_ids, cfg) -> {executor_id: multiplier}. cfg [jev.routing] max_adjustment (default 0.25), evidence_floor_n (default 10). Exactly one favoured id per active branch, chosen by the same selection hypothetical() uses: branch A when max(substantial_reasoning, architectural, stronger_executor_helps) >= 0.6 -> the eligible id with the highest class_success (ties by id, ids with class_success None excluded); branch B when localized_simple >= 0.7 and elevated_risk < 0.3 -> the eligible id with the lowest expected_cost (None excluded, ties by id); branch A wins when both apply; no branch or no measurable id -> every multiplier 1.0. magnitude = max_adjustment x max(branch signal) x (confidence if confidence is not None else 0.5) x shrink, shrink = evidence_floor_n / (n_favoured + evidence_floor_n). The favoured id gets 1 + magnitude, every other eligible id gets 1.0 (never below 1 - max_adjustment, never above 1 + max_adjustment). Ids outside eligible_ids never appear; missing or malformed signals (non-numeric or outside [0, 1]) -> all 1.0.\n- jev_route.active_scores(task, pool, eligible, classification, evidence, base_scores=None) -> {executor_id: base x multiplier} only when [jev.routing].mode == \"active\"; base_scores None -> {id: 1.0 for eligible}; shadow/off return base_scores unchanged (or that 1.0 map when None); classification None, malformed signals or empty eligible -> base_scores unchanged (baseline reproduced).\n- shadow_context() keeps its shape and adds \"adjustment\" (computed for shadow and active) and \"active\": bool; the notify stub is removed; record_shadow logs adjustment and mode. No pool.toml edit; defaults in code and documented in the module docstring.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_scorecard.py::test_class_sample_size_matches_class_success_filter \u2014 the count equals the number of resolved execute tasks class_success uses for that executor and class, and class_success's return values are unchanged",
+    "tests/test_jev_route.py::test_active_mode_adjusts_ranking_within_bounds \u2014 mode active, three eligible executors, signals favouring a stronger executor with confidence 0.9 and n 3 yield exactly one multiplier above 1.0 within [1.0, 1.25], the others 1.0, and the favoured executor's score rises relative to the rest",
+    "tests/test_jev_route.py::test_shadow_mode_never_changes_scores \u2014 mode shadow returns base_scores unchanged while shadow_context still reports the adjustment",
+    "tests/test_jev_route.py::test_extreme_probability_cannot_overturn_strong_evidence \u2014 signal 1.0 favouring executor B with n 2 against executor A with n 200, class_success 0.95 and a base score 30 percent higher leaves A ranked first",
+    "tests/test_jev_route.py::test_cold_start_default_scores_and_failure_reproduce_baseline \u2014 no evidence yields multipliers 1.0; base_scores None in active mode yields 1.0 per eligible executor before adjustment; classification None returns base_scores identical to the input",
+    "tests/test_jev_route.py::test_active_scores_never_add_ineligible_executor \u2014 an executor absent from eligible receives no score even when signals favour it"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    "orchestrator/scorecard.py",
+    "tests/test_jev_route.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/jev_route.py",
+      "orchestrator/jev.py",
+      "orchestrator/jev_rank.py",
+      "orchestrator/pool.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/executor.py",
+      "orchestrator/daemon.py",
+      "tests/test_jev_route.py",
+      "tests/test_scorecard.py",
+      "tests/_harness.py",
+      ".orchestrator/pool.toml"
+    ],
+    "interface_contract": "scorecard._class_resolved(executor_id, task_class_name, root) private helper shared by class_success and the new class_sample_size(executor_id, task_class_name, root=STATE) -> int; jev_route.adjustment(signals, evidence, eligible_ids, cfg) -> {id: multiplier}; jev_route.active_scores(task, pool, eligible, classification, evidence, base_scores=None) -> {id: score}; shadow_context() gains adjustment and active; config [jev.routing] max_adjustment 0.25, evidence_floor_n 10 defaulted in code; existing signatures unchanged"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0606",
+  "codex_thread": "01a0c2b4-df79-7c51-b5cf-28fc0e096a50",
+  "result": {
+    "summary": "Removed the notification stub and updated the active-mode test.\n\nGate: green, 848 tests.\nFailures-only output: empty.\nCommit: `3a4513c7e456f121444b013f9eb87cc2c0d982a8`\nWorktree: clean.",
+    "commit": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+    "executed_by": "codex:sol",
+    "provenance": [
+      "repo"
+    ],
+    "usage": {
+      "input_tokens": 1066692,
+      "cached_input_tokens": 986496,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9143,
+      "reasoning_output_tokens": 1783
+    },
+    "thread": "01a0c2b4-df79-7c51-b5cf-28fc0e096a50",
+    "rounds": 2,
+    "previous_commits": [
+      null
+    ],
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789972865.6515682,
+      "spec_review_verdict": "approve",
+      "spec_review_waived": "Planner decision 2026-09-21 09:50 after spec-review rounds T-0590 and T-0604: both remaining risks (med, low) folded into v3"
+    },
+    {
+      "ts": 1789973020.2945018,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467
+      }
+    },
+    {
+      "ts": 1789973020.2959628,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918
+      }
+    },
+    {
+      "ts": 1789973022.089014,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221
+      }
+    },
+    {
+      "ts": 1789973028.48436,
+      "packet_meta": {
+        "chars": 3172,
+        "est_tokens": 793,
+        "hash": "b206fe25054a",
+        "version": "b206fe25054a",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@f354f9da7096 memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "f354f9da7096"
+      }
+    },
+    {
+      "ts": 1789973028.4854999,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0606",
+      "claimed_at": 1789973028.485384
+    },
+    {
+      "ts": 1789973028.4863,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789973403.04048,
+      "codex_thread": "01a0c2b4-df79-7c51-b5cf-28fc0e096a50",
+      "codex_thread_head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+    },
+    {
+      "ts": 1789973403.0440462,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        }
+      }
+    },
+    {
+      "ts": 1789973403.0468328,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed active Jev routing adjustment, shared class sample counts, evidence shrinkage, and acceptance tests.\n\n- Gate: baseline green; final gate exposed two compatibility failures. Both were fixed, and all 114 affected tests then passed. The two-run limit prevented another full-gate run.\n- Commit: `b27a157715a6a542473b1c5d71d7fbcf2b889319`\n- Worktree: clean\n\nFailures-only output from the final full-gate run:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_shadow_row_written_with_baseline_hypothetical_and_evidence (test_daemon.JevRouteDispatch.test_shadow_row_written_with_baseline_hypothetical_and_evidence)\nTraceback (most recent call last):\nKeyError: 'adjustment'\nFAIL: test_active_mode_behaves_as_shadow_and_notifies_once (test_daemon.JevRouteDispatch.test_active_mode_behaves_as_shadow_and_notifies_once)\nTraceback (most recent call last):\nAssertionError: Lists differ: [] != ['jev routing active requested; active ranking lands in P5']\nFAILED (failures=1, errors=1)\n```\n\nPost-fix targeted verification: `Ran 114 tests \u2014 OK`.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c2b4-df79-7c51-b5cf-28fc0e096a50",
+        "usage": {
+          "input_tokens": 603412,
+          "cached_input_tokens": 563072,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8105,
+          "reasoning_output_tokens": 1753,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973780.747396,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789973900.023118,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789973900.0848708,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        }
+      }
+    },
+    {
+      "ts": 1789973900.1925719,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+      }
+    },
+    {
+      "ts": 1789973900.197738,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "gated_at_done": 1789973900.197649
+      }
+    },
+    {
+      "ts": 1789973992.8817558,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789974019.869518,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "gated_at_done": 1789973900.197649,
+        "review_held_at": 1789974019.869196
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0612 (request_changes)"
+    },
+    {
+      "ts": 1789974020.516734,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "gated_at_done": 1789973900.197649,
+        "review_held_at": 1789974019.869196,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789974020.584606,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973900.0230231,
+        "gated_at_lease": 1789974800.0230231,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "gated_at_done": 1789973900.197649,
+        "review_held_at": 1789974019.869196,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        }
+      }
+    },
+    {
+      "ts": 1789975816.039702,
+      "packet_meta": {
+        "chars": 3172,
+        "est_tokens": 793,
+        "hash": "b206fe25054a",
+        "version": "b206fe25054a",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@f354f9da7096 memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "f354f9da7096"
+      }
+    },
+    {
+      "ts": 1789975943.104033,
+      "codex_thread": "01a0c2b4-df79-7c51-b5cf-28fc0e096a50",
+      "codex_thread_head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+    },
+    {
+      "ts": 1789975943.108633,
+      "rounds": 1
+    },
+    {
+      "ts": 1789975943.109973,
+      "status": "done",
+      "result": {
+        "summary": "Removed the notification stub and updated the active-mode test.\n\nGate: green, 848 tests.\nFailures-only output: empty.\nCommit: `3a4513c7e456f121444b013f9eb87cc2c0d982a8`\nWorktree: clean.",
+        "commit": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+        "executed_by": "codex:sol",
+        "provenance": [
+          "repo"
+        ],
+        "usage": {
+          "input_tokens": 1066692,
+          "cached_input_tokens": 986496,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9143,
+          "reasoning_output_tokens": 1783
+        },
+        "thread": "01a0c2b4-df79-7c51-b5cf-28fc0e096a50",
+        "rounds": 2,
+        "previous_commits": [
+          null
+        ],
+        "confidence": 0.0
+      }
+    },
+    {
+      "ts": 1789975951.631802,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 1,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        }
+      },
+      "hold_reason": null,
+      "status": "done"
+    },
+    {
+      "ts": 1789975985.785474,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        }
+      }
+    },
+    {
+      "ts": 1789976082.773834,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "b9e6874fdccecb8f5f617ba192ddb670e1b56fd6",
+          "moved_count": 8,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973900.0846,
+          "head": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367
+      }
+    },
+    {
+      "ts": 1789976082.838542,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+          "moved_count": 10,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976082.8381739,
+          "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+        },
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367
+      }
+    },
+    {
+      "ts": 1789976082.8919418,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+          "moved_count": 10,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976082.8381739,
+          "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+        },
+        "reviewed_sha": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367
+      }
+    },
+    {
+      "ts": 1789976082.8985689,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+          "moved_count": 10,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976082.8381739,
+          "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+        },
+        "reviewed_sha": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367,
+        "gated_at_done": 1789976082.898436
+      }
+    },
+    {
+      "ts": 1789976267.1361542,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789976339.6758459,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+          "moved_count": 10,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976082.8381739,
+          "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+        },
+        "reviewed_sha": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367,
+        "gated_at_done": 1789976082.898436,
+        "merged_at": 1789976339.675617,
+        "merged_at_lease": 1789977239.675617
+      }
+    },
+    {
+      "ts": 1789976430.554146,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "c914da26a43a6796ba7c1fca11dc85de37d19b6d"
+    },
+    {
+      "ts": 1789976430.957741,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+          "moved_count": 10,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976082.8381739,
+          "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+        },
+        "reviewed_sha": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367,
+        "gated_at_done": 1789976082.898436,
+        "merged_at": 1789976339.675617,
+        "merged_at_lease": 1789977239.675617,
+        "accepted_at": 1789976430.957359
+      }
+    },
+    {
+      "ts": 1789976431.063691,
+      "pipeline": {
+        "first_ready_at": 1789973020.294467,
+        "dispatched_at": 1789973020.295918,
+        "dispatched_at_lease": 1789973920.295918,
+        "dispatched_at_done": 1789973022.0881221,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+        },
+        "gate_attempts": 2,
+        "first_green_at": 1789973900.0226078,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0606",
+          "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+          "moved_count": 10,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976082.8381739,
+          "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+        },
+        "reviewed_sha": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789974019.869518": true
+        },
+        "gated_at": 1789976082.77367,
+        "gated_at_lease": 1789976982.77367,
+        "gated_at_done": 1789976082.898436,
+        "merged_at": 1789976339.675617,
+        "merged_at_lease": 1789977239.675617,
+        "accepted_at": 1789976430.957359,
+        "merged_at_done": 1789976431.063531
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_waived": "Planner decision 2026-09-21 09:50 after spec-review rounds T-0590 and T-0604: both remaining risks (med, low) folded into v3",
+  "pipeline": {
+    "first_ready_at": 1789973020.294467,
+    "dispatched_at": 1789973020.295918,
+    "dispatched_at_lease": 1789973920.295918,
+    "dispatched_at_done": 1789973022.0881221,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "03939205ad381ce3e8354abaf0535dbb6c849301"
+    },
+    "gate_attempts": 2,
+    "first_green_at": 1789973900.0226078,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0606",
+      "goal_head": "981b3ba8eee60aad83f49980c6a60bafcf0e597a",
+      "moved_count": 10,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789976082.8381739,
+      "head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8"
+    },
+    "reviewed_sha": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789974019.869518": true
+    },
+    "gated_at": 1789976082.77367,
+    "gated_at_lease": 1789976982.77367,
+    "gated_at_done": 1789976082.898436,
+    "merged_at": 1789976339.675617,
+    "merged_at_lease": 1789977239.675617,
+    "accepted_at": 1789976430.957359,
+    "merged_at_done": 1789976431.063531
+  },
+  "packet_meta": {
+    "chars": 3172,
+    "est_tokens": 793,
+    "hash": "b206fe25054a",
+    "version": "b206fe25054a",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@ef740c717cf2 gotchas@f354f9da7096 memory@notes",
+    "policy_version": "ef740c717cf2",
+    "gotchas": "f354f9da7096"
+  },
+  "claimed_at": 1789973028.485384,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "3a4513c7e456f121444b013f9eb87cc2c0d982a8",
+  "review_verdict": "approve",
+  "hold_reason": null,
+  "merged_into": "goal/T-0561",
+  "sha": "c914da26a43a6796ba7c1fca11dc85de37d19b6d"
+}

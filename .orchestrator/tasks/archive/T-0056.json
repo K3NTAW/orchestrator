@@ -1,0 +1,85 @@
+{
+  "id": "T-0056",
+  "parent": "T-0043",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-C fix round: async dispatch, stamp-after-effect with exception handling, safe notify (review T-0054)",
+  "spec": "Why: security review T-0054 on daemon commit 93a1b64 (full text: /Users/k3ntaw/code/orchestrator/.orchestrator/tasks/T-0054.json). HIGH 1 (daemon.py:~64): dispatch() calls executor.start inline; executor._run blocks on subprocess.run up to 900-1800 s, so one dispatch stalls the whole tick and every other stage. HIGH 2 (daemon.py:~88): gate() writes pipeline.gated_at before merge.merge / bus.create_task run, and neither gate() nor tick()/main() catch exceptions (git RuntimeError, missing worktree cwd) \u2014 a failure leaves the stage stamped and the task stuck. LOW (daemon.py:~102): notify() interpolates untrusted text (merge stderr, task titles) into an osascript -e literal; a quote breaks out and runs arbitrary local commands.\n\nWhat (2 files: orchestrator/daemon.py, tests/test_daemon.py; this worktree branches from task/T-0050):\n1. dispatch: run executor.start via the same spawn_async/thread helper the file uses for spec_review and review; stamp dispatched_at under the lock before starting the thread (so a second tick does not double-dispatch), and have the thread record `pipeline.dispatch_error` via bus.update if executor.start raises.\n2. Every stage: claim the stamp under the lock (keeps idempotency), then run the side effect inside try/except Exception; on exception write `pipeline.<stage>_error = str(e)[:300]`, set the task held with hold_reason f\"<stage> failed: <type>\" and notify; tick() wraps each stage call in try/except so one bad task never stops the loop; main() catches exceptions per tick and keeps running. gate(): check the worktree path exists before running the gate; missing \u2192 held with hold_reason \"worktree missing\".\n3. notify(msg): never interpolate into the AppleScript source. Pass the text as an argument: `osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title \"orchestrator\"' -e 'end run' -- <msg>` and truncate msg to 200 chars; stderr print unchanged. Add a test that notify() with a message containing a double quote and `\" & do shell script \"echo x` calls subprocess.run with the message only in argv (monkeypatch subprocess.run to capture).\n4. tests/test_daemon.py: (a) dispatch does not block: monkeypatch executor.start with a function that sleeps 2 s and assert tick() returns in under 0.5 s and dispatched_at is set exactly once across two ticks; (b) gate side effect raising \u2192 task held with hold_reason starting \"gate failed\", gated_error recorded, tick() returns normally; (c) missing worktree \u2192 held \"worktree missing\"; (d) the notify argv test. Keep the five existing scenarios green.\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"daemon: async dispatch, per-stage exception handling with error stamps, argv-safe notify (review T-0054)\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the four new daemon tests",
+    "tick() returns quickly while a dispatched executor is still running (test a)",
+    "a raising stage leaves the task held with a hold_reason and an error stamp, and tick() keeps going (tests b, c)",
+    "notify passes untrusted text only as an argv item, never inside the AppleScript source (test d)",
+    "git diff --stat limited to orchestrator/daemon.py and tests/test_daemon.py"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0056",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0056` (9cb2114). Also confirmed the `decisions.md` retrospective note isn't required here \u2014 this task's own instructions define the full deliverable (implement, test, commit); the CLAUDE.md's Planner memory-hook rules apply to the Planner role, not to this fallback-executor task.\n\n## Summary\n\nFixed the three issues from security review T-0054 in `orchestrator/daemon.py`:\n\n1. **Async dispatch** \u2014 `executor.start` now runs on a background thread (via a generalized `spawn_async(fn, *args)`), stamped `dispatched_at` under the lock first so a second tick can't double-dispatch. A raise is caught and recorded as `pipeline.dispatch_error`.\n2. **Per-stage exception handling** \u2014 `dispatch()`'s spec_review branch, `gate()`'s merge/review-creation branch, and `merge_reviewed()`'s merge call are each wrapped in try/except; a failure holds the task with `hold_reason` and a `pipeline.<stage>_error` stamp instead of leaving it wedged. `gate()` also checks the worktree path exists before running tests-green (`hold_reason=\"worktree missing\"`). `tick()` and `main()` catch exceptions per stage/tick so one bad task never stops the loop.\n3. **argv-safe notify** \u2014 untrusted text (merge stderr, task titles) is now passed as an `osascript` argv item via an `on run argv` script, truncated to 200 chars, instead of being interpolated into the AppleScript source.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py` (matches scope exactly, confirmed via `git diff --stat`).\n\nTest output: `uv run python -m unittest discover -q tests` \u2192 80 tests, all passing (no failures). `.claude/hooks/tests-green.sh` gate exits 0.\n\nCommitted on `task/T-0056` as `9cb2114`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789673630.100823,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789673630.1049569,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0056",
+      "claimed_at": 1789673630.104873
+    },
+    {
+      "ts": 1789673630.111072,
+      "pid": 24883,
+      "account": "A"
+    },
+    {
+      "ts": 1789673963.148093,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0056` (9cb2114). Also confirmed the `decisions.md` retrospective note isn't required here \u2014 this task's own instructions define the full deliverable (implement, test, commit); the CLAUDE.md's Planner memory-hook rules apply to the Planner role, not to this fallback-executor task.\n\n## Summary\n\nFixed the three issues from security review T-0054 in `orchestrator/daemon.py`:\n\n1. **Async dispatch** \u2014 `executor.start` now runs on a background thread (via a generalized `spawn_async(fn, *args)`), stamped `dispatched_at` under the lock first so a second tick can't double-dispatch. A raise is caught and recorded as `pipeline.dispatch_error`.\n2. **Per-stage exception handling** \u2014 `dispatch()`'s spec_review branch, `gate()`'s merge/review-creation branch, and `merge_reviewed()`'s merge call are each wrapped in try/except; a failure holds the task with `hold_reason` and a `pipeline.<stage>_error` stamp instead of leaving it wedged. `gate()` also checks the worktree path exists before running tests-green (`hold_reason=\"worktree missing\"`). `tick()` and `main()` catch exceptions per stage/tick so one bad task never stops the loop.\n3. **argv-safe notify** \u2014 untrusted text (merge stderr, task titles) is now passed as an `osascript` argv item via an `on run argv` script, truncated to 200 chars, instead of being interpolated into the AppleScript source.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py` (matches scope exactly, confirmed via `git diff --stat`).\n\nTest output: `uv run python -m unittest discover -q tests` \u2192 80 tests, all passing (no failures). `.claude/hooks/tests-green.sh` gate exits 0.\n\nCommitted on `task/T-0056` as `9cb2114`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789673998.1819599,
+      "status": "done",
+      "merged_into": "goal/T-0043",
+      "sha": "a759d124410c30cfeb8a4cd350a33a406f024137"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789673630.104873,
+  "pid": 24883,
+  "account": "A",
+  "merged_into": "goal/T-0043",
+  "sha": "a759d124410c30cfeb8a4cd350a33a406f024137"
+}

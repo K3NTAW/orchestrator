@@ -1,0 +1,851 @@
+{
+  "id": "T-0801",
+  "created_at": 1790086745.6607108,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "daemon dispatch: a render error on the main execute path must hold the task visibly (R22 gap)",
+  "spec": "Observed 2026-09-22 14:12Z on T-0773: its spec quoted literal double-brace placeholders, so spawn.render(\"execute\", ...) raised ValueError unfilled_placeholder inside daemon.dispatch's main loop (daemon.py ~853-856: `packet = spawn.packet(...)`, `prompt = spawn.render(\"execute\", ...)`, `spawn_async(_dispatch_worker, ...)`, `complete(t[\"id\"], \"dispatched_at\")`). The exception escaped the per-task block: dispatched_at stayed stamped, no event, no hold, the task sat \"queued\" and was silently re-attempted every lease (three memory-recall rows, no execute rows). R22 (T-0755/T-0757) added render-error holds for _dispatch_fresh_fix and spawn.run_worker but not this path.\nDo: wrap the packet build + render + spawn_async of the main execute dispatch path in try/except; on exception call hold_failed(t[\"id\"], \"dispatch_error\", \"dispatch\", e) (existing helper at daemon.py ~484) so the task is held with hold_reason \"dispatch failed: ValueError\" and pipeline.dispatch_error carries the message, never leaving dispatched_at stamped on a task that did not launch (clear it in the same locked update). Also make _dispatch_worker (daemon.py ~496-535) handle every executor.start status: \"held\"/\"budget\" \u2192 clear dispatched_at and set status queued with pipeline.hold_note (held) so the next tick retries; \"refused\"/\"incompatible\" \u2192 post_result failed with the reason; \"fallback\" \u2192 leave as is (the Claude worker owns the task). Today only done/failed are handled and any other status leaves the task queued with dispatched_at stamped.\nTests (unittest): tests/test_daemon.py::test_dispatch_render_error_holds_task (an execute task whose spec contains a literal double-brace token: after one tick the task is held with hold_reason starting \"dispatch failed\" and pipeline.dispatch_error mentions unfilled_placeholder; dispatched_at is not set), tests/test_daemon.py::test_dispatch_worker_handles_non_terminal_start_statuses (executor.start patched to return {\"status\": \"held\", ...} then {\"status\": \"refused\", \"reason\": \"x\"}: first leaves the task queued without dispatched_at and with a hold_note, second posts a failed result with the reason). Keep all existing daemon tests green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_render_error_holds_task passes",
+    "tests/test_daemon.py::test_dispatch_worker_handles_non_terminal_start_statuses passes",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 2400,
+    "task_class": "debugging",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0801",
+  "codex_thread": "01a0c97d-2fc4-71e0-b167-f23ccf740428",
+  "result": {
+    "summary": "Implemented and committed execute-dispatch error handling. Both requested targeted tests pass; worktree is clean.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py`  \nGate: **red** on the second permitted run  \nCommit: `033023e9df953841675a03a61896c5336e9e10f3`\n\nFailures-only output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_dispatch_render_error_holds_task (test_daemon.DirtyScopePaths.test_dispatch_render_error_holds_task)\nTraceback (most recent call last):\nAttributeError: 'DirtyScopePaths' object has no attribute 'task'\nFAIL: test_dispatch_holds_execute_task_on_render_error (test_daemon.Daemon.test_dispatch_holds_execute_task_on_render_error)\nTraceback (most recent call last):\nAssertionError: False is not true\nFAILED (failures=1, errors=1)\n```\n\nThose two test issues were corrected afterward; direct execution of both acceptance tests then passed.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c97d-2fc4-71e0-b167-f23ccf740428",
+    "usage": {
+      "input_tokens": 1046192,
+      "cached_input_tokens": 1014272,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7703,
+      "reasoning_output_tokens": 1962,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790086794.0263839,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315
+      }
+    },
+    {
+      "ts": 1790086794.02807,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008
+      }
+    },
+    {
+      "ts": 1790086796.696063,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587
+      }
+    },
+    {
+      "ts": 1790086819.7330601,
+      "packet_meta": {
+        "chars": 4915,
+        "est_tokens": 1228,
+        "hash": "5564b2c4aa77",
+        "version": "5564b2c4aa77",
+        "base": "b6554efa37bb",
+        "sources": "pool.toml@c6194eabcbae gotchas@6a78056a5408 memory@notes over cap by 115 chars: acceptance kept whole",
+        "policy_version": "c6194eabcbae",
+        "gotchas": "6a78056a5408"
+      }
+    },
+    {
+      "ts": 1790086819.7348611,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0801",
+      "claimed_at": 1790086819.734693
+    },
+    {
+      "ts": 1790086819.7360861,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790087338.921267,
+      "codex_thread": "01a0c97d-2fc4-71e0-b167-f23ccf740428",
+      "codex_thread_head": "033023e9df953841675a03a61896c5336e9e10f3"
+    },
+    {
+      "ts": 1790087338.926673,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790087338.929783,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed execute-dispatch error handling. Both requested targeted tests pass; worktree is clean.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py`  \nGate: **red** on the second permitted run  \nCommit: `033023e9df953841675a03a61896c5336e9e10f3`\n\nFailures-only output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_dispatch_render_error_holds_task (test_daemon.DirtyScopePaths.test_dispatch_render_error_holds_task)\nTraceback (most recent call last):\nAttributeError: 'DirtyScopePaths' object has no attribute 'task'\nFAIL: test_dispatch_holds_execute_task_on_render_error (test_daemon.Daemon.test_dispatch_holds_execute_task_on_render_error)\nTraceback (most recent call last):\nAssertionError: False is not true\nFAILED (failures=1, errors=1)\n```\n\nThose two test issues were corrected afterward; direct execution of both acceptance tests then passed.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c97d-2fc4-71e0-b167-f23ccf740428",
+        "usage": {
+          "input_tokens": 1046192,
+          "cached_input_tokens": 1014272,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7703,
+          "reasoning_output_tokens": 1962,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790087471.720726,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790087594.234229,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790087594.729028,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        }
+      }
+    },
+    {
+      "ts": 1790087594.823026,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3"
+      }
+    },
+    {
+      "ts": 1790087594.8356009,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628
+      }
+    },
+    {
+      "ts": 1790089512.4749591,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790089631.4614358,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628,
+        "merged_at": 1790089631.461271,
+        "merged_at_lease": 1790090531.461271
+      }
+    },
+    {
+      "ts": 1790089631.645571,
+      "status": "failed",
+      "reason": "rebase_conflict",
+      "resume_hint": {
+        "conflicts": [
+          "orchestrator/daemon.py"
+        ],
+        "hunks": "diff --cc orchestrator/daemon.py\nindex ed29289,9d91a30..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -874,12 -889,13 +888,17 @@@ def dispatch(pool)\n                      bus.update(t[\"id\"], pipeline=pipeline)\n                  try:\n                      packet = spawn.packet(t, t.get(\"worktree\") or spawn.ROOT)\n++<<<<<<< HEAD\n +                    prompt = spawn.render(\"execute\", packet=packet)\n++=======\n+                     prompt = spawn.render(\"execute\", packet=packet, spec=t[\"spec\"],\n+                                           acceptance=t[\"acceptance\"], scope=t[\"scope\"])\n+                     meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)\n+                     spawn_async(_dispatch_worker, t[\"id\"], prompt, None, meta)\n++>>>>>>> 033023e (T-0801 handle execute dispatch failures)\n                  except Exception as exc:\n-                     hold_render_error(t[\"id\"], exc)\n+                     hold_failed(t[\"id\"], \"dispatch_error\", \"dispatch\", exc)\n                      continue\n-                 meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)\n-                 spawn_async(_dispatch_worker, t[\"id\"], prompt, None, meta)\n                  complete(t[\"id\"], \"dispatched_at\")\n              else:\n                  # A competing dispatcher owns this task. Its failed claim costs us no\n"
+      }
+    },
+    {
+      "ts": 1790089631.7904398,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628,
+        "merged_at": 1790089631.461271,
+        "merged_at_lease": 1790090531.461271,
+        "merged_at_done": 1790089631.7902238
+      }
+    },
+    {
+      "ts": 1790089631.792962,
+      "status": "held",
+      "hold_reason": "merge conflict"
+    },
+    {
+      "ts": 1790089632.60061,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628,
+        "merged_at": 1790089631.461271,
+        "merged_at_lease": 1790090531.461271,
+        "merged_at_done": 1790089631.7902238,
+        "failure_kind": "conflict"
+      }
+    },
+    {
+      "ts": 1790089633.1085272,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628,
+        "merged_at": 1790089631.461271,
+        "merged_at_lease": 1790090531.461271,
+        "merged_at_done": 1790089631.7902238,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1790089631.792962": true
+        }
+      }
+    },
+    {
+      "ts": 1790089888.1243799,
+      "codex_thread": "01a0c97d-2fc4-71e0-b167-f23ccf740428",
+      "codex_thread_head": "6ca204e88f46de67a29a318b757dc4064eedbaaa"
+    },
+    {
+      "ts": 1790089888.1299589,
+      "rounds": 1
+    },
+    {
+      "ts": 1790090022.072438,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628,
+        "merged_at": 1790089631.461271,
+        "merged_at_lease": 1790090531.461271,
+        "merged_at_done": 1790089631.7902238,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1790089631.792962": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790090289.156776,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "merged_via": "fix round T-0806 6ca204e88f46de67a29a318b757dc4064eedbaaa",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790086794.026315,
+        "dispatched_at": 1790086794.028008,
+        "dispatched_at_lease": 1790087694.028008,
+        "dispatched_at_done": 1790086796.69587,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b942f1cfa131e6fd5929571562728a7347538037",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0458333333333334
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087594.2340622,
+        "gated_at_lease": 1790088494.2340622,
+        "first_green_at": 1790087594.23315,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0801",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087594.728558,
+          "head": "033023e9df953841675a03a61896c5336e9e10f3"
+        },
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "gated_at_done": 1790087594.8354628,
+        "merged_at": 1790089631.461271,
+        "merged_at_lease": 1790090531.461271,
+        "merged_at_done": 1790089631.7902238,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1790089631.792962": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790090289.15451
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790086794.026315,
+    "dispatched_at": 1790086794.028008,
+    "dispatched_at_lease": 1790087694.028008,
+    "dispatched_at_done": 1790086796.69587,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "b942f1cfa131e6fd5929571562728a7347538037",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0458333333333334
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790087594.2340622,
+    "gated_at_lease": 1790088494.2340622,
+    "first_green_at": 1790087594.23315,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0801",
+      "goal_head": "goal/T-0760",
+      "moved_count": 5,
+      "stale_paths": [
+        "docs/context-economy/05-context-router.md",
+        "orchestrator/context_router.py",
+        "orchestrator/evidence.py",
+        "tests/test_context_router.py",
+        "tests/test_evidence.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790087594.728558,
+      "head": "033023e9df953841675a03a61896c5336e9e10f3"
+    },
+    "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+    "gated_at_done": 1790087594.8354628,
+    "merged_at": 1790089631.461271,
+    "merged_at_lease": 1790090531.461271,
+    "merged_at_done": 1790089631.7902238,
+    "failure_kind": "conflict",
+    "auto_fix_skipped": {
+      "1790089631.792962": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790090289.15451
+  },
+  "packet_meta": {
+    "chars": 4915,
+    "est_tokens": 1228,
+    "hash": "5564b2c4aa77",
+    "version": "5564b2c4aa77",
+    "base": "b6554efa37bb",
+    "sources": "pool.toml@c6194eabcbae gotchas@6a78056a5408 memory@notes over cap by 115 chars: acceptance kept whole",
+    "policy_version": "c6194eabcbae",
+    "gotchas": "6a78056a5408"
+  },
+  "claimed_at": 1790086819.734693,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "6ca204e88f46de67a29a318b757dc4064eedbaaa",
+  "review_verdict": "approve",
+  "reason": "rebase_conflict",
+  "resume_hint": {
+    "conflicts": [
+      "orchestrator/daemon.py"
+    ],
+    "hunks": "diff --cc orchestrator/daemon.py\nindex ed29289,9d91a30..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -874,12 -889,13 +888,17 @@@ def dispatch(pool)\n                      bus.update(t[\"id\"], pipeline=pipeline)\n                  try:\n                      packet = spawn.packet(t, t.get(\"worktree\") or spawn.ROOT)\n++<<<<<<< HEAD\n +                    prompt = spawn.render(\"execute\", packet=packet)\n++=======\n+                     prompt = spawn.render(\"execute\", packet=packet, spec=t[\"spec\"],\n+                                           acceptance=t[\"acceptance\"], scope=t[\"scope\"])\n+                     meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)\n+                     spawn_async(_dispatch_worker, t[\"id\"], prompt, None, meta)\n++>>>>>>> 033023e (T-0801 handle execute dispatch failures)\n                  except Exception as exc:\n-                     hold_render_error(t[\"id\"], exc)\n+                     hold_failed(t[\"id\"], \"dispatch_error\", \"dispatch\", exc)\n                      continue\n-                 meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)\n-                 spawn_async(_dispatch_worker, t[\"id\"], prompt, None, meta)\n                  complete(t[\"id\"], \"dispatched_at\")\n              else:\n                  # A competing dispatcher owns this task. Its failed claim costs us no\n"
+  },
+  "hold_reason": null,
+  "merged_into": "goal/T-0760",
+  "merged_via": "fix round T-0806 6ca204e88f46de67a29a318b757dc4064eedbaaa"
+}

@@ -1,0 +1,2077 @@
+{
+  "id": "T-1228",
+  "created_at": 1790172190.494436,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 8,
+  "title": "fix round 1 (review): S2f1 worker_control.steer: recorded steering messages delivered as interrupt plus resume f",
+  "spec": "Fix round 1 for T-1216: review T-1227 requested changes. fix round 1: address review T-1227 comment orchestrator/worker_control.py:236 [med]: steer() sets the registry to 'steering' and bumps the epoch before delivery. If steer_resume or resume_worker raises (for example the claude binary is missing, or the codex thread is locked), nothing restores the status or records a failure. The task stays in 'steering', and daemon.reconcile_dead now skips 'steering' entries, so nothing ever recovers it. Wrap delivery in try/except: on failure, re fix round 1: address review T-1227 comment orchestrator/worker_control.py:209 [med]: When the recorded pid is None (a claude worker still launching, or a worker whose pid was not yet registered), _terminate is a no-op but steer() still resumes the same session or thread. That gives two concurrent writers on one worktree and one session or thread. The pid guard rejects only unsafe pids, not a missing one. Refuse when pid is None or not alive, or wait until it is. fix round 1: address review T-1227 comment orchestrator/worker_control.py:240 [low]: The 'steered' event that returns the status to running is written only after the resume call returns. If resume_worker or steer_resume blocks until the resumed run finishes, the registry shows 'steering' for the whole run, and the guard skips 'steered' because the entry is already terminal. Confirm the resume launch sets 'running' itself; otherwise write 'steered' from the launch path. fix round 1 rule: steer(): wrap delivery (steer_resume / resume_worker) in try/except; on failure record a terminal failed state on the registry with the reason, release the pool reservation through release_if_current, restore the bus task to its previous status with a steer_failed note, and re-raise. Refuse (no interrupt, no epoch bump) when the registry pid is None or not alive, with a clear error. The resume launch path itself writes the steered event and sets status running before the resumed run starts, so a blocking resume never leaves the entry in steering. Add tests for delivery failure recovery and for the pid-None refusal. Run .claude/hooks/tests-green.sh . until it exits 0; do not ask questions; report files changed and failures-only output.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_worker_control.py::test_steer_records_before_delivery_and_never_edits_spec (steering file row, registry event, spec/acceptance/scope byte-identical)",
+    "tests/test_worker_control.py::test_steer_codex_resumes_thread_with_message (patched executor resume receives the thread id and the framed message)",
+    "tests/test_worker_control.py::test_steer_claude_resumes_session (patched Popen argv contains --resume and the session id)",
+    "tests/test_worker_control.py::test_steer_refuses_without_session_or_thread",
+    "tests/test_worker_registry.py::test_finish_ignores_stale_epoch_after_steer",
+    "tests/test_worker_control.py::test_steer_codex_uses_steer_resume_not_reply",
+    "tests/test_worker_registry.py::test_upsert_starting_carries_epoch_forward",
+    "tests/test_worker_control.py::test_release_if_current_and_stale_thread_bus_writes_skipped",
+    "tests/test_spawn.py::test_resume_reuses_recorded_tool_allowlist",
+    ".claude/hooks/tests-green.sh exits 0",
+    "fix round 1: address review T-1227 comment orchestrator/worker_control.py:236 [med]: steer() sets the registry to 'steering' and bumps the epoch before delivery. If steer_resume or resume_worker raises (for example the claude binary is missing, or the codex thread is locked), nothing restores the status or records a failure. The task stays in 'steering', and daemon.reconcile_dead now skips 'steering' entries, so nothing ever recovers it. Wrap delivery in try/except: on failure, re",
+    "fix round 1: address review T-1227 comment orchestrator/worker_control.py:209 [med]: When the recorded pid is None (a claude worker still launching, or a worker whose pid was not yet registered), _terminate is a no-op but steer() still resumes the same session or thread. That gives two concurrent writers on one worktree and one session or thread. The pid guard rejects only unsafe pids, not a missing one. Refuse when pid is None or not alive, or wait until it is.",
+    "fix round 1: address review T-1227 comment orchestrator/worker_control.py:240 [low]: The 'steered' event that returns the status to running is written only after the resume call returns. If resume_worker or steer_resume blocks until the resumed run finishes, the registry shows 'steering' for the whole run, and the guard skips 'steered' because the entry is already terminal. Confirm the resume launch sets 'running' itself; otherwise write 'steered' from the launch path.",
+    "fix round 1 rule: steer(): wrap delivery (steer_resume / resume_worker) in try/except; on failure record a terminal failed state on the registry with the reason, release the pool reservation through release_if_current, restore the bus task to its previous status with a steer_failed note, and re-raise. Refuse (no interrupt, no epoch bump) when the registry pid is None or not alive, with a clear error. The resume launch path itself writes the steered event and sets status running before the resumed run starts, so a blocking resume never leaves the entry in steering. Add tests for delivery failure recovery and for the pid-None refusal."
+  ],
+  "scope": [
+    "orchestrator/worker_control.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/cli.py",
+    "tests/test_worker_control.py",
+    "docs/hermes-hardening/11-worker-control.md",
+    "orchestrator/worker_registry.py",
+    "tests/test_worker_registry.py",
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review",
+    "fix_round_for": "T-1216",
+    "auto_round": 1,
+    "failure_signature": "51e29964c87e"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1216",
+  "codex_thread": null,
+  "result": {
+    "summary": "Fixed delivery-failure recovery and missing/dead PID refusal. Confirmed both launch paths mark workers running before waiting.\n\nGate: **passed, 1,380 tests**. Commit: `afdc80c943099a185aae801b2733759d0404e542`. Worktree clean.\n\nFiles changed: worker control, its tests, and documentation \u2014 **3 files, +112/\u221216**.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+    "usage": {
+      "input_tokens": 4364698,
+      "cached_input_tokens": 4255744,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 21845,
+      "reasoning_output_tokens": 5739
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790172190.496186,
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1216",
+      "spec_review_verdict": "approve",
+      "reason": "Planner: hand fix round for review request_changes"
+    },
+    {
+      "ts": 1790172210.716747,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099
+      }
+    },
+    {
+      "ts": 1790173910.75044,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392
+      }
+    },
+    {
+      "ts": 1790173911.491572,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        }
+      },
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1216",
+      "branch": "task/T-1216"
+    },
+    {
+      "ts": 1790173911.492725,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678
+      }
+    },
+    {
+      "ts": 1790173913.690428,
+      "packet_meta": {
+        "chars": 6782,
+        "est_tokens": 1695,
+        "presented_tokens": 1695,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "8affc43736f9092c10edee1faef45168ab46d89da467f59a9d287290674c1aa1"
+          },
+          "objective": {
+            "chars": 4923,
+            "est_tokens": 1230,
+            "sha256": "2b2937d7f006a136997783a29ea741f1024d49ae81f7646495cd48f42a988784"
+          },
+          "acceptance": {
+            "chars": 953,
+            "est_tokens": 238,
+            "sha256": "889bd9bdbba4a5f34db65c139c6d2fe86fa419be60c0df6991b1c7daf090b2ee"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 333,
+            "est_tokens": 83,
+            "sha256": "59fe75e978cf84d7f6f1f30abd88353431b4154951dce2a5b4e4f2afd4f837ef"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "4b01906ba9bb",
+        "version": "4b01906ba9bb",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5a6f02b2b0f6 gotchas@229ed9d41d39 memory@notes over cap by 1982 chars: acceptance kept whole routed=active",
+        "policy_version": "5a6f02b2b0f6",
+        "gotchas": "229ed9d41d39",
+        "candidate_tokens": 3465,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 21040,
+        "routed_reduction_ratio": 0.9072093825457054,
+        "routed_hidden": 6,
+        "routed_ambiguous": 25,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "9e7140e8bb9d",
+          "304fbf4b2094",
+          "d99c176869d8",
+          "4777124ab04d",
+          "3c77f91d5f14",
+          "e5c87c1f4480",
+          "baf8c6d109fc",
+          "1035af6baeaa",
+          "d2875268eb04",
+          "e033b366e759",
+          "976ea4d53d13",
+          "58303a4118ed",
+          "f691f21d34c7",
+          "dbc22db138df",
+          "17210891e218",
+          "80648deefba0",
+          "24eb129315e6",
+          "d0844cdc7c5a",
+          "76100ac52876",
+          "504365aa02ad",
+          "981250125bdd",
+          "248ade1f7236",
+          "7f3ac0021a4e",
+          "cd4d2ccdc959",
+          "2f689f233472",
+          "d2c3d6e19c7f",
+          "75aa195a7426",
+          "9dd377841abe",
+          "5ee19cd9806e",
+          "01de7bbb3936",
+          "27570fba0e13",
+          "df29a4795730",
+          "83da99db3203",
+          "6d5379b1ad93",
+          "17afdff351f3",
+          "3d120d7b1eec",
+          "588628a7b401",
+          "ebe1022380cf",
+          "28c39e9f088c",
+          "f3e43ac141d7",
+          "36b8d39ae050",
+          "e9ea27e410f7",
+          "ba664e420be7",
+          "45517f1f2f1d",
+          "05e8dfa53e15",
+          "637c45c6581a",
+          "e9927a4ebaf2",
+          "a8648fc3f7ae",
+          "e146114ba8ec",
+          "e4c630cc87b3",
+          "82dbf3b7ed1f",
+          "8f938ad31ca7",
+          "f5e9df567728",
+          "584f4a33bddf",
+          "66ab1306ccfc",
+          "5d279e520eff",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "23e11d66dd12",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "669cef77d8ef"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      }
+    },
+    {
+      "ts": 1790174177.352875,
+      "packet_meta": {
+        "chars": 6782,
+        "est_tokens": 1695,
+        "presented_tokens": 1695,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "8affc43736f9092c10edee1faef45168ab46d89da467f59a9d287290674c1aa1"
+          },
+          "objective": {
+            "chars": 4923,
+            "est_tokens": 1230,
+            "sha256": "2b2937d7f006a136997783a29ea741f1024d49ae81f7646495cd48f42a988784"
+          },
+          "acceptance": {
+            "chars": 953,
+            "est_tokens": 238,
+            "sha256": "889bd9bdbba4a5f34db65c139c6d2fe86fa419be60c0df6991b1c7daf090b2ee"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 333,
+            "est_tokens": 83,
+            "sha256": "59fe75e978cf84d7f6f1f30abd88353431b4154951dce2a5b4e4f2afd4f837ef"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "4b01906ba9bb",
+        "version": "4b01906ba9bb",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5a6f02b2b0f6 gotchas@229ed9d41d39 memory@notes over cap by 1982 chars: acceptance kept whole routed=active",
+        "policy_version": "5a6f02b2b0f6",
+        "gotchas": "229ed9d41d39",
+        "candidate_tokens": 3465,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 21040,
+        "routed_reduction_ratio": 0.9072093825457054,
+        "routed_hidden": 6,
+        "routed_ambiguous": 25,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "9e7140e8bb9d",
+          "304fbf4b2094",
+          "d99c176869d8",
+          "4777124ab04d",
+          "3c77f91d5f14",
+          "e5c87c1f4480",
+          "baf8c6d109fc",
+          "1035af6baeaa",
+          "d2875268eb04",
+          "e033b366e759",
+          "976ea4d53d13",
+          "58303a4118ed",
+          "f691f21d34c7",
+          "dbc22db138df",
+          "17210891e218",
+          "80648deefba0",
+          "24eb129315e6",
+          "d0844cdc7c5a",
+          "76100ac52876",
+          "504365aa02ad",
+          "981250125bdd",
+          "248ade1f7236",
+          "7f3ac0021a4e",
+          "cd4d2ccdc959",
+          "2f689f233472",
+          "d2c3d6e19c7f",
+          "75aa195a7426",
+          "9dd377841abe",
+          "5ee19cd9806e",
+          "01de7bbb3936",
+          "27570fba0e13",
+          "df29a4795730",
+          "83da99db3203",
+          "6d5379b1ad93",
+          "17afdff351f3",
+          "3d120d7b1eec",
+          "588628a7b401",
+          "ebe1022380cf",
+          "28c39e9f088c",
+          "f3e43ac141d7",
+          "36b8d39ae050",
+          "e9ea27e410f7",
+          "ba664e420be7",
+          "45517f1f2f1d",
+          "05e8dfa53e15",
+          "637c45c6581a",
+          "e9927a4ebaf2",
+          "a8648fc3f7ae",
+          "e146114ba8ec",
+          "e4c630cc87b3",
+          "82dbf3b7ed1f",
+          "8f938ad31ca7",
+          "f5e9df567728",
+          "584f4a33bddf",
+          "66ab1306ccfc",
+          "5d279e520eff",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "23e11d66dd12",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "669cef77d8ef"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790174177.36001,
+      "status": "done",
+      "result": {
+        "summary": "Fixed delivery-failure recovery and missing/dead PID refusal. Confirmed both launch paths mark workers running before waiting.\n\nGate: **passed, 1,380 tests**. Commit: `afdc80c943099a185aae801b2733759d0404e542`. Worktree clean.\n\nFiles changed: worker control, its tests, and documentation \u2014 **3 files, +112/\u221216**.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+        "usage": {
+          "input_tokens": 4364698,
+          "cached_input_tokens": 4255744,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 21845,
+          "reasoning_output_tokens": 5739
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790174207.881402,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790174332.319676,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790174332.926791,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        }
+      }
+    },
+    {
+      "ts": 1790174333.058954,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542"
+      }
+    },
+    {
+      "ts": 1790174333.066145,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001
+      }
+    },
+    {
+      "ts": 1790174369.618863,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "review_held_at": 1790174369.6186738
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-1244"
+    },
+    {
+      "ts": 1790174552.9544902,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "review_held_at": 1790174369.6186738,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790174553.048963,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "review_held_at": 1790174369.6186738,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790174369.618863": true
+        }
+      }
+    },
+    {
+      "ts": 1790174614.698485,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790174652.199722,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790174369.618863": true
+        }
+      },
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1790174653.301184,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790174369.618863": true
+        },
+        "merged_at": 1790174653.300967,
+        "merged_at_lease": 1790175553.300967
+      }
+    },
+    {
+      "ts": 1790174653.4969118,
+      "status": "failed",
+      "reason": "rebase_conflict",
+      "resume_hint": {
+        "conflicts": [
+          "orchestrator/daemon.py",
+          "orchestrator/executor.py",
+          "orchestrator/spawn.py",
+          "orchestrator/worker_control.py",
+          "tests/test_spawn.py"
+        ],
+        "hunks": "diff --cc orchestrator/daemon.py\nindex 8b1346c,d7257ef..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -5,9 -5,8 +5,14 @@@ catches crashes. Every stage stamps `pi\n  stage runs at most once no matter how often tick() runs.\"\"\"\n  import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request\n  from pathlib import Path\n++<<<<<<< HEAD\n +from . import harness_depth, worker_registry, memory_hot\n +from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,\n +               planner_runs, spawn, strategy, worker_control)\n++=======\n+ from . import harness_depth, worker_registry, memory_hot, worker_control\n+ from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure\n  from . import stale as stale_evidence\n  from .pool import Pool, fallback_tier\ndiff --cc orchestrator/executor.py\nindex ffc91b3,e93b312..0000000\n--- a/orchestrator/executor.py\n+++ b/orchestrator/executor.py\n@@@ -9,7 -9,7 +9,11 @@@ Usage-limit errors cool Codex down and \n  \"\"\"\n  import inspect, json, os, re, subprocess, time\n  from pathlib import Path\n++<<<<<<< HEAD\n +from . import ROOT, bus, contracts, worker_registry, env_policy\n++=======\n+ from . import ROOT, bus, worker_registry, env_policy, worker_control\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  import threading\n  from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router\n  from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint\n@@@ -317,8 -329,9 +333,10 @@@ def post_tool_result(task_id, result, r\n      }\n      if replace_result and previous:\n          posted[\"previous_commits\"] = [*previous.get(\"previous_commits\", []), previous.get(\"commit\")]\n +    posted = contracts.process(task_id, \"execute\", posted, cfg=Pool().cfg)\n      with bus.locked():\n+         if not worker_control.is_current(task_id, result.get(\"epoch\", 1)):\n+             return False, \"worker was superseded by steering\"\n          if replace_result:\n              pipeline = dict(bus.get(task_id).get(\"pipeline\") or {})\n              for key in list(pipeline):\ndiff --cc orchestrator/spawn.py\nindex f161899,2fb6dc0..0000000\n--- a/orchestrator/spawn.py\n+++ b/orchestrator/spawn.py\n@@@ -4,7 -4,7 +4,11 @@@ import loggin\n  import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time\n  from collections import OrderedDict\n  from pathlib import Path\n++<<<<<<< HEAD\n +from . import contracts, worker_registry, env_policy\n++=======\n+ from . import worker_registry, env_policy, worker_control\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  from . import harness_depth, memory_hot, memory_store\n  from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry\n  from .pool import Pool, is_rate_limited, parse_reset_hint\n@@@ -1151,8 -1139,8 +1155,13 @@@ def trust_workspace(config_dir, wt)\n          cfg.parent.mkdir(parents=True, exist_ok=True); cfg.write_text(json.dumps(data, indent=2))\n  \n  \n++<<<<<<< HEAD\n +def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, *, resume_session=None):\n +    log_run = (lambda **fields: None) if resume_session else bus.log_run\n++=======\n+ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):\n+     epoch = task.get(\"_launch_epoch\", worker_control.launch_epoch(task[\"id\"]))\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n      wt = Path(task.get(\"worktree\") or ensure_worktree(task[\"id\"]))\n      trust_workspace(acct.config_dir, wt)\n      # Explicit --mcp-config + --strict-mcp-config means workers never auto-load the project/user configs\n@@@ -1174,9 -1162,8 +1183,14 @@@\n      cmd = [\"claude\", \"-p\", prompt, \"--model\", model, \"--output-format\", \"json\", \"--max-budget-usd\", str(max_budget_usd),\n             \"--dangerously-skip-permissions\", \"--allowedTools\", tools,\n             \"--strict-mcp-config\", \"--mcp-config\", str(mcp_config)]\n++<<<<<<< HEAD\n +    if resume_session:\n +        cmd += [\"--resume\", resume_session, \"--tools\", \"\"]\n +        cmd[cmd.index(\"--mcp-config\") + 1] = '{\"mcpServers\": {}}'\n++=======\n+     if task.get(\"_resume_session\"):\n+         cmd += [\"--resume\", task[\"_resume_session\"]]\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n      if (task.get(\"packet_meta\") or {}).get(\"skill_routing_mode\") == \"active\":\n          cmd.append(\"--disable-slash-commands\")\n      if task[\"role\"] != \"execute\":\n@@@ -1187,85 -1174,94 +1201,153 @@@\n      if task.get(\"packet_meta\"):\n          log[\"packet_meta\"] = task[\"packet_meta\"]\n      t0 = time.time()\n-     worker_registry.upsert(task[\"id\"], status=\"starting\", role=task[\"role\"], provider=\"claude\",\n-                            model=model, account=acct.id, worktree=str(wt),\n-                            branch=task.get(\"branch\") or f\"task/{task['id']}\",\n-                            parent=task.get(\"parent\"), started_at=t0)\n+ \n      if shutil.which(\"claude\") is None:\n++<<<<<<< HEAD\n +        worker_registry.finish(task[\"id\"], \"held\", \"no_cli\")\n +        log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n++=======\n+         worker_registry.finish(task[\"id\"], \"held\", \"no_cli\", epoch=epoch)\n+         bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n          return {\"status\": \"held\", \"reason\": \"claude CLI not found on PATH\"}\n      try:\n-         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n-         worker_registry.event(task[\"id\"], \"spawned\", pid=p.pid, account=acct.id,\n-                               model=model, worktree=str(wt), branch=task.get(\"branch\") or f\"task/{task['id']}\")\n-         bus.update(task[\"id\"], pid=p.pid, account=acct.id)\n+         with bus.locked():\n+             if not worker_control.is_current(task[\"id\"], epoch):\n+                 return {\"status\": \"superseded\"}\n+             worker_registry.upsert(task[\"id\"], status=\"starting\", role=task[\"role\"], provider=\"claude\",\n+                                    model=model, account=acct.id, worktree=str(wt),\n+                                    branch=task.get(\"branch\") or f\"task/{task['id']}\",\n+                                    parent=task.get(\"parent\"), started_at=t0, epoch=epoch, tools=tools.split(\",\"))\n+             p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n+             worker_registry.event(task[\"id\"], \"spawned\", pid=p.pid, account=acct.id,\n+                                   model=model, worktree=str(wt), branch=task.get(\"branch\") or f\"task/{task['id']}\")\n+             if task.get(\"_steering\"):\n+                 worker_registry.event(task[\"id\"], \"steered\", status=\"running\")\n+             worker_control.write_if_current(task[\"id\"], epoch, bus.update, task[\"id\"], pid=p.pid, account=acct.id)\n          stdout, stderr = p.communicate(timeout=timeout)\n      except subprocess.TimeoutExpired:\n          p.kill()\n          p.communicate()\n-         worker_registry.finish(task[\"id\"], \"failed\", \"timeout\")\n+         worker_registry.finish(task[\"id\"], \"failed\", \"timeout\", epoch=epoch)\n          return {\"status\": \"failed\", \"reason\": f\"timeout after {timeout}s\"}\n      except FileNotFoundError:\n-         worker_registry.finish(task[\"id\"], \"held\", \"no_cli\")\n+         worker_registry.finish(task[\"id\"], \"held\", \"no_cli\", epoch=epoch)\n          # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never\n          # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.\n -        bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n +        log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n          return {\"status\": \"held\", \"reason\": \"claude CLI not found on PATH\"}\n      except OSError:\n-         worker_registry.finish(task[\"id\"], \"failed\", \"launch_error\")\n+         worker_registry.finish(task[\"id\"], \"failed\", \"launch_error\", epoch=epoch)\n          raise\n++<<<<<<< HEAD\n +    text = stdout + stderr\n +    if p.returncode != 0 and is_rate_limited(text):\n +        secs = parse_reset_hint(text, pool.cfg[\"limits\"][\"cooldown_default_s\"])\n +        pool.cooldown(acct, secs)\n +        log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"rate_limit\",\n +                    cooldown_s=secs, **log)\n +        worker_registry.finish(task[\"id\"], \"held\", \"rate_limit\")\n +        return {\"status\": \"held\", \"reason\": f\"rate_limit on {acct.id}, cooling {secs}s\"}\n +    try:\n +        out = json.loads(stdout)\n +    except json.JSONDecodeError:\n +        worker_registry.finish(task[\"id\"], \"failed\", \"non_json\")\n +        return {\"status\": \"failed\", \"reason\": f\"non-JSON output (rc={p.returncode}): {text[-500:]}\"}\n +    session_id = out.get(\"session_id\")\n +    if session_id is not None:\n +        task.setdefault(\"packet_meta\", {})[\"session_id\"] = session_id\n +        bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"])\n +    try:\n +        skills_used, skill_tokens_l2 = _skills_from_gate(task[\"id\"], session_id)\n +        task.setdefault(\"packet_meta\", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)\n +        pipeline = dict(bus.get(task[\"id\"]).get(\"pipeline\") or {})\n +        pipeline[\"skills_used\"] = skills_used\n +        bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"], pipeline=pipeline)\n +        decision_log.outcome(task[\"id\"], \"skill_selection\", skills_used=skills_used,\n +                             skill_tokens_l2=skill_tokens_l2,\n +                             skill_recovery=sorted(set(skills_used) - set(task[\"packet_meta\"].get(\"skills_selected\") or [])))\n +        log[\"packet_meta\"] = task[\"packet_meta\"]\n +    except Exception as exc:\n +        notify.notify(f\"{task['id']}: skill telemetry unavailable: {exc}\")\n +    used = out.get(\"usage\", {})\n +    worker_registry.usage(task[\"id\"], \"claude\", used, out.get(\"total_cost_usd\"))\n +    worker_registry.finish(task[\"id\"], \"done\" if not out.get(\"is_error\") and p.returncode == 0 else \"failed\",\n +                           None if not out.get(\"is_error\") and p.returncode == 0 else \"process_error\")\n +    n = used.get(\"input_tokens\", 0) + used.get(\"output_tokens\", 0) + used.get(\"cache_read_input_tokens\", 0) // 10\n +    pool.record(acct, n)\n +    review_log = {}\n +    if task.get(\"role\") == \"review\":\n +        parsed = extract_json(out.get(\"result\", \"\"))\n +        if not parsed.get(\"verdict\"):\n +            parsed = (bus.get(task[\"id\"]).get(\"result\") or parsed)\n +        parsed[\"packet_version\"] = (task.get(\"packet_meta\") or {}).get(\"version\")\n +        facts = attribution.review_facts({**task, \"result\": parsed})\n +        review_log = {key: facts[key] for key in (\"verdict\", \"findings_count\", \"findings_by_severity\",\n +                      \"reviewer_role\", \"checklist_used\", \"reviewed_sha\", \"packet_version\", \"review_pass_index\")}\n +    log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, duration_s=round(time.time() - t0, 1),\n +                outcome=\"done\" if p.returncode == 0 else \"error\", **({\"usd\": out.get(\"total_cost_usd\")} if used else {}), turns=out.get(\"num_turns\", 0),\n +                provider=\"claude\", usage=used, session_id=session_id, **log, **review_log, **used)\n +    if not out.get(\"is_error\") and p.returncode == 0:\n +        return {\"status\": \"done\", \"output\": out}\n +    reason = f\"budget or error exit (rc={p.returncode}): \" + (out.get(\"result\") or \"\")[:500]\n +    return {\"status\": \"failed\", \"output\": out, \"reason\": reason}\n++=======\n+     with bus.locked():\n+         if not worker_control.is_current(task[\"id\"], epoch):\n+             return {\"status\": \"superseded\"}\n+         text = stdout + stderr\n+         if p.returncode != 0 and is_rate_limited(text):\n+             secs = parse_reset_hint(text, pool.cfg[\"limits\"][\"cooldown_default_s\"])\n+             pool.cooldown(acct, secs)\n+             bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"rate_limit\",\n+                         cooldown_s=secs, **log)\n+             worker_registry.finish(task[\"id\"], \"held\", \"rate_limit\", epoch=epoch)\n+             return {\"status\": \"held\", \"reason\": f\"rate_limit on {acct.id}, cooling {secs}s\"}\n+         try:\n+             out = json.loads(stdout)\n+         except json.JSONDecodeError:\n+             worker_registry.finish(task[\"id\"], \"failed\", \"non_json\", epoch=epoch)\n+             return {\"status\": \"failed\", \"reason\": f\"non-JSON output (rc={p.returncode}): {text[-500:]}\"}\n+         session_id = out.get(\"session_id\")\n+         if session_id is not None:\n+             task.setdefault(\"packet_meta\", {})[\"session_id\"] = session_id\n+             bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"])\n+         try:\n+             skills_used, skill_tokens_l2 = _skills_from_gate(task[\"id\"], session_id)\n+             task.setdefault(\"packet_meta\", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)\n+             pipeline = dict(bus.get(task[\"id\"]).get(\"pipeline\") or {})\n+             pipeline[\"skills_used\"] = skills_used\n+             bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"], pipeline=pipeline)\n+             decision_log.outcome(task[\"id\"], \"skill_selection\", skills_used=skills_used,\n+                                  skill_tokens_l2=skill_tokens_l2,\n+                                  skill_recovery=sorted(set(skills_used) - set(task[\"packet_meta\"].get(\"skills_selected\") or [])))\n+             log[\"packet_meta\"] = task[\"packet_meta\"]\n+         except Exception as exc:\n+             notify.notify(f\"{task['id']}: skill telemetry unavailable: {exc}\")\n+         used = out.get(\"usage\", {})\n+         worker_registry.usage(task[\"id\"], \"claude\", used, out.get(\"total_cost_usd\"))\n+         worker_registry.finish(task[\"id\"], \"done\" if not out.get(\"is_error\") and p.returncode == 0 else \"failed\",\n+                                None if not out.get(\"is_error\") and p.returncode == 0 else \"process_error\", epoch=epoch)\n+         n = used.get(\"input_tokens\", 0) + used.get(\"output_tokens\", 0) + used.get(\"cache_read_input_tokens\", 0) // 10\n+         pool.record(acct, n)\n+         review_log = {}\n+         if task.get(\"role\") == \"review\":\n+             parsed = extract_json(out.get(\"result\", \"\"))\n+             if not parsed.get(\"verdict\"):\n+                 parsed = (bus.get(task[\"id\"]).get(\"result\") or parsed)\n+             parsed[\"packet_version\"] = (task.get(\"packet_meta\") or {}).get(\"version\")\n+             facts = attribution.review_facts({**task, \"result\": parsed})\n+             review_log = {key: facts[key] for key in (\"verdict\", \"findings_count\", \"findings_by_severity\",\n+                           \"reviewer_role\", \"checklist_used\", \"reviewed_sha\", \"packet_version\", \"review_pass_index\")}\n+         bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, duration_s=round(time.time() - t0, 1),\n+                     outcome=\"done\" if p.returncode == 0 else \"error\", **({\"usd\": out.get(\"total_cost_usd\")} if used else {}), turns=out.get(\"num_turns\", 0),\n+                     provider=\"claude\", usage=used, session_id=session_id, **log, **review_log, **used)\n+         if not out.get(\"is_error\") and p.returncode == 0:\n+             return {\"status\": \"done\", \"output\": out}\n+         reason = f\"budget or error exit (rc={p.returncode}): \" + (out.get(\"result\") or \"\")[:500]\n+         return {\"status\": \"failed\", \"output\": out, \"reason\": reason}\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  \n  \n  def extract_json(text):\n@@@ -1466,31 -1474,9 +1560,36 @@@ def run_worker(task_id, account_id=None\n                  r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS[\"scout\"]),\n                                 budget_left, timeout_left)\n                  release_usage = _combined_usage(first, r)\n +        session_id = r.get(\"output\", {}).get(\"session_id\")\n +        def resume_output(prompt, repair_budget):\n +            nonlocal release_usage\n +            reply = {}\n +            began = time.monotonic()\n +            try:\n +                reply = run_claude(pool, acct, t, prompt, model, \"\", repair_budget,\n +                                   min(timeout, 120), resume_session=session_id)\n +            finally:\n +                output = reply.get(\"output\") or {}\n +                usage = output.get(\"usage\") or {}\n +                release_usage = _combined_usage(release_usage or r, reply)\n +                bus.log_run(task=task_id, role=\"output_repair\", provider=\"claude\",\n +                            account=acct.id, tier=t[\"tier\"], session_id=session_id,\n +                            outcome=\"done\" if reply.get(\"status\") == \"done\" else \"failed\",\n +                            usage=usage, usd=output.get(\"total_cost_usd\"), budget_usd=repair_budget,\n +                            duration_s=round(time.monotonic() - began, 1), **usage)\n +            return {\"result\": extract_json(output.get(\"result\", \"\")) if reply[\"status\"] == \"done\" else {},\n +                    \"tokens\": usage, \"usd\": output.get(\"total_cost_usd\", 0)}\n +        repair_session = resume_output if session_id else None\n          if r[\"status\"] == \"done\" and role == \"execute\":\n++<<<<<<< HEAD\n +            posted = fit_result({\"summary\": r[\"output\"].get(\"result\", \"\")[:3000], \"executed_by\": f\"claude:{t['tier']}\",\n +                                 \"review\": \"other account, different model; label PR same-family-review\"})\n +            posted = contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session)\n +            bus.post_result(task_id, posted, \"done\")\n++=======\n+             worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, fit_result({\"summary\": r[\"output\"].get(\"result\", \"\")[:3000], \"executed_by\": f\"claude:{t['tier']}\",\n+                                       \"review\": \"other account, different model; label PR same-family-review\"}), \"done\")\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n          elif r[\"status\"] == \"done\":\n              text = r[\"output\"].get(\"result\", \"\")\n              result = extract_json(text)\n@@@ -1502,28 -1488,18 +1601,38 @@@\n              # treat it as a failed parse for review roles so we never silently drop an already-posted verdict\n              # (T-0139: an approve sat unmerged after a second, verdict-less post overwrote the first).\n              parse_failed = bool(result.get(\"parse_error\")) or (review_role and not result.get(\"verdict\"))\n -            existing_result = (bus.get(task_id).get(\"result\") or {}) if parse_failed else {}\n -            if parse_failed and existing_result.get(\"verdict\"):\n -                result = existing_result  # keep the worker's own posted result; do not overwrite it\n +            existing_result = (bus.get(task_id).get(\"result\") or {}) if parse_failed or review_role else {}\n +            if existing_result.get(\"verdict\"):\n +                # Validate the authoritative posted result without offering a repair session\n +                # or replacing it with a deterministic candidate.\n +                contracts.process(task_id, role, ex"
+      }
+    },
+    {
+      "ts": 1790174653.595728,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790174369.618863": true
+        },
+        "merged_at": 1790174653.300967,
+        "merged_at_lease": 1790175553.300967,
+        "merged_at_done": 1790174653.595437
+      }
+    },
+    {
+      "ts": 1790174653.597506,
+      "status": "held",
+      "hold_reason": "merge conflict"
+    },
+    {
+      "ts": 1790174653.9295309,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1790174369.618863": true
+        },
+        "merged_at": 1790174653.300967,
+        "merged_at_lease": 1790175553.300967,
+        "merged_at_done": 1790174653.595437
+      }
+    },
+    {
+      "ts": 1790174654.024448,
+      "pipeline": {
+        "first_ready_at": 1790172210.7167099,
+        "dispatched_at": 1790173910.750392,
+        "dispatched_at_lease": 1790174810.750392,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+          "parent": "T-1216"
+        },
+        "dispatched_at_done": 1790173911.492678,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790174332.3195221,
+        "gated_at_lease": 1790175232.3195221,
+        "first_green_at": 1790174332.318796,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1216",
+          "goal_head": "goal/T-0991",
+          "moved_count": 34,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            ".orchestrator/prompts/execute.md",
+            ".orchestrator/prompts/review.md",
+            ".orchestrator/prompts/scout.md",
+            ".orchestrator/prompts/spec-review.md",
+            "docs/hermes-hardening/09-stable-prefixes.md",
+            "docs/hermes-hardening/13-output-contracts.md",
+            "docs/hermes-hardening/17-memory-skills-strategy.md",
+            "docs/hermes-hardening/18-handoff-economics.md",
+            "orchestrator/cache_telemetry.py",
+            "orchestrator/cli.py",
+            "orchestrator/contracts.py",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/executor.py",
+            "orchestrator/handoff_scorecard.py",
+            "orchestrator/memory_hot.py",
+            "orchestrator/memory_store.py",
+            "orchestrator/promotion.py",
+            "orchestrator/skill_learning.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/strategy.py",
+            "tests/test_cache_telemetry.py",
+            "tests/test_cli.py",
+            "tests/test_contracts.py",
+            "tests/test_daemon.py",
+            "tests/test_executor.py",
+            "tests/test_handoff_scorecard.py",
+            "tests/test_promotion.py",
+            "tests/test_skill_learning.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_strategy.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "orchestrator/executor.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_cli.py",
+              "tests/test_daemon.py",
+              "tests/test_executor.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1179",
+              "T-1184",
+              "T-1199",
+              "T-1231"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790174332.926416,
+          "head": "afdc80c943099a185aae801b2733759d0404e542"
+        },
+        "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+        "gated_at_done": 1790174333.066001,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1790174369.618863": true,
+          "1790174653.597506": true
+        },
+        "merged_at": 1790174653.300967,
+        "merged_at_lease": 1790175553.300967,
+        "merged_at_done": 1790174653.595437
+      }
+    },
+    {
+      "ts": 1790174687.941495,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner: root landed via T-1252"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner: root landed via T-1252",
+  "pipeline": {
+    "first_ready_at": 1790172210.7167099,
+    "dispatched_at": 1790173910.750392,
+    "dispatched_at_lease": 1790174810.750392,
+    "resume": {
+      "mode": "resume",
+      "thread": "01a0ce81-cbf0-7b42-806e-0adc24e853b6",
+      "parent": "T-1216"
+    },
+    "dispatched_at_done": 1790173911.492678,
+    "skills_used": [],
+    "gate_attempts": 1,
+    "gated_at": 1790174332.3195221,
+    "gated_at_lease": 1790175232.3195221,
+    "first_green_at": 1790174332.318796,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1216",
+      "goal_head": "goal/T-0991",
+      "moved_count": 34,
+      "stale_paths": [
+        ".orchestrator/pool.toml",
+        ".orchestrator/prompts/execute.md",
+        ".orchestrator/prompts/review.md",
+        ".orchestrator/prompts/scout.md",
+        ".orchestrator/prompts/spec-review.md",
+        "docs/hermes-hardening/09-stable-prefixes.md",
+        "docs/hermes-hardening/13-output-contracts.md",
+        "docs/hermes-hardening/17-memory-skills-strategy.md",
+        "docs/hermes-hardening/18-handoff-economics.md",
+        "orchestrator/cache_telemetry.py",
+        "orchestrator/cli.py",
+        "orchestrator/contracts.py",
+        "orchestrator/daemon.py",
+        "orchestrator/decision_log.py",
+        "orchestrator/executor.py",
+        "orchestrator/handoff_scorecard.py",
+        "orchestrator/memory_hot.py",
+        "orchestrator/memory_store.py",
+        "orchestrator/promotion.py",
+        "orchestrator/skill_learning.py",
+        "orchestrator/skills_registry.py",
+        "orchestrator/spawn.py",
+        "orchestrator/strategy.py",
+        "tests/test_cache_telemetry.py",
+        "tests/test_cli.py",
+        "tests/test_contracts.py",
+        "tests/test_daemon.py",
+        "tests/test_executor.py",
+        "tests/test_handoff_scorecard.py",
+        "tests/test_promotion.py",
+        "tests/test_skill_learning.py",
+        "tests/test_skills_registry.py",
+        "tests/test_spawn.py",
+        "tests/test_strategy.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [
+          "orchestrator/cli.py",
+          "orchestrator/daemon.py",
+          "orchestrator/executor.py",
+          "orchestrator/spawn.py",
+          "tests/test_daemon.py",
+          "tests/test_spawn.py"
+        ],
+        "changed_files_moved": [
+          "orchestrator/cli.py",
+          "orchestrator/daemon.py",
+          "orchestrator/executor.py",
+          "orchestrator/spawn.py",
+          "tests/test_daemon.py",
+          "tests/test_spawn.py"
+        ],
+        "tests_changed": [
+          "tests/test_cli.py",
+          "tests/test_daemon.py",
+          "tests/test_executor.py",
+          "tests/test_spawn.py"
+        ],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": [
+          "T-1179",
+          "T-1184",
+          "T-1199",
+          "T-1231"
+        ]
+      },
+      "risk": "high",
+      "risk_reasons": [
+        "scoped_files_changed",
+        "changed_files_moved",
+        "tests_changed",
+        "overlapping_merge"
+      ],
+      "graph": "stale",
+      "checked_at": 1790174332.926416,
+      "head": "afdc80c943099a185aae801b2733759d0404e542"
+    },
+    "reviewed_sha": "afdc80c943099a185aae801b2733759d0404e542",
+    "gated_at_done": 1790174333.066001,
+    "failure_kind": "conflict",
+    "auto_fix_skipped": {
+      "1790174369.618863": true,
+      "1790174653.597506": true
+    },
+    "merged_at": 1790174653.300967,
+    "merged_at_lease": 1790175553.300967,
+    "merged_at_done": 1790174653.595437
+  },
+  "branch": "task/T-1216",
+  "packet_meta": {
+    "chars": 6782,
+    "est_tokens": 1695,
+    "presented_tokens": 1695,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "8affc43736f9092c10edee1faef45168ab46d89da467f59a9d287290674c1aa1"
+      },
+      "objective": {
+        "chars": 4923,
+        "est_tokens": 1230,
+        "sha256": "2b2937d7f006a136997783a29ea741f1024d49ae81f7646495cd48f42a988784"
+      },
+      "acceptance": {
+        "chars": 953,
+        "est_tokens": 238,
+        "sha256": "889bd9bdbba4a5f34db65c139c6d2fe86fa419be60c0df6991b1c7daf090b2ee"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+      },
+      "write_scope": {
+        "chars": 333,
+        "est_tokens": 83,
+        "sha256": "59fe75e978cf84d7f6f1f30abd88353431b4154951dce2a5b4e4f2afd4f837ef"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "4b01906ba9bb",
+    "version": "4b01906ba9bb",
+    "candidate_known": true,
+    "base": "1acfc3b30612",
+    "sources": "pool.toml@5a6f02b2b0f6 gotchas@229ed9d41d39 memory@notes over cap by 1982 chars: acceptance kept whole routed=active",
+    "policy_version": "5a6f02b2b0f6",
+    "gotchas": "229ed9d41d39",
+    "candidate_tokens": 3465,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 21040,
+    "routed_reduction_ratio": 0.9072093825457054,
+    "routed_hidden": 6,
+    "routed_ambiguous": 25,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "9e7140e8bb9d",
+      "304fbf4b2094",
+      "d99c176869d8",
+      "4777124ab04d",
+      "3c77f91d5f14",
+      "e5c87c1f4480",
+      "baf8c6d109fc",
+      "1035af6baeaa",
+      "d2875268eb04",
+      "e033b366e759",
+      "976ea4d53d13",
+      "58303a4118ed",
+      "f691f21d34c7",
+      "dbc22db138df",
+      "17210891e218",
+      "80648deefba0",
+      "24eb129315e6",
+      "d0844cdc7c5a",
+      "76100ac52876",
+      "504365aa02ad",
+      "981250125bdd",
+      "248ade1f7236",
+      "7f3ac0021a4e",
+      "cd4d2ccdc959",
+      "2f689f233472",
+      "d2c3d6e19c7f",
+      "75aa195a7426",
+      "9dd377841abe",
+      "5ee19cd9806e",
+      "01de7bbb3936",
+      "27570fba0e13",
+      "df29a4795730",
+      "83da99db3203",
+      "6d5379b1ad93",
+      "17afdff351f3",
+      "3d120d7b1eec",
+      "588628a7b401",
+      "ebe1022380cf",
+      "28c39e9f088c",
+      "f3e43ac141d7",
+      "36b8d39ae050",
+      "e9ea27e410f7",
+      "ba664e420be7",
+      "45517f1f2f1d",
+      "05e8dfa53e15",
+      "637c45c6581a",
+      "e9927a4ebaf2",
+      "a8648fc3f7ae",
+      "e146114ba8ec",
+      "e4c630cc87b3",
+      "82dbf3b7ed1f",
+      "8f938ad31ca7",
+      "f5e9df567728",
+      "584f4a33bddf",
+      "66ab1306ccfc",
+      "5d279e520eff",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "23e11d66dd12",
+      "d02e6bc9902a",
+      "bb8ef90a30f4",
+      "461132b06b06",
+      "669cef77d8ef"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "hold_reason": null,
+  "review_verdict": "approve",
+  "resume_hint": {
+    "conflicts": [
+      "orchestrator/daemon.py",
+      "orchestrator/executor.py",
+      "orchestrator/spawn.py",
+      "orchestrator/worker_control.py",
+      "tests/test_spawn.py"
+    ],
+    "hunks": "diff --cc orchestrator/daemon.py\nindex 8b1346c,d7257ef..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -5,9 -5,8 +5,14 @@@ catches crashes. Every stage stamps `pi\n  stage runs at most once no matter how often tick() runs.\"\"\"\n  import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request\n  from pathlib import Path\n++<<<<<<< HEAD\n +from . import harness_depth, worker_registry, memory_hot\n +from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,\n +               planner_runs, spawn, strategy, worker_control)\n++=======\n+ from . import harness_depth, worker_registry, memory_hot, worker_control\n+ from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure\n  from . import stale as stale_evidence\n  from .pool import Pool, fallback_tier\ndiff --cc orchestrator/executor.py\nindex ffc91b3,e93b312..0000000\n--- a/orchestrator/executor.py\n+++ b/orchestrator/executor.py\n@@@ -9,7 -9,7 +9,11 @@@ Usage-limit errors cool Codex down and \n  \"\"\"\n  import inspect, json, os, re, subprocess, time\n  from pathlib import Path\n++<<<<<<< HEAD\n +from . import ROOT, bus, contracts, worker_registry, env_policy\n++=======\n+ from . import ROOT, bus, worker_registry, env_policy, worker_control\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  import threading\n  from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router\n  from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint\n@@@ -317,8 -329,9 +333,10 @@@ def post_tool_result(task_id, result, r\n      }\n      if replace_result and previous:\n          posted[\"previous_commits\"] = [*previous.get(\"previous_commits\", []), previous.get(\"commit\")]\n +    posted = contracts.process(task_id, \"execute\", posted, cfg=Pool().cfg)\n      with bus.locked():\n+         if not worker_control.is_current(task_id, result.get(\"epoch\", 1)):\n+             return False, \"worker was superseded by steering\"\n          if replace_result:\n              pipeline = dict(bus.get(task_id).get(\"pipeline\") or {})\n              for key in list(pipeline):\ndiff --cc orchestrator/spawn.py\nindex f161899,2fb6dc0..0000000\n--- a/orchestrator/spawn.py\n+++ b/orchestrator/spawn.py\n@@@ -4,7 -4,7 +4,11 @@@ import loggin\n  import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time\n  from collections import OrderedDict\n  from pathlib import Path\n++<<<<<<< HEAD\n +from . import contracts, worker_registry, env_policy\n++=======\n+ from . import worker_registry, env_policy, worker_control\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  from . import harness_depth, memory_hot, memory_store\n  from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry\n  from .pool import Pool, is_rate_limited, parse_reset_hint\n@@@ -1151,8 -1139,8 +1155,13 @@@ def trust_workspace(config_dir, wt)\n          cfg.parent.mkdir(parents=True, exist_ok=True); cfg.write_text(json.dumps(data, indent=2))\n  \n  \n++<<<<<<< HEAD\n +def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, *, resume_session=None):\n +    log_run = (lambda **fields: None) if resume_session else bus.log_run\n++=======\n+ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):\n+     epoch = task.get(\"_launch_epoch\", worker_control.launch_epoch(task[\"id\"]))\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n      wt = Path(task.get(\"worktree\") or ensure_worktree(task[\"id\"]))\n      trust_workspace(acct.config_dir, wt)\n      # Explicit --mcp-config + --strict-mcp-config means workers never auto-load the project/user configs\n@@@ -1174,9 -1162,8 +1183,14 @@@\n      cmd = [\"claude\", \"-p\", prompt, \"--model\", model, \"--output-format\", \"json\", \"--max-budget-usd\", str(max_budget_usd),\n             \"--dangerously-skip-permissions\", \"--allowedTools\", tools,\n             \"--strict-mcp-config\", \"--mcp-config\", str(mcp_config)]\n++<<<<<<< HEAD\n +    if resume_session:\n +        cmd += [\"--resume\", resume_session, \"--tools\", \"\"]\n +        cmd[cmd.index(\"--mcp-config\") + 1] = '{\"mcpServers\": {}}'\n++=======\n+     if task.get(\"_resume_session\"):\n+         cmd += [\"--resume\", task[\"_resume_session\"]]\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n      if (task.get(\"packet_meta\") or {}).get(\"skill_routing_mode\") == \"active\":\n          cmd.append(\"--disable-slash-commands\")\n      if task[\"role\"] != \"execute\":\n@@@ -1187,85 -1174,94 +1201,153 @@@\n      if task.get(\"packet_meta\"):\n          log[\"packet_meta\"] = task[\"packet_meta\"]\n      t0 = time.time()\n-     worker_registry.upsert(task[\"id\"], status=\"starting\", role=task[\"role\"], provider=\"claude\",\n-                            model=model, account=acct.id, worktree=str(wt),\n-                            branch=task.get(\"branch\") or f\"task/{task['id']}\",\n-                            parent=task.get(\"parent\"), started_at=t0)\n+ \n      if shutil.which(\"claude\") is None:\n++<<<<<<< HEAD\n +        worker_registry.finish(task[\"id\"], \"held\", \"no_cli\")\n +        log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n++=======\n+         worker_registry.finish(task[\"id\"], \"held\", \"no_cli\", epoch=epoch)\n+         bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n          return {\"status\": \"held\", \"reason\": \"claude CLI not found on PATH\"}\n      try:\n-         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n-         worker_registry.event(task[\"id\"], \"spawned\", pid=p.pid, account=acct.id,\n-                               model=model, worktree=str(wt), branch=task.get(\"branch\") or f\"task/{task['id']}\")\n-         bus.update(task[\"id\"], pid=p.pid, account=acct.id)\n+         with bus.locked():\n+             if not worker_control.is_current(task[\"id\"], epoch):\n+                 return {\"status\": \"superseded\"}\n+             worker_registry.upsert(task[\"id\"], status=\"starting\", role=task[\"role\"], provider=\"claude\",\n+                                    model=model, account=acct.id, worktree=str(wt),\n+                                    branch=task.get(\"branch\") or f\"task/{task['id']}\",\n+                                    parent=task.get(\"parent\"), started_at=t0, epoch=epoch, tools=tools.split(\",\"))\n+             p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n+             worker_registry.event(task[\"id\"], \"spawned\", pid=p.pid, account=acct.id,\n+                                   model=model, worktree=str(wt), branch=task.get(\"branch\") or f\"task/{task['id']}\")\n+             if task.get(\"_steering\"):\n+                 worker_registry.event(task[\"id\"], \"steered\", status=\"running\")\n+             worker_control.write_if_current(task[\"id\"], epoch, bus.update, task[\"id\"], pid=p.pid, account=acct.id)\n          stdout, stderr = p.communicate(timeout=timeout)\n      except subprocess.TimeoutExpired:\n          p.kill()\n          p.communicate()\n-         worker_registry.finish(task[\"id\"], \"failed\", \"timeout\")\n+         worker_registry.finish(task[\"id\"], \"failed\", \"timeout\", epoch=epoch)\n          return {\"status\": \"failed\", \"reason\": f\"timeout after {timeout}s\"}\n      except FileNotFoundError:\n-         worker_registry.finish(task[\"id\"], \"held\", \"no_cli\")\n+         worker_registry.finish(task[\"id\"], \"held\", \"no_cli\", epoch=epoch)\n          # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never\n          # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.\n -        bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n +        log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"no_cli\", **log)\n          return {\"status\": \"held\", \"reason\": \"claude CLI not found on PATH\"}\n      except OSError:\n-         worker_registry.finish(task[\"id\"], \"failed\", \"launch_error\")\n+         worker_registry.finish(task[\"id\"], \"failed\", \"launch_error\", epoch=epoch)\n          raise\n++<<<<<<< HEAD\n +    text = stdout + stderr\n +    if p.returncode != 0 and is_rate_limited(text):\n +        secs = parse_reset_hint(text, pool.cfg[\"limits\"][\"cooldown_default_s\"])\n +        pool.cooldown(acct, secs)\n +        log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"rate_limit\",\n +                    cooldown_s=secs, **log)\n +        worker_registry.finish(task[\"id\"], \"held\", \"rate_limit\")\n +        return {\"status\": \"held\", \"reason\": f\"rate_limit on {acct.id}, cooling {secs}s\"}\n +    try:\n +        out = json.loads(stdout)\n +    except json.JSONDecodeError:\n +        worker_registry.finish(task[\"id\"], \"failed\", \"non_json\")\n +        return {\"status\": \"failed\", \"reason\": f\"non-JSON output (rc={p.returncode}): {text[-500:]}\"}\n +    session_id = out.get(\"session_id\")\n +    if session_id is not None:\n +        task.setdefault(\"packet_meta\", {})[\"session_id\"] = session_id\n +        bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"])\n +    try:\n +        skills_used, skill_tokens_l2 = _skills_from_gate(task[\"id\"], session_id)\n +        task.setdefault(\"packet_meta\", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)\n +        pipeline = dict(bus.get(task[\"id\"]).get(\"pipeline\") or {})\n +        pipeline[\"skills_used\"] = skills_used\n +        bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"], pipeline=pipeline)\n +        decision_log.outcome(task[\"id\"], \"skill_selection\", skills_used=skills_used,\n +                             skill_tokens_l2=skill_tokens_l2,\n +                             skill_recovery=sorted(set(skills_used) - set(task[\"packet_meta\"].get(\"skills_selected\") or [])))\n +        log[\"packet_meta\"] = task[\"packet_meta\"]\n +    except Exception as exc:\n +        notify.notify(f\"{task['id']}: skill telemetry unavailable: {exc}\")\n +    used = out.get(\"usage\", {})\n +    worker_registry.usage(task[\"id\"], \"claude\", used, out.get(\"total_cost_usd\"))\n +    worker_registry.finish(task[\"id\"], \"done\" if not out.get(\"is_error\") and p.returncode == 0 else \"failed\",\n +                           None if not out.get(\"is_error\") and p.returncode == 0 else \"process_error\")\n +    n = used.get(\"input_tokens\", 0) + used.get(\"output_tokens\", 0) + used.get(\"cache_read_input_tokens\", 0) // 10\n +    pool.record(acct, n)\n +    review_log = {}\n +    if task.get(\"role\") == \"review\":\n +        parsed = extract_json(out.get(\"result\", \"\"))\n +        if not parsed.get(\"verdict\"):\n +            parsed = (bus.get(task[\"id\"]).get(\"result\") or parsed)\n +        parsed[\"packet_version\"] = (task.get(\"packet_meta\") or {}).get(\"version\")\n +        facts = attribution.review_facts({**task, \"result\": parsed})\n +        review_log = {key: facts[key] for key in (\"verdict\", \"findings_count\", \"findings_by_severity\",\n +                      \"reviewer_role\", \"checklist_used\", \"reviewed_sha\", \"packet_version\", \"review_pass_index\")}\n +    log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, duration_s=round(time.time() - t0, 1),\n +                outcome=\"done\" if p.returncode == 0 else \"error\", **({\"usd\": out.get(\"total_cost_usd\")} if used else {}), turns=out.get(\"num_turns\", 0),\n +                provider=\"claude\", usage=used, session_id=session_id, **log, **review_log, **used)\n +    if not out.get(\"is_error\") and p.returncode == 0:\n +        return {\"status\": \"done\", \"output\": out}\n +    reason = f\"budget or error exit (rc={p.returncode}): \" + (out.get(\"result\") or \"\")[:500]\n +    return {\"status\": \"failed\", \"output\": out, \"reason\": reason}\n++=======\n+     with bus.locked():\n+         if not worker_control.is_current(task[\"id\"], epoch):\n+             return {\"status\": \"superseded\"}\n+         text = stdout + stderr\n+         if p.returncode != 0 and is_rate_limited(text):\n+             secs = parse_reset_hint(text, pool.cfg[\"limits\"][\"cooldown_default_s\"])\n+             pool.cooldown(acct, secs)\n+             bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, outcome=\"rate_limit\",\n+                         cooldown_s=secs, **log)\n+             worker_registry.finish(task[\"id\"], \"held\", \"rate_limit\", epoch=epoch)\n+             return {\"status\": \"held\", \"reason\": f\"rate_limit on {acct.id}, cooling {secs}s\"}\n+         try:\n+             out = json.loads(stdout)\n+         except json.JSONDecodeError:\n+             worker_registry.finish(task[\"id\"], \"failed\", \"non_json\", epoch=epoch)\n+             return {\"status\": \"failed\", \"reason\": f\"non-JSON output (rc={p.returncode}): {text[-500:]}\"}\n+         session_id = out.get(\"session_id\")\n+         if session_id is not None:\n+             task.setdefault(\"packet_meta\", {})[\"session_id\"] = session_id\n+             bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"])\n+         try:\n+             skills_used, skill_tokens_l2 = _skills_from_gate(task[\"id\"], session_id)\n+             task.setdefault(\"packet_meta\", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)\n+             pipeline = dict(bus.get(task[\"id\"]).get(\"pipeline\") or {})\n+             pipeline[\"skills_used\"] = skills_used\n+             bus.update(task[\"id\"], packet_meta=task[\"packet_meta\"], pipeline=pipeline)\n+             decision_log.outcome(task[\"id\"], \"skill_selection\", skills_used=skills_used,\n+                                  skill_tokens_l2=skill_tokens_l2,\n+                                  skill_recovery=sorted(set(skills_used) - set(task[\"packet_meta\"].get(\"skills_selected\") or [])))\n+             log[\"packet_meta\"] = task[\"packet_meta\"]\n+         except Exception as exc:\n+             notify.notify(f\"{task['id']}: skill telemetry unavailable: {exc}\")\n+         used = out.get(\"usage\", {})\n+         worker_registry.usage(task[\"id\"], \"claude\", used, out.get(\"total_cost_usd\"))\n+         worker_registry.finish(task[\"id\"], \"done\" if not out.get(\"is_error\") and p.returncode == 0 else \"failed\",\n+                                None if not out.get(\"is_error\") and p.returncode == 0 else \"process_error\", epoch=epoch)\n+         n = used.get(\"input_tokens\", 0) + used.get(\"output_tokens\", 0) + used.get(\"cache_read_input_tokens\", 0) // 10\n+         pool.record(acct, n)\n+         review_log = {}\n+         if task.get(\"role\") == \"review\":\n+             parsed = extract_json(out.get(\"result\", \"\"))\n+             if not parsed.get(\"verdict\"):\n+                 parsed = (bus.get(task[\"id\"]).get(\"result\") or parsed)\n+             parsed[\"packet_version\"] = (task.get(\"packet_meta\") or {}).get(\"version\")\n+             facts = attribution.review_facts({**task, \"result\": parsed})\n+             review_log = {key: facts[key] for key in (\"verdict\", \"findings_count\", \"findings_by_severity\",\n+                           \"reviewer_role\", \"checklist_used\", \"reviewed_sha\", \"packet_version\", \"review_pass_index\")}\n+         bus.log_run(task=task[\"id\"], role=task[\"role\"], tier=task[\"tier\"], account=acct.id, duration_s=round(time.time() - t0, 1),\n+                     outcome=\"done\" if p.returncode == 0 else \"error\", **({\"usd\": out.get(\"total_cost_usd\")} if used else {}), turns=out.get(\"num_turns\", 0),\n+                     provider=\"claude\", usage=used, session_id=session_id, **log, **review_log, **used)\n+         if not out.get(\"is_error\") and p.returncode == 0:\n+             return {\"status\": \"done\", \"output\": out}\n+         reason = f\"budget or error exit (rc={p.returncode}): \" + (out.get(\"result\") or \"\")[:500]\n+         return {\"status\": \"failed\", \"output\": out, \"reason\": reason}\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n  \n  \n  def extract_json(text):\n@@@ -1466,31 -1474,9 +1560,36 @@@ def run_worker(task_id, account_id=None\n                  r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS[\"scout\"]),\n                                 budget_left, timeout_left)\n                  release_usage = _combined_usage(first, r)\n +        session_id = r.get(\"output\", {}).get(\"session_id\")\n +        def resume_output(prompt, repair_budget):\n +            nonlocal release_usage\n +            reply = {}\n +            began = time.monotonic()\n +            try:\n +                reply = run_claude(pool, acct, t, prompt, model, \"\", repair_budget,\n +                                   min(timeout, 120), resume_session=session_id)\n +            finally:\n +                output = reply.get(\"output\") or {}\n +                usage = output.get(\"usage\") or {}\n +                release_usage = _combined_usage(release_usage or r, reply)\n +                bus.log_run(task=task_id, role=\"output_repair\", provider=\"claude\",\n +                            account=acct.id, tier=t[\"tier\"], session_id=session_id,\n +                            outcome=\"done\" if reply.get(\"status\") == \"done\" else \"failed\",\n +                            usage=usage, usd=output.get(\"total_cost_usd\"), budget_usd=repair_budget,\n +                            duration_s=round(time.monotonic() - began, 1), **usage)\n +            return {\"result\": extract_json(output.get(\"result\", \"\")) if reply[\"status\"] == \"done\" else {},\n +                    \"tokens\": usage, \"usd\": output.get(\"total_cost_usd\", 0)}\n +        repair_session = resume_output if session_id else None\n          if r[\"status\"] == \"done\" and role == \"execute\":\n++<<<<<<< HEAD\n +            posted = fit_result({\"summary\": r[\"output\"].get(\"result\", \"\")[:3000], \"executed_by\": f\"claude:{t['tier']}\",\n +                                 \"review\": \"other account, different model; label PR same-family-review\"})\n +            posted = contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session)\n +            bus.post_result(task_id, posted, \"done\")\n++=======\n+             worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, fit_result({\"summary\": r[\"output\"].get(\"result\", \"\")[:3000], \"executed_by\": f\"claude:{t['tier']}\",\n+                                       \"review\": \"other account, different model; label PR same-family-review\"}), \"done\")\n++>>>>>>> 440c148 (T-1216: steer workers through recorded conversations with epoch guards)\n          elif r[\"status\"] == \"done\":\n              text = r[\"output\"].get(\"result\", \"\")\n              result = extract_json(text)\n@@@ -1502,28 -1488,18 +1601,38 @@@\n              # treat it as a failed parse for review roles so we never silently drop an already-posted verdict\n              # (T-0139: an approve sat unmerged after a second, verdict-less post overwrote the first).\n              parse_failed = bool(result.get(\"parse_error\")) or (review_role and not result.get(\"verdict\"))\n -            existing_result = (bus.get(task_id).get(\"result\") or {}) if parse_failed else {}\n -            if parse_failed and existing_result.get(\"verdict\"):\n -                result = existing_result  # keep the worker's own posted result; do not overwrite it\n +            existing_result = (bus.get(task_id).get(\"result\") or {}) if parse_failed or review_role else {}\n +            if existing_result.get(\"verdict\"):\n +                # Validate the authoritative posted result without offering a repair session\n +                # or replacing it with a deterministic candidate.\n +                contracts.process(task_id, role, ex"
+  }
+}

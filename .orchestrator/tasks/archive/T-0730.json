@@ -1,0 +1,579 @@
+{
+  "id": "T-0730",
+  "created_at": 1790000994.746372,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "Q5 v5: orchestrator/planner_scorecard.py + `scorecard --planner-routing` \u2014 Planner outcomes by model \u00d7 decision type \u00d7 band \u00d7 class \u00d7 architectural, non-inferiority evidence per class, economics (P7, P13, P16)",
+  "spec": "Why: no code joins Planner invocations to downstream engineering outcomes; premium_summary (planner_runs.py:843) counts launches and tokens only. The router (planner_router.py, merged) needs class_evidence and the brief (P7/P13/P16) a Planner scorecard with cold-start priors and a CLI. Three spec review rounds (T-0683, of T-0710, of T-0727) are folded in: producer named and a dependency (planner_telemetry.py, merged as T-0708), explicit min_samples source, literal criteria with correct signs, guarded telemetry import, terminal-state restriction, exclusive fix-round ownership, bare held task id. The Planner waived a fourth spec review. READ-SIDE: the scorecard stays empty in production until Wave B wires planner_runs to emit invocation rows.\nWhat: new module orchestrator/planner_scorecard.py plus cli.py flag `scorecard --planner-routing [--json]`.\n- Inputs: invocation rows via planner_telemetry.read_invocations_with_malformed(root) (rows merged by launch_id with fields launch_id, goal_id, kind, payload_keys, decision_type, model, tier, band, task_class, architectural, started_at, material, reescalation, total_tokens, usd, latency_s, outcome), bus tasks from root/tasks/*.json, spec_review and review tasks among them. Wrap `from . import planner_telemetry` in try/except ImportError so a missing module degrades to an empty card with card[\"error\"] = \"planner_telemetry unavailable\". Malformed lines counted in card[\"malformed\"].\n- min_samples: explicit parameter wins; else cfg planner.routing.min_samples when int (table may be absent); else cfg promotion.min_samples; else 20.\n- Ownership (every owned task id appears in exactly one invocation's set): (1) a root execute task (no constraints.fix_round_for) belongs to the invocation of the same goal with the latest started_at <= the root's created_at (none -> unowned); (2) a fix-round task (constraints.fix_round_for set) belongs to the kind == \"held\" invocation of the same goal whose payload_keys[0] equals its fix_round_for target and whose started_at <= the fix round's created_at, choosing the latest such invocation; when no such held invocation exists it belongs to its lineage root's owner (attribution.lineage(task)[\"root\"]). Wave B contract: a held invocation's payload_keys[0] is the bare held task id (no colon), so compare it directly.\n- Terminal roots: merged_into set, or status == \"failed\", or pipeline.first_green_at present. first_pass_rate, fix_round_rate and avg_fix_rounds use terminal roots only (in-flight roots excluded); downstream_accepted_rate counts all owned roots (unresolved = not accepted). Fix-round counts per root come from the root's fix-round children regardless of which invocation owns them.\n- group_key(row) -> f\"{model}|{decision_type}|{band}|{task_class}|{'arch' if architectural else 'plain'}\".\n- build(root=STATE, *, cfg=None, min_samples=None) -> {\"groups\": {key: metrics}, \"n\", \"malformed\", \"min_samples\", \"read_side_only\": True}; metrics per group: n, material_rate, downstream_accepted_rate, first_pass_rate (terminal roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children), fix_round_rate, avg_fix_rounds, gate_red_rate (pipeline.gate_reds > 0 over owned tasks), review_request_changes_rate (review tasks whose inputs[0] is an owned id, verdict from review_verdict or result.verdict == request_changes), spec_review_approval_rate (same for spec_review, verdict approve), replanning_rate (a later invocation of the same goal with decision_type architectural_replan), reescalation_rate (rows reescalation True), human_intervention_rate (None unless planner_telemetry.interactive_by_goal returns a row for the goal with a day after started_at; call wrapped in try/except Exception -> None), tokens_mean, usd_mean, latency_mean, terminal_roots, evidence \"sufficient\"|\"insufficient\" (n >= min_samples).\n- Thresholds: CRITERIA_MAP = {\"first_pass_rate\": (\"first_pass_delta\", \">=\", -0.02), \"avg_fix_rounds\": (\"fix_rounds_delta\", \"<=\", 0.05), \"gate_success\": (\"gate_success_delta\", \">=\", -0.02)} read from promotion.CRITERIA by those keys (overridable via cfg[\"promotion\"]); REVIEW_CHANGES_MAX_DELTA = 0.10 with \"<=\" is this module's own constant (promotion's review_findings_delta is NOT used); REESCALATION_MAX = 0.2; gate_success = 1 - gate_red_rate. An equal candidate/baseline pair passes every comparison.\n- class_evidence(model, decision_type, band, task_class, architectural, *, root=STATE, cfg=None, min_samples=None) -> {\"n\", \"noninferior\": True|False|None, \"deltas\", \"failed\", \"reescalation_rate\", \"baseline_model\"}: baseline group = same class with model == cfg [models].planner (fallback: rows with tier fable). None when either group has n < min_samples; False when any comparison fails or reescalation_rate > REESCALATION_MAX (failed lists \"reescalation\"); True otherwise. Tokens, usd, latency never enter the verdict.\n- economics(root=STATE) -> per model {\"planner_usd_per_accepted_goal\", \"planner_tokens_per_accepted_goal\", \"pipeline_usd_after_planning\" (mean over invocations of the sum of scorecard.by_task usd for owned tasks), \"expected_total_cost_after_planning\": {decision_type: mean(planner usd + pipeline usd)}}; accepted goals via scorecard.accepted_goals(root).\n- format(card) -> text table sorted by key with a first line 'read-side only: rows appear once planner_runs emits invocations' when n == 0; format_evidence(evidence) one line. cli.py: `sc.add_argument(\"--planner-routing\", action=\"store_true\")`, dispatch to build/format (json with --json), ap.error when combined with --planner or --parallelism.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_scorecard.py::test_groups_by_model_type_band_class_arch \u2014 rows written with planner_telemetry.record_launch/record_usage/record_materiality under a sandbox root for two models and two decision types produce four group keys with n, material_rate and downstream_accepted_rate from owned tasks",
+    "tests/test_planner_scorecard.py::test_ownership_is_exclusive_terminal_roots_and_fix_rounds \u2014 root T1 created after invocation A belongs to A; its fix round T2 created after held invocation B with payload_keys [T1] belongs to B and not A; a fix round with no matching held invocation belongs to its root's owner; no task id appears in two owned sets; an in-flight root (no merged_into, not failed, no first_green_at) is excluded from first_pass_rate and fix_round_rate but counted as not accepted",
+    "tests/test_planner_scorecard.py::test_class_evidence_noninferior_equivalent_worse_and_insufficient \u2014 opus identical to fable (all deltas 0) gives noninferior True with failed empty; first_pass_rate 0.3 lower gives False naming first_pass_rate; review_request_changes_rate 0.3 higher gives False naming review_request_changes_rate; n below min_samples gives None; a group with 1e9 tokens and 0 usd changes no verdict",
+    "tests/test_planner_scorecard.py::test_reescalation_penalises_class \u2014 reescalation_rate 0.5 on an otherwise equal class gives noninferior False with failed containing reescalation",
+    "tests/test_planner_scorecard.py::test_cli_flag_min_samples_source_and_malformed_tolerance \u2014 `scorecard --planner-routing --json` under a sandbox root prints a card with read_side_only True, groups and malformed 1 for a runs dir containing one malformed line; min_samples comes from [planner.routing] when present, else [promotion], else 20; a patched ImportError for planner_telemetry yields card error text instead of a crash"
+  ],
+  "scope": [
+    "orchestrator/planner_scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_scorecard.py"
+  ],
+  "depends_on": [
+    "T-0708"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_telemetry.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/sched_scorecard.py",
+      "orchestrator/attribution.py",
+      "orchestrator/promotion.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/cli.py",
+      "orchestrator/planner_runs.py",
+      "tests/test_planner_telemetry.py",
+      "tests/test_sched_scorecard.py",
+      "tests/test_cli.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Reads planner_telemetry.read_invocations_with_malformed(root) rows (T-0708); a held invocation's payload_keys[0] is the bare held task id (Wave B contract). group_key(row) -> 'model|decision_type|band|task_class|arch|plain'. build(root, *, cfg, min_samples) -> {groups, n, malformed, min_samples, read_side_only}. class_evidence(model, decision_type, band, task_class, architectural, *, root, cfg, min_samples) -> {n, noninferior: True|False|None, deltas, failed, reescalation_rate, baseline_model} consumed by planner_router.decide(evidence=...). Exclusive task ownership; terminal roots for first-pass metrics; CRITERIA_MAP from promotion.CRITERIA for first_pass_rate/avg_fix_rounds/gate_success; REVIEW_CHANGES_MAX_DELTA 0.10 and REESCALATION_MAX 0.2 module constants. economics(root). CLI scorecard --planner-routing [--json]."
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0730",
+  "codex_thread": "01a0c45f-ee60-7d40-bc3a-65c703f2f01a",
+  "result": {
+    "summary": "Implemented Planner outcome metrics, exclusive ownership, class evidence, economics, and `scorecard --planner-routing`.\n\nFiles changed: `orchestrator/planner_scorecard.py`, `orchestrator/cli.py`, `tests/test_planner_scorecard.py`.\n\nGate: passed. Working tree clean.\nCommit: `f2600e4ad3b7dc8b940c95db00ad5b542da92326`\nFailures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c45f-ee60-7d40-bc3a-65c703f2f01a",
+    "usage": {
+      "input_tokens": 798443,
+      "cached_input_tokens": 758912,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9049,
+      "reasoning_output_tokens": 601,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790001005.694048,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002
+      }
+    },
+    {
+      "ts": 1790001016.1716108,
+      "packet_meta": {
+        "chars": 3942,
+        "est_tokens": 985,
+        "hash": "7717fa95ad55",
+        "version": "7717fa95ad55",
+        "base": "c9609a52c7d1",
+        "sources": "pool.toml@1e9fb4e32b17 gotchas@c69fd934e06e memory@notes",
+        "policy_version": "1e9fb4e32b17",
+        "gotchas": "c69fd934e06e"
+      }
+    },
+    {
+      "ts": 1790001016.172714,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0730",
+      "claimed_at": 1790001016.172622
+    },
+    {
+      "ts": 1790001016.173492,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790001399.473979,
+      "codex_thread": "01a0c45f-ee60-7d40-bc3a-65c703f2f01a",
+      "codex_thread_head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+    },
+    {
+      "ts": 1790001399.479071,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790001399.4813619,
+      "status": "done",
+      "result": {
+        "summary": "Implemented Planner outcome metrics, exclusive ownership, class evidence, economics, and `scorecard --planner-routing`.\n\nFiles changed: `orchestrator/planner_scorecard.py`, `orchestrator/cli.py`, `tests/test_planner_scorecard.py`.\n\nGate: passed. Working tree clean.\nCommit: `f2600e4ad3b7dc8b940c95db00ad5b542da92326`\nFailures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c45f-ee60-7d40-bc3a-65c703f2f01a",
+        "usage": {
+          "input_tokens": 798443,
+          "cached_input_tokens": 758912,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9049,
+          "reasoning_output_tokens": 601,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790001496.4037702,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790001588.179311,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790001588.494522,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        }
+      }
+    },
+    {
+      "ts": 1790001588.554709,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        },
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+      }
+    },
+    {
+      "ts": 1790001588.561362,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        },
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+        "gated_at_done": 1790001588.561259
+      }
+    },
+    {
+      "ts": 1790001783.370495,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790001803.960421,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        },
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+        "gated_at_done": 1790001588.561259,
+        "merged_at": 1790001803.9602911,
+        "merged_at_lease": 1790002703.9602911
+      }
+    },
+    {
+      "ts": 1790001894.61727,
+      "status": "done",
+      "merged_into": "goal/T-0674",
+      "sha": "fd98e1dd6f9d1f3e8f12912d37ad707a81dcf82a",
+      "merged_at": 1790001894.616437,
+      "changed_files": [
+        "orchestrator/cli.py",
+        "orchestrator/planner_scorecard.py",
+        "tests/test_planner_scorecard.py"
+      ],
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        },
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+        "gated_at_done": 1790001588.561259,
+        "merged_at": 1790001803.9602911,
+        "merged_at_lease": 1790002703.9602911
+      }
+    },
+    {
+      "ts": 1790001894.998615,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        },
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+        "gated_at_done": 1790001588.561259,
+        "merged_at": 1790001803.9602911,
+        "merged_at_lease": 1790002703.9602911,
+        "accepted_at": 1790001894.998257
+      }
+    },
+    {
+      "ts": 1790001895.0957172,
+      "pipeline": {
+        "dispatched_at_done": 1790001005.694002,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790001588.1792152,
+        "gated_at_lease": 1790002488.1792152,
+        "first_green_at": 1790001588.1786702,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0730",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790001588.494147,
+          "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+        },
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+        "gated_at_done": 1790001588.561259,
+        "merged_at": 1790001803.9602911,
+        "merged_at_lease": 1790002703.9602911,
+        "accepted_at": 1790001894.998257,
+        "merged_at_done": 1790001895.095585
+      }
+    }
+  ],
+  "pipeline": {
+    "dispatched_at_done": 1790001005.694002,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "6c2bb8a7c216311a0bd69515211febacd7b96304",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790001588.1792152,
+    "gated_at_lease": 1790002488.1792152,
+    "first_green_at": 1790001588.1786702,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0730",
+      "goal_head": "goal/T-0674",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790001588.494147,
+      "head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+    },
+    "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+    "gated_at_done": 1790001588.561259,
+    "merged_at": 1790001803.9602911,
+    "merged_at_lease": 1790002703.9602911,
+    "accepted_at": 1790001894.998257,
+    "merged_at_done": 1790001895.095585
+  },
+  "packet_meta": {
+    "chars": 3942,
+    "est_tokens": 985,
+    "hash": "7717fa95ad55",
+    "version": "7717fa95ad55",
+    "base": "c9609a52c7d1",
+    "sources": "pool.toml@1e9fb4e32b17 gotchas@c69fd934e06e memory@notes",
+    "policy_version": "1e9fb4e32b17",
+    "gotchas": "c69fd934e06e"
+  },
+  "claimed_at": 1790001016.172622,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0674",
+  "sha": "fd98e1dd6f9d1f3e8f12912d37ad707a81dcf82a",
+  "merged_at": 1790001894.616437,
+  "changed_files": [
+    "orchestrator/cli.py",
+    "orchestrator/planner_scorecard.py",
+    "tests/test_planner_scorecard.py"
+  ]
+}

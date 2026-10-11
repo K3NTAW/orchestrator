@@ -1,0 +1,145 @@
+{
+  "id": "T-0767",
+  "created_at": 1790080273.825662,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "P1 v2: context economy telemetry \u2014 per-section token attribution of every packet, candidate vs presented, instruction tokens at the call site, cross-role amplification grouped by goal (no behaviour change)",
+  "spec": "One behaviour: every model invocation's packet is measured per section (deterministic chars // 4 plus a sha256 per section) and logged, so the scorecard can show how many tokens each section costs per role and how often the same section text is re-sent across the roles working one goal. Nothing sent to any model changes.\n\nFacts (verified 2026-09-22, main e8c4687): packets are assembled as named sections rendered \"## <name>\\n<body>\": execute in spawn.py _packet_body (sections list spawn.py:287-323, joined at :317; the packet starts with the header line \"packet v<hash> base <sha> sources ...\"), review in review_packet (spawn.py:435-488 via _section; diff bounded by a budget), spec_review_packet (:494-512), scout_packet (:513-570); packet_run_meta (spawn.py:360-371) parses the header and records chars, est_tokens, hash, version; packet_meta (:355) is stored on the task and copied into the run record; spawn.run_worker has both the packet string and the render() output in scope; executor._run (executor.py:116) and executor.start (executor.py:334) fall back to packet_run_meta(<full prompt>) when task.packet_meta is missing, and executor.reply's resume branch passes a bare repair delta; mcp.py codex()/codex_reply() call executor.start/reply with no packet_meta; bus.log_run (bus.py:278-335) appends one JSON line per run to .orchestrator/runs/<date>.jsonl (role, tier, account, executor, task, input_tokens, output_tokens, cache_read_input_tokens, usd, duration, packet fields); tasks carry parent (the goal id); attribution.lineage (attribution.py:96-108) chains only fix rounds; scorecard.by_task/by_goal (scorecard.py:397-480). Caps: execute packet 4800 chars, review diff \u22648000 chars. Known duplication stays in place for this task (P4 removes it after the baseline): spec/acceptance/scope appear twice in the execute prompt.\n\nDecisions binding for this version (spec review T-0766):\nA. Amplification shape: grouped by parent goal id (the roles working one goal: spec_review, execute, fix rounds, review, security review, scout), reported as (1) a per-section map {section_name: total_tokens / unique_tokens} where unique means distinct sha256 within the group, and (2) the group scalar over all sections. The lineage root (attribution.lineage) is recorded as a column only.\nB. instruction_tokens is computed at the call site: spawn.run_worker (and the executor dispatch path that renders a prompt around a packet) computes est_tokens(rendered_prompt) - est_tokens(packet) and merges it into packet_meta before the run is logged. packet_run_meta keeps one argument and is applied ONLY to packet text.\nC. Fallback paths: executor._run and executor.start derive context only from the packet: locate the \"packet v\" header line in the text and measure from there to the end of the last \"## \" section; text without a header (a bare delta, a resume) yields context = None and the run row is counted as unmeasured, never parsed as a packet. mcp.py's codex()/codex_reply() therefore need no change but are covered by the executor tests.\n\nDo:\n1. spawn.py: section_meta(text) splits on lines starting with \"## \" into {name: {\"chars\", \"est_tokens\" (chars // 4), \"sha256\"}} plus \"_preamble\" (the header line and anything before the first heading); packet_run_meta gains \"sections\" and \"presented_tokens\"; builders record \"candidate_tokens\" as the est_tokens of every section before caps and budgets (execute body before the 4800-char cap; review diff before bounded_diff) with \"candidate_known\": false when a builder cannot know it. run_worker merges \"instruction_tokens\" per decision B.\n2. bus.log_run: accept and persist context = {\"sections\", \"presented_tokens\", \"candidate_tokens\", \"candidate_known\", \"instruction_tokens\", \"packet_version\"} on every run row that has a packet; None means unmeasured; old rows stay valid.\n3. orchestrator/context_scorecard.py: build(root) -> {\"roles\": rows per role (runs, measured, unmeasured, avg presented, avg candidate, reduction_ratio, avg instruction_tokens, top sections by avg tokens), \"goals\": rows per goal id (runs, measured, amplification scalar, amplification_by_section map, repeated_sections: names whose sha256 recurs across at least two roles, lineage roots)}; format_report(card) prints both tables; `orchestrator scorecard --context` in cli.py prints it.\n4. docs/context-economy/01-telemetry.md: fields, the chars // 4 convention, candidate vs presented, instruction tokens, amplification by goal, unmeasured rows.\n5. Tests (unittest.TestCase, shared tests/_harness ORCH_ROOT): tests/test_spawn.py::test_section_meta_splits_named_sections; tests/test_spawn.py::test_packet_run_meta_reports_sections_and_presented_tokens; tests/test_spawn.py::test_review_packet_records_candidate_tokens_before_diff_budget; tests/test_spawn.py::test_run_worker_records_instruction_tokens (patch the worker launch; assert packet_meta.instruction_tokens equals rendered minus packet); tests/test_executor.py::test_fallback_context_measures_only_the_packet (full prompt with trailing template text: sections match the bare packet's); tests/test_executor.py::test_bare_delta_yields_unmeasured_context (reply resume path: context None); tests/test_bus.py::test_log_run_persists_context; tests/test_context_scorecard.py::test_amplification_by_section_groups_by_goal (three runs of different roles under one goal sharing an identical spec section: spec 3.0, unique sections 1.0, scalar between); tests/test_context_scorecard.py::test_rows_per_role_and_unmeasured_count.\nGate: .claude/hooks/tests-green.sh exits 0. Rendered prompts are byte-identical to before.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_section_meta_splits_named_sections passes",
+    "tests/test_spawn.py::test_packet_run_meta_reports_sections_and_presented_tokens passes",
+    "tests/test_spawn.py::test_review_packet_records_candidate_tokens_before_diff_budget passes",
+    "tests/test_spawn.py::test_run_worker_records_instruction_tokens passes",
+    "tests/test_executor.py::test_fallback_context_measures_only_the_packet passes",
+    "tests/test_executor.py::test_bare_delta_yields_unmeasured_context passes",
+    "tests/test_bus.py::test_log_run_persists_context passes",
+    "tests/test_context_scorecard.py::test_amplification_by_section_groups_by_goal passes",
+    "tests/test_context_scorecard.py::test_rows_per_role_and_unmeasured_count passes",
+    "orchestrator scorecard --context prints per-role and per-goal tables; docs/context-economy/01-telemetry.md exists; rendered prompts are byte-identical to before"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "orchestrator/executor.py",
+    "docs/context-economy/01-telemetry.md",
+    "tests/test_spawn.py",
+    "tests/test_executor.py",
+    "tests/test_bus.py",
+    "tests/test_context_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 55,
+    "timeout_s": 3000,
+    "task_class": "architectural",
+    "route": "reviewed"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790080292.6904142,
+      "pipeline": {
+        "first_ready_at": 1790080292.69035
+      }
+    },
+    {
+      "ts": 1790080292.749721,
+      "pipeline": {
+        "first_ready_at": 1790080292.69035,
+        "spec_review_at": 1790080292.749652,
+        "spec_review_at_lease": 1790081192.749652
+      }
+    },
+    {
+      "ts": 1790080292.7578208,
+      "pipeline": {
+        "first_ready_at": 1790080292.69035,
+        "spec_review_at": 1790080292.749652,
+        "spec_review_at_lease": 1790081192.749652,
+        "spec_review_at_done": 1790080292.757673
+      }
+    },
+    {
+      "ts": 1790080557.042923,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Decision B says instruction_tokens = est_tokens(rendered_prompt) - est_tokens(packet) must be computed 'at the call site: spawn.run_worker (and the executor dispatch path that renders a prompt around a packet)'. That second call site is daemon.py's _dispatch_fresh_fix (line 573-579) and the main dispatch loop (line 862-875), both of which already build packet/prompt separately and call spawn.packet_run_meta(packet) before handing prompt+packet_meta to executor.start via _dispatch_worker. This is the primary Codex execute path (spawn.run_worker only runs execute for the Claude-fallback case). daemon.py is absent from scope, acceptance and the test list, so instruction_tokens will never be populated for actual Codex-executed tasks -- only for Claude-fallback executes and other roles routed through run_worker. The scorecard's per-role instruction_tokens average would be silently blank/zero for the dominant execute path.",
+          "severity": "high",
+          "line": 579
+        },
+        {
+          "path": "orchestrator/bus.py",
+          "issue": "Do #2 says log_run must 'accept and persist context = {sections, presented_tokens, candidate_tokens, candidate_known, instruction_tokens, packet_version}' but every existing call site (executor.py:127/147/151, spawn.py:613/626/632/651/run_claude) already forwards the full packet_meta dict as a kwarg named packet_meta, which log_run's **fields already writes through unchanged. The spec doesn't say whether 'context' is a new key bus.log_run derives internally from fields.get('packet_meta'), or a separate value every one of those ~7 call sites must additionally construct and pass. The two readings produce very different diffs (one localized change in bus.py vs. edits scattered across two files not otherwise touched for this purpose), and only the internal-derivation reading is consistent with the stated scope.",
+          "severity": "med",
+          "line": 277
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Decision C's fallback boundary rule ('locate the packet v header line ... measure from there to the end of the last ## section') is applied to reply()'s direct-reply fallback branch, where repair = briefing + \"\\n\\nRepair delta:\\n\" + delta (line ~421-425) is what reaches _run's args[-1]. If delta (arbitrary Codex-authored repair text) itself contains a line starting with '## ', section-boundary parsing can silently fold part of the repair delta into the packet's last named section, inflating that section's token count. The spec names only the clean 'bare delta / resume' case (test_bare_delta_yields_unmeasured_context) and the 'full prompt with trailing template text' case (test_fallback_context_measures_only_the_packet); it doesn't name this repair+delta concatenation case or specify how the last section's end boundary is actually detected when trailing non-heading text follows it.",
+          "severity": "low",
+          "line": 424
+        }
+      ]
+    },
+    {
+      "ts": 1790080558.5804539,
+      "pipeline": {
+        "first_ready_at": 1790080292.69035,
+        "spec_review_at": 1790080292.749652,
+        "spec_review_at_lease": 1790081192.749652,
+        "spec_review_at_done": 1790080292.757673,
+        "spec_review_held_at": 1790080558.580374
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790080630.48597,
+      "status": "failed",
+      "reason": "superseded 2026-09-22 15:00 by the v3 spec (spec review T-0768: daemon dispatch paths in scope for instruction tokens, log_run derives context internally, fallback packet boundary at the repair-delta marker)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790080292.69035,
+    "spec_review_at": 1790080292.749652,
+    "spec_review_at_lease": 1790081192.749652,
+    "spec_review_at_done": 1790080292.757673,
+    "spec_review_held_at": 1790080558.580374
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Decision B says instruction_tokens = est_tokens(rendered_prompt) - est_tokens(packet) must be computed 'at the call site: spawn.run_worker (and the executor dispatch path that renders a prompt around a packet)'. That second call site is daemon.py's _dispatch_fresh_fix (line 573-579) and the main dispatch loop (line 862-875), both of which already build packet/prompt separately and call spawn.packet_run_meta(packet) before handing prompt+packet_meta to executor.start via _dispatch_worker. This is the primary Codex execute path (spawn.run_worker only runs execute for the Claude-fallback case). daemon.py is absent from scope, acceptance and the test list, so instruction_tokens will never be populated for actual Codex-executed tasks -- only for Claude-fallback executes and other roles routed through run_worker. The scorecard's per-role instruction_tokens average would be silently blank/zero for the dominant execute path.",
+      "severity": "high",
+      "line": 579
+    },
+    {
+      "path": "orchestrator/bus.py",
+      "issue": "Do #2 says log_run must 'accept and persist context = {sections, presented_tokens, candidate_tokens, candidate_known, instruction_tokens, packet_version}' but every existing call site (executor.py:127/147/151, spawn.py:613/626/632/651/run_claude) already forwards the full packet_meta dict as a kwarg named packet_meta, which log_run's **fields already writes through unchanged. The spec doesn't say whether 'context' is a new key bus.log_run derives internally from fields.get('packet_meta'), or a separate value every one of those ~7 call sites must additionally construct and pass. The two readings produce very different diffs (one localized change in bus.py vs. edits scattered across two files not otherwise touched for this purpose), and only the internal-derivation reading is consistent with the stated scope.",
+      "severity": "med",
+      "line": 277
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Decision C's fallback boundary rule ('locate the packet v header line ... measure from there to the end of the last ## section') is applied to reply()'s direct-reply fallback branch, where repair = briefing + \"\\n\\nRepair delta:\\n\" + delta (line ~421-425) is what reaches _run's args[-1]. If delta (arbitrary Codex-authored repair text) itself contains a line starting with '## ', section-boundary parsing can silently fold part of the repair delta into the packet's last named section, inflating that section's token count. The spec names only the clean 'bare delta / resume' case (test_bare_delta_yields_unmeasured_context) and the 'full prompt with trailing template text' case (test_fallback_context_measures_only_the_packet); it doesn't name this repair+delta concatenation case or specify how the last section's end boundary is actually detected when trailing non-heading text follows it.",
+      "severity": "low",
+      "line": 424
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 2026-09-22 15:00 by the v3 spec (spec review T-0768: daemon dispatch paths in scope for instruction tokens, log_run derives context internally, fallback packet boundary at the repair-delta marker)"
+}

@@ -1,0 +1,124 @@
+{
+  "id": "T-0421",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4 rebase: rebase task/T-0415 (the ten-commit H4 chain) onto goal/T-0353, resolving orchestrator/daemon.py against the merged H5b re-spawn changes and keeping both intents; full gate green twice (merge conflict on T-0415)",
+  "spec": "STEP 0: this worktree is cut from task/T-0415 (H4 chain: ade6b74 through a364c6b, ten commits over base 6b773d8). Rebase it onto goal/T-0353 (head 9b058ab, which carries H5b: review re-spawn with locked re-read, stale skip, shared Claude-worker counting helper, handover snapshot hash). The daemon's merge reported rebase_conflict in exactly one file: orchestrator/daemon.py, where H5b changed dispatch (the re-spawn loop after the execute loop, the running_claude_workers helper used by free_slots) and reconcile/_requeue, and the H4 chain changed dispatch (no dispatch-side reservation, slots only, backward-compatible worker call), free_slots callers, reconcile_dead(pool) and the notify-per-transition state.\nSteps: run git rebase goal/T-0353 in this worktree; for each conflict in orchestrator/daemon.py keep both intents: H5b's re-spawn block with its locked re-read, stale check and shared running_claude_workers helper, and H4's dispatch without reservations, reconcile_dead accepting the pool, notify once per transition, and the T-0400/T-0411 worker-call shape. Do not drop or weaken any test from either side. After the rebase the branch must show the ten H4 commits re-applied on top of 9b058ab with no merge commit. Then run .claude/hooks/tests-green.sh from the worktree root twice (exit 0 both) and python -m unittest tests.test_daemon tests.test_pool tests.test_executor once more. If conflicts appear outside daemon.py, resolve them keeping both intents and list them. The rebase is the commit; if a resolution fix is needed, commit it with the task id. Report the new head sha, resolved files and failures only.",
+  "inputs": [
+    "T-0419"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 9b058ab (goal/T-0353 head) below the ten re-applied H4 commits and no merge commit",
+    "orchestrator/daemon.py keeps H5b's re-spawn loop (locked re-read, stale skip, shared Claude-worker counting) and H4's reservation-free dispatch, reconcile_dead(pool) and notify-per-transition (grep for running_claude_workers, respawned_at, notified and reconcile_dead(t, pool)",
+    "python -m unittest tests.test_daemon tests.test_pool tests.test_executor exits 0",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/pool.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py",
+    "tests/test_pool.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0421",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 355,
+        "issue": "release()/_reservation_estimate() read cost from usage['usd']/usage['total_cost_usd'], but executor.py's codex path (_run() returns usage=ev['usage'], raw Codex token counts with no cost field) never populates that. Once 5+ execute-role runs exist and codex dominates dispatch (the normal case, since Claude is only the complexity<9 fallback), statistics.median(usd) settles at 0.0, so every future execute reservation gets est_usd=0 and any configured goal_budget_usd['execute'] cap becomes a permanent no-op despite the pool.toml comment advertising it as the cumulative dollar-cap mechanism.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 348,
+        "issue": "reconcile_dead(t, pool) calls pool.release(tid, (t.get('result') or {}).get('usage', {})), stripping the result down to just the usage sub-dict before release() looks for a cost figure there. Real dollar cost (posted as a top-level sibling field on Claude results) is dropped from reservation_history for any task reconciled after its worker's pid died, undercounting goal spend for that path.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1126,
+        "issue": "Acceptance wording asks to grep daemon.py for 'notified' to confirm notify-per-transition is kept, but that literal string only exists in pool.py (notification_transition/notified_state); daemon.py only calls pool.notification_transition(...). Behavior is correct (test_notify_once_per_transition passes) but a literal grep on this file for 'notified' returns nothing.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789912965.2722769,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0421",
+      "claimed_at": 1789912965.271717
+    },
+    {
+      "ts": 1789912965.274101,
+      "account": "B"
+    },
+    {
+      "ts": 1789912965.3204942,
+      "pid": 36447,
+      "account": "B"
+    },
+    {
+      "ts": 1789913453.309994,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 355,
+            "issue": "release()/_reservation_estimate() read cost from usage['usd']/usage['total_cost_usd'], but executor.py's codex path (_run() returns usage=ev['usage'], raw Codex token counts with no cost field) never populates that. Once 5+ execute-role runs exist and codex dominates dispatch (the normal case, since Claude is only the complexity<9 fallback), statistics.median(usd) settles at 0.0, so every future execute reservation gets est_usd=0 and any configured goal_budget_usd['execute'] cap becomes a permanent no-op despite the pool.toml comment advertising it as the cumulative dollar-cap mechanism.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 348,
+            "issue": "reconcile_dead(t, pool) calls pool.release(tid, (t.get('result') or {}).get('usage', {})), stripping the result down to just the usage sub-dict before release() looks for a cost figure there. Real dollar cost (posted as a top-level sibling field on Claude results) is dropped from reservation_history for any task reconciled after its worker's pid died, undercounting goal spend for that path.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1126,
+            "issue": "Acceptance wording asks to grep daemon.py for 'notified' to confirm notify-per-transition is kept, but that literal string only exists in pool.py (notification_transition/notified_state); daemon.py only calls pool.notification_transition(...). Behavior is correct (test_notify_once_per_transition passes) but a literal grep on this file for 'notified' returns nothing.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789913453.312219,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789912965.271717,
+  "account": "B",
+  "pid": 36447,
+  "review_verdict": "request_changes"
+}

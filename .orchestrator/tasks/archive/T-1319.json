@@ -1,0 +1,704 @@
+{
+  "id": "T-1319",
+  "created_at": 1790181378.257626,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S3e promotion framework, hermes-eval suite and success metrics: features cache_aware_context, steering_policy, stale_steering, fast_path, memory_tiers with self-refusing criteria; deterministic P34 evals; scorecard --hermes (P33, P34, P35)",
+  "spec": "orchestrator/promotion.py: ensure FEATURES holds cache_aware_context (context_router cache_mode plus tool and skill cache_mode as one feature with three config keys), steering_policy, stale_steering, fast_path and memory_tiers, each with criteria expressed like the existing entries: minimum shadow sample size (30 rows, or 20 for steering kinds), non-inferior quality (first-pass rate and fix-round rate of affected tasks not worse than the shadow baseline), improved accepted-goal economics (effective tokens or usd per accepted goal lower), plus a fresh passing hermes-eval within 7 days; demotion when a regression of the same metrics persists over 10 tasks. Create orchestrator/hermes_eval.py with deterministic cases over temp fixtures: memory (delegate to memory_eval), cache (stable prefix identical across two tasks of one role and goal; dynamic suffix differs; telemetry normalize and effective cost correct; stable tool catalog unchanged between two tasks), worker control (inspect lists a fake running worker; steer records before delivery; cancel releases pool capacity and retains the partial; replacement packet carries prior_worker facts), security (a malicious external skill fixture is high risk and cannot move to testing; a malicious agents file scans blocked; fake authority escalation blocked; a secret exfiltration instruction blocked; a harmless security document is not blocked), fast path (a trivial fixture task is level 0 or 1 with the skip list; a security-path task never below 4; an architectural task 4; a fast-path task with two fix rounds triggers the demotion rule). run(root) persists .orchestrator/hermes_eval.json; CLI `orchestrator hermes-eval [--json]`. orchestrator/scorecard.py: `orchestrator scorecard --hermes` prints the P35 metrics in one table from the existing scorecards and the new modules: accepted-goal success, first-pass, fix-round rate, tokens and effective uncached tokens and usd and latency per accepted goal; HOT memory tokens, retrieval precision and usefulness, compaction count; cache hit ratio, cache-read, uncached, invalidations, effective context cost; steering rate and success, cancellations, partial-result reuse, fix rounds avoided; suspicious context detected, false-positive rate (suspicious later marked safe by a human transition reason), blocked imports; orchestration amplification, cost share, latency share. Docs: docs/hermes-hardening/19-promotion-and-evals.md.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Task worktrees carry no .orchestrator runs, tasks or decision_log state: tests use synthetic fixtures; for any measured numbers in docs run read-only against /Users/k3ntaw/code/orchestrator/.orchestrator via an explicit root argument. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Contracts of the earlier modules: .orchestrator/plan.md (section GOAL T-0991) and docs/hermes-hardening/*.md on this branch; read the merged modules before building on them.",
+  "inputs": [
+    "T-1311"
+  ],
+  "acceptance": [
+    "tests/test_promotion.py::test_hermes_features_registered_with_sample_quality_economics_and_eval_criteria",
+    "tests/test_promotion.py::test_activation_refused_without_fresh_hermes_eval",
+    "tests/test_hermes_eval.py::test_all_cases_pass_on_fixtures (every P34 case listed by name)",
+    "tests/test_scorecard.py::test_scorecard_hermes_table_has_every_p35_metric",
+    "tests/test_cli.py::test_hermes_eval_and_scorecard_hermes_cli",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/promotion.py",
+    "orchestrator/hermes_eval.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_promotion.py",
+    "tests/test_hermes_eval.py",
+    "tests/test_scorecard.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/19-promotion-and-evals.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1319",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "cache_aware_context needs three config keys (context_router.cache_mode, tool_disclosure.cache_mode, skills.cache_mode). FEATURES entries and current_mode() only support one table/key pair. The spec does not say how mode is derived (all three active? any?) or how the entry stays compatible with the existing single-key shape.",
+        "severity": "high",
+        "line": 11
+      },
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "No activation function exists here (only mode/evaluate/collect), so 'activation refused without a fresh hermes-eval' has no insertion point. evaluate() is documented as never changing config. Spec must name the function that refuses (evaluate returning stay with a reason such as hermes_eval_missing_or_stale, or a new guard) and where it is enforced.",
+        "severity": "high",
+        "line": 110
+      },
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "stale_steering is not present anywhere in orchestrator/ (only stale.py exists), so it has no table, key or evidence source. Spec says 'ensure' but does not define its config location, default, or collect() evidence, and there is no depends_on task that creates it.",
+        "severity": "med",
+        "line": 11
+      },
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "Existing evaluate() has bespoke branches per feature (steering_policy min 20, fast_path min 20 with a two_fix_rounds demote, memory_tiers falls into the generic path). The spec's uniform criteria (30 rows, or 20 for steering kinds; non-inferior quality; improved economics; eval within 7 days; demote after regression over 10 tasks) would change the behaviour of existing tested features (fast_path, steering_policy, memory_tiers). Spec must say the new criteria are additive and existing tests stay green, and reconcile the fixed 20 in fast_path. It also requires per-feature collect() output for the new fields (shadow_n, hermes_eval age, persisted-regression count), and none is specified.",
+        "severity": "high",
+        "line": 144
+      },
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "'Regression persists over 10 tasks' is not defined as stateless. Demotion must be computed from the last 10 task rows on each call, not from a counter or flag that only increments and never resets. Also specify how economics 'improved' is judged when the metric is None (missing data must stay, not promote), and avoid counting the same task in both shadow and active cohorts.",
+        "severity": "med",
+        "line": 110
+      },
+      {
+        "path": "orchestrator/hermes_eval.py",
+        "issue": "Freshness of 7 days needs an injectable clock and a defined timestamp field in .orchestrator/hermes_eval.json; otherwise tests are time-dependent. The file must also record pass/fail per case and an overall pass, and the promotion check must treat a missing, malformed, future-dated or failed file as not passing (no silent fallback to pass). Where is the file read from during the tests: ORCH_ROOT, or the explicit root argument?",
+        "severity": "med",
+        "line": 1
+      },
+      {
+        "path": "orchestrator/hermes_eval.py",
+        "issue": "Cases depend on modules whose public APIs are not named in the spec (memory_eval, tool_catalog, cache_telemetry, worker_control, context_scanner, skill_discovery/skill_promotion, harness_depth, evidence). Cases like 'a malicious external skill cannot move to testing', 'cancel releases pool capacity', 'replacement packet carries prior_worker facts' need real fixtures for pool/worker state, and could write to the real state root. Require all cases to run against a temp root passed explicitly, never touching STATE or ORCH_ROOT beyond the harness root. Also require that malicious fixture strings are synthetic and non-credential-shaped, and that the secret-exfiltration case never writes a secret-like value to disk or to hermes_eval.json (store only case names and booleans).",
+        "severity": "med",
+        "line": 1
+      }
+    ],
+    "suggested_spec_changes": [
+      "Define how cache_aware_context derives its mode from the three cache_mode keys (recommend: active only if all three are active, shadow if any is shadow, off otherwise, invalid_config flagged) and extend FEATURES/current_mode to support a list of keys without breaking single-key entries.",
+      "Name the exact function that refuses activation without a fresh passing hermes-eval (recommend: evaluate() returns recommendation stay with reason hermes_eval_missing_stale_or_failed; missing, malformed, future-dated, or failed files all count as not passing; clock injectable).",
+      "Define stale_steering config location, default (shadow) and collect() evidence source, or drop it if the module does not exist.",
+      "State that the new criteria are additive: existing steering_policy, fast_path, contracts and memory_tiers tests must stay green, and reconcile the 30 vs 20 sample threshold per feature.",
+      "Define demotion as stateless: computed each call from the most recent 10 tasks; a missing metric means stay, never promote; a task counts in one cohort only.",
+      "List the exact case names for hermes_eval.run() output and require test_all_cases_pass_on_fixtures to assert the exact name set.",
+      "Require every hermes_eval case to use an explicit temp root and to persist only case names, booleans and a timestamp; no fixture content or secret-like values.",
+      "For scorecard --hermes, name the source function per P35 metric and specify n/a rendering for empty or zero-denominator sources; define the false-positive rate, cost share, latency share and amplification formulas.",
+      "Specify hermes-eval exit code (nonzero on any failed case) and clean --json output.",
+      "Add a rollback note: revert the commit; no pool.toml defaults change; new features default to shadow or off."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 8059,
+      "trimmed": {
+        "risks": 5
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790181379.788317,
+      "packet_meta": {
+        "chars": 6310,
+        "est_tokens": 1577,
+        "presented_tokens": 1577,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "110a41e85add455c4e8251090cf3452249abd59df07e139634b6f2fd7b09733f"
+          },
+          "spec": {
+            "chars": 3597,
+            "est_tokens": 899,
+            "sha256": "f7eabd0f6e47c11819b629578824a8f3f2a6c452489cf80ec73f80092fabd879"
+          },
+          "acceptance": {
+            "chars": 469,
+            "est_tokens": 117,
+            "sha256": "ae7698f0bcae6aec318be09d25e29dc94e215a61fb5c2e7adde4605176b9fe31"
+          },
+          "scope": {
+            "chars": 267,
+            "est_tokens": 66,
+            "sha256": "bcf5974e3fbc4865171c842e5bb7154941e6e08278994e313f97518738f4d170"
+          },
+          "depends_on": {
+            "chars": 1253,
+            "est_tokens": 313,
+            "sha256": "c0a63351ac0c29e4c6fd66810d51fbf3952f33b73b634e269ee3fd1840590239"
+          },
+          "existing tests": {
+            "chars": 625,
+            "est_tokens": 156,
+            "sha256": "709bf2ed21ef61029ab638a31ffc8fd66c357dc072ef91e37bc1fe2fa893c7e6"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "39b219e14386",
+        "version": "39b219e14386",
+        "candidate_known": false,
+        "base": "5de6c3770b7b",
+        "sources": "task@T-1311 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790181381.67594,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1319",
+      "claimed_at": 1790181381.675545
+    },
+    {
+      "ts": 1790181381.6768699,
+      "account": "A"
+    },
+    {
+      "ts": 1790181382.5867891,
+      "pid": 48086,
+      "account": "A"
+    },
+    {
+      "ts": 1790181426.460202,
+      "packet_meta": {
+        "chars": 6310,
+        "est_tokens": 1577,
+        "presented_tokens": 1577,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "110a41e85add455c4e8251090cf3452249abd59df07e139634b6f2fd7b09733f"
+          },
+          "spec": {
+            "chars": 3597,
+            "est_tokens": 899,
+            "sha256": "f7eabd0f6e47c11819b629578824a8f3f2a6c452489cf80ec73f80092fabd879"
+          },
+          "acceptance": {
+            "chars": 469,
+            "est_tokens": 117,
+            "sha256": "ae7698f0bcae6aec318be09d25e29dc94e215a61fb5c2e7adde4605176b9fe31"
+          },
+          "scope": {
+            "chars": 267,
+            "est_tokens": 66,
+            "sha256": "bcf5974e3fbc4865171c842e5bb7154941e6e08278994e313f97518738f4d170"
+          },
+          "depends_on": {
+            "chars": 1253,
+            "est_tokens": 313,
+            "sha256": "c0a63351ac0c29e4c6fd66810d51fbf3952f33b73b634e269ee3fd1840590239"
+          },
+          "existing tests": {
+            "chars": 625,
+            "est_tokens": 156,
+            "sha256": "709bf2ed21ef61029ab638a31ffc8fd66c357dc072ef91e37bc1fe2fa893c7e6"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "39b219e14386",
+        "version": "39b219e14386",
+        "candidate_known": false,
+        "base": "5de6c3770b7b",
+        "sources": "task@T-1311 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "ca871a6d-61e4-4f2f-b62a-a899ddb5192e"
+      }
+    },
+    {
+      "ts": 1790181426.484174,
+      "packet_meta": {
+        "chars": 6310,
+        "est_tokens": 1577,
+        "presented_tokens": 1577,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "110a41e85add455c4e8251090cf3452249abd59df07e139634b6f2fd7b09733f"
+          },
+          "spec": {
+            "chars": 3597,
+            "est_tokens": 899,
+            "sha256": "f7eabd0f6e47c11819b629578824a8f3f2a6c452489cf80ec73f80092fabd879"
+          },
+          "acceptance": {
+            "chars": 469,
+            "est_tokens": 117,
+            "sha256": "ae7698f0bcae6aec318be09d25e29dc94e215a61fb5c2e7adde4605176b9fe31"
+          },
+          "scope": {
+            "chars": 267,
+            "est_tokens": 66,
+            "sha256": "bcf5974e3fbc4865171c842e5bb7154941e6e08278994e313f97518738f4d170"
+          },
+          "depends_on": {
+            "chars": 1253,
+            "est_tokens": 313,
+            "sha256": "c0a63351ac0c29e4c6fd66810d51fbf3952f33b73b634e269ee3fd1840590239"
+          },
+          "existing tests": {
+            "chars": 625,
+            "est_tokens": 156,
+            "sha256": "709bf2ed21ef61029ab638a31ffc8fd66c357dc072ef91e37bc1fe2fa893c7e6"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "39b219e14386",
+        "version": "39b219e14386",
+        "candidate_known": false,
+        "base": "5de6c3770b7b",
+        "sources": "task@T-1311 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "ca871a6d-61e4-4f2f-b62a-a899ddb5192e",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790181426.490459,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "cache_aware_context needs three config keys (context_router.cache_mode, tool_disclosure.cache_mode, skills.cache_mode). FEATURES entries and current_mode() only support one table/key pair. The spec does not say how mode is derived (all three active? any?) or how the entry stays compatible with the existing single-key shape.",
+            "severity": "high",
+            "line": 11
+          },
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "No activation function exists here (only mode/evaluate/collect), so 'activation refused without a fresh hermes-eval' has no insertion point. evaluate() is documented as never changing config. Spec must name the function that refuses (evaluate returning stay with a reason such as hermes_eval_missing_or_stale, or a new guard) and where it is enforced.",
+            "severity": "high",
+            "line": 110
+          },
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "stale_steering is not present anywhere in orchestrator/ (only stale.py exists), so it has no table, key or evidence source. Spec says 'ensure' but does not define its config location, default, or collect() evidence, and there is no depends_on task that creates it.",
+            "severity": "med",
+            "line": 11
+          },
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "Existing evaluate() has bespoke branches per feature (steering_policy min 20, fast_path min 20 with a two_fix_rounds demote, memory_tiers falls into the generic path). The spec's uniform criteria (30 rows, or 20 for steering kinds; non-inferior quality; improved economics; eval within 7 days; demote after regression over 10 tasks) would change the behaviour of existing tested features (fast_path, steering_policy, memory_tiers). Spec must say the new criteria are additive and existing tests stay green, and reconcile the fixed 20 in fast_path. It also requires per-feature collect() output for the new fields (shadow_n, hermes_eval age, persisted-regression count), and none is specified.",
+            "severity": "high",
+            "line": 144
+          },
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "'Regression persists over 10 tasks' is not defined as stateless. Demotion must be computed from the last 10 task rows on each call, not from a counter or flag that only increments and never resets. Also specify how economics 'improved' is judged when the metric is None (missing data must stay, not promote), and avoid counting the same task in both shadow and active cohorts.",
+            "severity": "med",
+            "line": 110
+          },
+          {
+            "path": "orchestrator/hermes_eval.py",
+            "issue": "Freshness of 7 days needs an injectable clock and a defined timestamp field in .orchestrator/hermes_eval.json; otherwise tests are time-dependent. The file must also record pass/fail per case and an overall pass, and the promotion check must treat a missing, malformed, future-dated or failed file as not passing (no silent fallback to pass). Where is the file read from during the tests: ORCH_ROOT, or the explicit root argument?",
+            "severity": "med",
+            "line": 1
+          },
+          {
+            "path": "orchestrator/hermes_eval.py",
+            "issue": "Cases depend on modules whose public APIs are not named in the spec (memory_eval, tool_catalog, cache_telemetry, worker_control, context_scanner, skill_discovery/skill_promotion, harness_depth, evidence). Cases like 'a malicious external skill cannot move to testing', 'cancel releases pool capacity', 'replacement packet carries prior_worker facts' need real fixtures for pool/worker state, and could write to the real state root. Require all cases to run against a temp root passed explicitly, never touching STATE or ORCH_ROOT beyond the harness root. Also require that malicious fixture strings are synthetic and non-credential-shaped, and that the secret-exfiltration case never writes a secret-like value to disk or to hermes_eval.json (store only case names and booleans).",
+            "severity": "med",
+            "line": 1
+          }
+        ],
+        "suggested_spec_changes": [
+          "Define how cache_aware_context derives its mode from the three cache_mode keys (recommend: active only if all three are active, shadow if any is shadow, off otherwise, invalid_config flagged) and extend FEATURES/current_mode to support a list of keys without breaking single-key entries.",
+          "Name the exact function that refuses activation without a fresh passing hermes-eval (recommend: evaluate() returns recommendation stay with reason hermes_eval_missing_stale_or_failed; missing, malformed, future-dated, or failed files all count as not passing; clock injectable).",
+          "Define stale_steering config location, default (shadow) and collect() evidence source, or drop it if the module does not exist.",
+          "State that the new criteria are additive: existing steering_policy, fast_path, contracts and memory_tiers tests must stay green, and reconcile the 30 vs 20 sample threshold per feature.",
+          "Define demotion as stateless: computed each call from the most recent 10 tasks; a missing metric means stay, never promote; a task counts in one cohort only.",
+          "List the exact case names for hermes_eval.run() output and require test_all_cases_pass_on_fixtures to assert the exact name set.",
+          "Require every hermes_eval case to use an explicit temp root and to persist only case names, booleans and a timestamp; no fixture content or secret-like values.",
+          "For scorecard --hermes, name the source function per P35 metric and specify n/a rendering for empty or zero-denominator sources; define the false-positive rate, cost share, latency share and amplification formulas.",
+          "Specify hermes-eval exit code (nonzero on any failed case) and clean --json output.",
+          "Add a rollback note: revert the commit; no pool.toml defaults change; new features default to shadow or off."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 8059,
+          "trimmed": {
+            "risks": 5
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790181426.491403,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "cache_aware_context needs three config keys (context_router.cache_mode, tool_disclosure.cache_mode, skills.cache_mode). FEATURES entries and current_mode() only support one table/key pair. The spec does not say how mode is derived (all three active? any?) or how the entry stays compatible with the existing single-key shape.",
+          "severity": "high",
+          "line": 11
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "No activation function exists here (only mode/evaluate/collect), so 'activation refused without a fresh hermes-eval' has no insertion point. evaluate() is documented as never changing config. Spec must name the function that refuses (evaluate returning stay with a reason such as hermes_eval_missing_or_stale, or a new guard) and where it is enforced.",
+          "severity": "high",
+          "line": 110
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "stale_steering is not present anywhere in orchestrator/ (only stale.py exists), so it has no table, key or evidence source. Spec says 'ensure' but does not define its config location, default, or collect() evidence, and there is no depends_on task that creates it.",
+          "severity": "med",
+          "line": 11
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "Existing evaluate() has bespoke branches per feature (steering_policy min 20, fast_path min 20 with a two_fix_rounds demote, memory_tiers falls into the generic path). The spec's uniform criteria (30 rows, or 20 for steering kinds; non-inferior quality; improved economics; eval within 7 days; demote after regression over 10 tasks) would change the behaviour of existing tested features (fast_path, steering_policy, memory_tiers). Spec must say the new criteria are additive and existing tests stay green, and reconcile the fixed 20 in fast_path. It also requires per-feature collect() output for the new fields (shadow_n, hermes_eval age, persisted-regression count), and none is specified.",
+          "severity": "high",
+          "line": 144
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "'Regression persists over 10 tasks' is not defined as stateless. Demotion must be computed from the last 10 task rows on each call, not from a counter or flag that only increments and never resets. Also specify how economics 'improved' is judged when the metric is None (missing data must stay, not promote), and avoid counting the same task in both shadow and active cohorts.",
+          "severity": "med",
+          "line": 110
+        },
+        {
+          "path": "orchestrator/hermes_eval.py",
+          "issue": "Freshness of 7 days needs an injectable clock and a defined timestamp field in .orchestrator/hermes_eval.json; otherwise tests are time-dependent. The file must also record pass/fail per case and an overall pass, and the promotion check must treat a missing, malformed, future-dated or failed file as not passing (no silent fallback to pass). Where is the file read from during the tests: ORCH_ROOT, or the explicit root argument?",
+          "severity": "med",
+          "line": 1
+        },
+        {
+          "path": "orchestrator/hermes_eval.py",
+          "issue": "Cases depend on modules whose public APIs are not named in the spec (memory_eval, tool_catalog, cache_telemetry, worker_control, context_scanner, skill_discovery/skill_promotion, harness_depth, evidence). Cases like 'a malicious external skill cannot move to testing', 'cancel releases pool capacity', 'replacement packet carries prior_worker facts' need real fixtures for pool/worker state, and could write to the real state root. Require all cases to run against a temp root passed explicitly, never touching STATE or ORCH_ROOT beyond the harness root. Also require that malicious fixture strings are synthetic and non-credential-shaped, and that the secret-exfiltration case never writes a secret-like value to disk or to hermes_eval.json (store only case names and booleans).",
+          "severity": "med",
+          "line": 1
+        },
+        {
+          "path": "tests/test_hermes_eval.py",
+          "issue": "Acceptance says 'every P34 case listed by name' but names no test ids beyond test_all_cases_pass_on_fixtures. The verification is ambiguous. Require run() to return a dict keyed by case name with the exact case names, and require the test to assert the set of case names equals the spec list (memory, cache x4, worker control x4, security x5, fast path x4).",
+          "severity": "med",
+          "line": 1
+        },
+        {
+          "path": "orchestrator/scorecard.py",
+          "issue": "scorecard --hermes pulls from modules outside scope (memory_scorecard, cache_telemetry, context_scorecard, handoff_scorecard, worker_control, context_scanner, overhead). 'False positive rate (suspicious later marked safe by a human transition reason)' has no defined data source, and 'cost share / latency share / orchestration amplification' has no defined formula. Each metric must render as n/a when its source is empty or its denominator is zero (not 0 and not a division error), and the spec must name the source function for each row so the test can check all P35 rows without mocking internals. Also avoid double counting tokens between 'tokens per accepted goal' and 'effective uncached tokens'.",
+          "severity": "med",
+          "line": 1
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "Both `hermes-eval [--json]` and `scorecard --hermes` need to fit the existing argparse layout. Specify the exit code for hermes-eval (nonzero on a failed case), and that --json output is valid JSON with no extra stdout. The test_cli test should run against the harness root and must not write .orchestrator/hermes_eval.json into a real checkout.",
+          "severity": "low",
+          "line": 1
+        },
+        {
+          "path": "docs/hermes-hardening/19-promotion-and-evals.md",
+          "issue": "Docs want measured numbers read-only against /Users/k3ntaw/code/orchestrator/.orchestrator. Spec must say docs contain aggregate numbers only (no task text, no secrets), and that the read path never creates or migrates files there (hermes_eval.run must not persist to that root). Also the doc must not quote double-brace placeholder tokens.",
+          "severity": "low",
+          "line": 1
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "No rollback is stated. Since the feature only changes recommendations and adds an eval file, say explicitly that reverting the commit is enough and that no pool.toml default is changed (new features default shadow/off, not active).",
+          "severity": "low",
+          "line": 11
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 6310,
+    "est_tokens": 1577,
+    "presented_tokens": 1577,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "110a41e85add455c4e8251090cf3452249abd59df07e139634b6f2fd7b09733f"
+      },
+      "spec": {
+        "chars": 3597,
+        "est_tokens": 899,
+        "sha256": "f7eabd0f6e47c11819b629578824a8f3f2a6c452489cf80ec73f80092fabd879"
+      },
+      "acceptance": {
+        "chars": 469,
+        "est_tokens": 117,
+        "sha256": "ae7698f0bcae6aec318be09d25e29dc94e215a61fb5c2e7adde4605176b9fe31"
+      },
+      "scope": {
+        "chars": 267,
+        "est_tokens": 66,
+        "sha256": "bcf5974e3fbc4865171c842e5bb7154941e6e08278994e313f97518738f4d170"
+      },
+      "depends_on": {
+        "chars": 1253,
+        "est_tokens": 313,
+        "sha256": "c0a63351ac0c29e4c6fd66810d51fbf3952f33b73b634e269ee3fd1840590239"
+      },
+      "existing tests": {
+        "chars": 625,
+        "est_tokens": 156,
+        "sha256": "709bf2ed21ef61029ab638a31ffc8fd66c357dc072ef91e37bc1fe2fa893c7e6"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "39b219e14386",
+    "version": "39b219e14386",
+    "candidate_known": false,
+    "base": "5de6c3770b7b",
+    "sources": "task@T-1311 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "ca871a6d-61e4-4f2f-b62a-a899ddb5192e",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790181381.675545,
+  "account": "A",
+  "pid": 48086,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "cache_aware_context needs three config keys (context_router.cache_mode, tool_disclosure.cache_mode, skills.cache_mode). FEATURES entries and current_mode() only support one table/key pair. The spec does not say how mode is derived (all three active? any?) or how the entry stays compatible with the existing single-key shape.",
+      "severity": "high",
+      "line": 11
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "No activation function exists here (only mode/evaluate/collect), so 'activation refused without a fresh hermes-eval' has no insertion point. evaluate() is documented as never changing config. Spec must name the function that refuses (evaluate returning stay with a reason such as hermes_eval_missing_or_stale, or a new guard) and where it is enforced.",
+      "severity": "high",
+      "line": 110
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "stale_steering is not present anywhere in orchestrator/ (only stale.py exists), so it has no table, key or evidence source. Spec says 'ensure' but does not define its config location, default, or collect() evidence, and there is no depends_on task that creates it.",
+      "severity": "med",
+      "line": 11
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "Existing evaluate() has bespoke branches per feature (steering_policy min 20, fast_path min 20 with a two_fix_rounds demote, memory_tiers falls into the generic path). The spec's uniform criteria (30 rows, or 20 for steering kinds; non-inferior quality; improved economics; eval within 7 days; demote after regression over 10 tasks) would change the behaviour of existing tested features (fast_path, steering_policy, memory_tiers). Spec must say the new criteria are additive and existing tests stay green, and reconcile the fixed 20 in fast_path. It also requires per-feature collect() output for the new fields (shadow_n, hermes_eval age, persisted-regression count), and none is specified.",
+      "severity": "high",
+      "line": 144
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "'Regression persists over 10 tasks' is not defined as stateless. Demotion must be computed from the last 10 task rows on each call, not from a counter or flag that only increments and never resets. Also specify how economics 'improved' is judged when the metric is None (missing data must stay, not promote), and avoid counting the same task in both shadow and active cohorts.",
+      "severity": "med",
+      "line": 110
+    },
+    {
+      "path": "orchestrator/hermes_eval.py",
+      "issue": "Freshness of 7 days needs an injectable clock and a defined timestamp field in .orchestrator/hermes_eval.json; otherwise tests are time-dependent. The file must also record pass/fail per case and an overall pass, and the promotion check must treat a missing, malformed, future-dated or failed file as not passing (no silent fallback to pass). Where is the file read from during the tests: ORCH_ROOT, or the explicit root argument?",
+      "severity": "med",
+      "line": 1
+    },
+    {
+      "path": "orchestrator/hermes_eval.py",
+      "issue": "Cases depend on modules whose public APIs are not named in the spec (memory_eval, tool_catalog, cache_telemetry, worker_control, context_scanner, skill_discovery/skill_promotion, harness_depth, evidence). Cases like 'a malicious external skill cannot move to testing', 'cancel releases pool capacity', 'replacement packet carries prior_worker facts' need real fixtures for pool/worker state, and could write to the real state root. Require all cases to run against a temp root passed explicitly, never touching STATE or ORCH_ROOT beyond the harness root. Also require that malicious fixture strings are synthetic and non-credential-shaped, and that the secret-exfiltration case never writes a secret-like value to disk or to hermes_eval.json (store only case names and booleans).",
+      "severity": "med",
+      "line": 1
+    },
+    {
+      "path": "tests/test_hermes_eval.py",
+      "issue": "Acceptance says 'every P34 case listed by name' but names no test ids beyond test_all_cases_pass_on_fixtures. The verification is ambiguous. Require run() to return a dict keyed by case name with the exact case names, and require the test to assert the set of case names equals the spec list (memory, cache x4, worker control x4, security x5, fast path x4).",
+      "severity": "med",
+      "line": 1
+    },
+    {
+      "path": "orchestrator/scorecard.py",
+      "issue": "scorecard --hermes pulls from modules outside scope (memory_scorecard, cache_telemetry, context_scorecard, handoff_scorecard, worker_control, context_scanner, overhead). 'False positive rate (suspicious later marked safe by a human transition reason)' has no defined data source, and 'cost share / latency share / orchestration amplification' has no defined formula. Each metric must render as n/a when its source is empty or its denominator is zero (not 0 and not a division error), and the spec must name the source function for each row so the test can check all P35 rows without mocking internals. Also avoid double counting tokens between 'tokens per accepted goal' and 'effective uncached tokens'.",
+      "severity": "med",
+      "line": 1
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "Both `hermes-eval [--json]` and `scorecard --hermes` need to fit the existing argparse layout. Specify the exit code for hermes-eval (nonzero on a failed case), and that --json output is valid JSON with no extra stdout. The test_cli test should run against the harness root and must not write .orchestrator/hermes_eval.json into a real checkout.",
+      "severity": "low",
+      "line": 1
+    },
+    {
+      "path": "docs/hermes-hardening/19-promotion-and-evals.md",
+      "issue": "Docs want measured numbers read-only against /Users/k3ntaw/code/orchestrator/.orchestrator. Spec must say docs contain aggregate numbers only (no task text, no secrets), and that the read path never creates or migrates files there (hermes_eval.run must not persist to that root). Also the doc must not quote double-brace placeholder tokens.",
+      "severity": "low",
+      "line": 1
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "No rollback is stated. Since the feature only changes recommendations and adds an eval file, say explicitly that reverting the commit is enough and that no pool.toml default is changed (new features default shadow/off, not active).",
+      "severity": "low",
+      "line": 11
+    }
+  ]
+}

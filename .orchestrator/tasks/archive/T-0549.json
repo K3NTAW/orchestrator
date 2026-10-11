@@ -1,0 +1,173 @@
+{
+  "id": "T-0549",
+  "created_at": 1789951308.466197,
+  "parent": "T-0503",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S4b v5: stale-work detection before review \u2014 record when the goal branch moved across a task's surface after its base, optional rebase and re-gate behind [scheduler].stale_rebase, never discarding work (spec reviews T-0545, T-0547 folded in)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P12 (cheap deterministic checks; rebase/revalidate before expensive review when stale risk is high; never silently discard work; record stale events) and P14 (record predicted vs actual for scheduler learning). Base goal/T-0503 with S3 v4 (T-0541) merged: daemon has schedlog, _load_scheduler_cfg returning {mode, soft_conflict_policy, max_wave}, waves, critical path; tests/test_daemon.py::test_scheduler_cfg_defaults asserts that exact dict. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: daemon.gate skips tasks whose pipeline.gated_at is set, runs tests-green on a done execute task's worktree, and on green stamps gated_at with green_fields (first_green_at, reviews_expected, review_reason) and then either merges directly (n_reviews == 0) or calls _open_reviews; clear_stage(tid, \"gated_at\", ...) removes the stamp so the task re-enters gate(); changed_paths(task) (daemon.py:21, gitutil) lists the task's diff paths against its base and fails soft with None; gitutil helpers take a worktree/cwd because subprocess needs one, and branch refs are visible from any worktree of the repo; merge.merge (merge.py:25-60) rebases onto the goal branch only at merge time, after reviews, and marks conflicts failed with reason rebase_conflict; _resolve_base/_merged_target give the goal branch goal/<parent>.\n1. gitutil: add class GitError(RuntimeError). moved_paths(base_ref, target_ref, cwd, git=...) -> sorted list of paths changed between the merge-base of the two refs and target_ref (git merge-base, then git diff --name-only, both with cwd=cwd, normally the task worktree); raises GitError on any git failure. It differs from changed_paths' None convention on purpose: the caller must distinguish \"nothing moved\" (empty list) from \"git failed\" (risk unknown); say so in the docstring.\n2. _load_scheduler_cfg gains stale_rebase = False (bool) in its defaults and return dict; update tests/test_daemon.py::test_scheduler_cfg_defaults's expected literal accordingly and add [scheduler].stale_rebase = false to .orchestrator/pool.toml with a comment.\n3. daemon.stale_check(task) -> {\"base\", \"goal_head\", \"moved_count\", \"stale_paths\", \"risk\"}: goal branch = the task's merge target; moved = moved_paths(task branch, goal branch, cwd=task worktree); surface = literal scope paths plus changed_paths(task) or []; stale_paths = moved entries equal to a surface literal or fnmatching a surface glob; risk none when empty, high when any stale path is also in changed_paths(task), else low; unknown when moved_paths raises GitError. Insertion point: in gate(), immediately after the green gated_at stamp with green_fields succeeds and before the n_reviews == 0 merge / _open_reviews branch; idempotent per head (skip when pipeline.stale_check.head equals the current head); stamps pipeline.stale_check = {..., checked_at, head} and appends runs/sched/stale.jsonl {\"ts\",\"task\",\"goal_id\",\"base\",\"goal_head\",\"moved_count\",\"stale_paths\",\"risk\",\"action\"} with action \"recorded\". Never blocks the pipeline: any exception inside stale_check is caught, recorded as risk unknown, and gate proceeds.\n4. When stale_rebase is true and risk is high: run git rebase <goal branch> inside the task worktree. On conflict: abort the rebase, clear_stage the gated_at stamp (so the task re-enters gate() once its hold is lifted), hold the task with hold_reason \"stale_rebase_conflict\" and resume_hint {\"conflicts\": [...], \"goal_head\": ...}, action \"rebase_conflict\", return before reviews; resolution is the existing fix-round path (a task with constraints.fix_round_for resumes the worktree, commits, posts done, and gate() re-runs). On success: clear_stage the gated_at stamp so the next tick re-gates the rebased head before reviews, action \"rebased\", pipeline.stale_check.rebased_to = new head, return. merge.merge's own rebase stays as the final safety. No commit or branch is ever deleted.\n5. README Pipeline paragraph: two sentences on stale checks and the stale_rebase switch, naming the hold reason and its resolution path.\n6. Tests: tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base and ::test_moved_paths_raises_git_error_on_failure (new file, reuse the git sandbox helpers of tests/test_merge.py or tests/_harness.py); tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, ::test_stale_check_low_when_scope_overlaps_moved_paths, ::test_stale_check_high_when_changed_file_moved, ::test_stale_check_unknown_on_git_failure (moved_paths raising yields risk unknown and the gate still opens reviews), ::test_stale_check_records_row_and_stamp_before_reviews, ::test_stale_rebase_conflict_holds_clears_gate_and_never_discards (held task has no gated_at stamp, its commits are intact), ::test_stale_rebase_success_regates_before_reviews. Existing tests stay green.",
+  "inputs": [
+    "T-0548"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, tests/test_daemon.py::test_stale_check_low_when_scope_overlaps_moved_paths, tests/test_daemon.py::test_stale_check_high_when_changed_file_moved, tests/test_daemon.py::test_stale_check_unknown_on_git_failure and tests/test_daemon.py::test_stale_check_records_row_and_stamp_before_reviews pass: after the green gated_at stamp and before reviews or a direct merge every execute task gets pipeline.stale_check and one stale.jsonl row with risk none, low, high or unknown; a git failure yields unknown and never blocks",
+    "tests/test_daemon.py::test_stale_rebase_conflict_holds_clears_gate_and_never_discards and tests/test_daemon.py::test_stale_rebase_success_regates_before_reviews pass: with stale_rebase true a high-risk task is rebased and re-gated before reviews, or held with hold_reason stale_rebase_conflict, a conflicts resume_hint and no gated_at stamp; the default false changes nothing but the record; no commit or branch is deleted",
+    "tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base and tests/test_gitutil.py::test_moved_paths_raises_git_error_on_failure pass; tests/test_daemon.py::test_scheduler_cfg_defaults asserts the defaults including stale_rebase false",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains nine tests"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gitutil.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_daemon.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0549",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": ".orchestrator/adaptive-parallelism-program.md",
+        "issue": "Step 4 says the stale_rebase_conflict hold resolves via 'the existing fix-round path' as if it happens automatically. In this codebase, failure_kind() classifies hold_reason 'stale_rebase_conflict' as kind='conflict' (orchestrator/failures.py:121-122), which auto_fix_round() never routes to routine (it only auto-creates fix rounds for kind=='code_defect' with reason 'gate_red' or 'review request_changes'; conflict-kind holds fall through to the notify/escalate branch with a rebase-task hint). The decision.route() path used when planner.autonomous routing is enabled independently confirms this: for a held point with empty failing_ids and in_scope_review_comments=False (true for a rebase conflict, which has no test failures or review comments), fixable is False and the route is 'escalate'/'hold_requires_planner' (orchestrator/decision.py:114-120), never 'routine'. So this hold does not self-heal; it escalates to the Planner, who must hand-author a constraints.fix_round_for task the same way it does for any other Planner-owned hold. The README paragraph (step 5) must not claim automatic resolution.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "issue": "scorecard.py (out of scope for this task) already reads sched['stale'] rows via row.get('task')/row.get('goal_id')/row.get('risk')=='high' and pipeline.stale_check.risk to compute the already-shipped 'stale_work_events' metric (scorecard.py:1522-1557, from an already-merged prior commit). The spec's stale.jsonl row shape and stale_check() return dict happen to use the same field names (task, goal_id, risk), but the spec never states this hidden coupling explicitly, and the pipeline.stale_check stamp is only described as '{..., checked_at, head}' without spelling out that the stale_check() return dict (specifically the 'risk' key) must be merged in verbatim. A literal implementation that renames or drops 'risk' from the stamped pipeline.stale_check dict would silently zero out scorecard's stale_work_events metric with no test catching it, since scorecard.py is out of scope and has no test asserting the new integration end-to-end.",
+        "severity": "med",
+        "line": 1557
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The insertion point ('immediately after the green gated_at stamp ... succeeds') is ambiguous about whether stale_check's git subprocess calls (moved_paths) and the conditional 'git rebase' happen inside or outside the `with bus.locked():` block that performs the gated_at stamp (daemon.py:1112-1120). Every existing heavy/subprocess call in gate() (tests-green, merge.merge, _open_reviews) runs after that lock is released, in the surrounding try: block. bus.locked() is a short-lived file lock also used by dispatch(), stamp(), and clear_stage() elsewhere; running a git rebase while holding it would serialize the whole daemon (dispatch of other tasks, other gate() ticks) for the duration of the rebase. The spec should say explicitly that stale_check() and the rebase run after the locked block exits, alongside the merge/_open_reviews call.",
+        "severity": "low",
+        "line": 1112
+      }
+    ],
+    "suggested_spec_changes": [
+      "State plainly that stale_check() and any git rebase it triggers run outside `bus.locked()`, in the same try: scope as report_merge()/_open_reviews(), not inside the locked block that stamps gated_at/green_fields.",
+      "Rewrite step 4's resolution-path sentence to say the stale_rebase_conflict hold escalates to the Planner (decision.route() returns hold_requires_planner for it, and auto_fix_round() does not treat kind='conflict' as routine); the existing fix-round *execution* mechanism only applies once the Planner hand-authors a constraints.fix_round_for task, it is not auto-triggered. Reflect this accurately in the README paragraph from step 5.",
+      "Spell out that pipeline.stale_check's stamped dict must include the literal 'risk' key from stale_check()'s return value (and that stale.jsonl rows must keep the 'task'/'goal_id'/'risk' key names), because orchestrator/scorecard.py (out of scope, already merged) reads exactly those keys for its stale_work_events metric; a mismatch would silently zero that metric with no failing test to catch it."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789951310.4599302,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0549",
+      "claimed_at": 1789951310.459611
+    },
+    {
+      "ts": 1789951310.4609659,
+      "account": "B"
+    },
+    {
+      "ts": 1789951310.7861602,
+      "pid": 27708,
+      "account": "B"
+    },
+    {
+      "ts": 1789951583.529622,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": ".orchestrator/adaptive-parallelism-program.md",
+            "issue": "Step 4 says the stale_rebase_conflict hold resolves via 'the existing fix-round path' as if it happens automatically. In this codebase, failure_kind() classifies hold_reason 'stale_rebase_conflict' as kind='conflict' (orchestrator/failures.py:121-122), which auto_fix_round() never routes to routine (it only auto-creates fix rounds for kind=='code_defect' with reason 'gate_red' or 'review request_changes'; conflict-kind holds fall through to the notify/escalate branch with a rebase-task hint). The decision.route() path used when planner.autonomous routing is enabled independently confirms this: for a held point with empty failing_ids and in_scope_review_comments=False (true for a rebase conflict, which has no test failures or review comments), fixable is False and the route is 'escalate'/'hold_requires_planner' (orchestrator/decision.py:114-120), never 'routine'. So this hold does not self-heal; it escalates to the Planner, who must hand-author a constraints.fix_round_for task the same way it does for any other Planner-owned hold. The README paragraph (step 5) must not claim automatic resolution.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "issue": "scorecard.py (out of scope for this task) already reads sched['stale'] rows via row.get('task')/row.get('goal_id')/row.get('risk')=='high' and pipeline.stale_check.risk to compute the already-shipped 'stale_work_events' metric (scorecard.py:1522-1557, from an already-merged prior commit). The spec's stale.jsonl row shape and stale_check() return dict happen to use the same field names (task, goal_id, risk), but the spec never states this hidden coupling explicitly, and the pipeline.stale_check stamp is only described as '{..., checked_at, head}' without spelling out that the stale_check() return dict (specifically the 'risk' key) must be merged in verbatim. A literal implementation that renames or drops 'risk' from the stamped pipeline.stale_check dict would silently zero out scorecard's stale_work_events metric with no test catching it, since scorecard.py is out of scope and has no test asserting the new integration end-to-end.",
+            "severity": "med",
+            "line": 1557
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The insertion point ('immediately after the green gated_at stamp ... succeeds') is ambiguous about whether stale_check's git subprocess calls (moved_paths) and the conditional 'git rebase' happen inside or outside the `with bus.locked():` block that performs the gated_at stamp (daemon.py:1112-1120). Every existing heavy/subprocess call in gate() (tests-green, merge.merge, _open_reviews) runs after that lock is released, in the surrounding try: block. bus.locked() is a short-lived file lock also used by dispatch(), stamp(), and clear_stage() elsewhere; running a git rebase while holding it would serialize the whole daemon (dispatch of other tasks, other gate() ticks) for the duration of the rebase. The spec should say explicitly that stale_check() and the rebase run after the locked block exits, alongside the merge/_open_reviews call.",
+            "severity": "low",
+            "line": 1112
+          }
+        ],
+        "suggested_spec_changes": [
+          "State plainly that stale_check() and any git rebase it triggers run outside `bus.locked()`, in the same try: scope as report_merge()/_open_reviews(), not inside the locked block that stamps gated_at/green_fields.",
+          "Rewrite step 4's resolution-path sentence to say the stale_rebase_conflict hold escalates to the Planner (decision.route() returns hold_requires_planner for it, and auto_fix_round() does not treat kind='conflict' as routine); the existing fix-round *execution* mechanism only applies once the Planner hand-authors a constraints.fix_round_for task, it is not auto-triggered. Reflect this accurately in the README paragraph from step 5.",
+          "Spell out that pipeline.stale_check's stamped dict must include the literal 'risk' key from stale_check()'s return value (and that stale.jsonl rows must keep the 'task'/'goal_id'/'risk' key names), because orchestrator/scorecard.py (out of scope, already merged) reads exactly those keys for its stale_work_events metric; a mismatch would silently zero that metric with no failing test to catch it."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789951583.5322208,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/adaptive-parallelism-program.md",
+          "issue": "Step 4 says the stale_rebase_conflict hold resolves via 'the existing fix-round path' as if it happens automatically. In this codebase, failure_kind() classifies hold_reason 'stale_rebase_conflict' as kind='conflict' (orchestrator/failures.py:121-122), which auto_fix_round() never routes to routine (it only auto-creates fix rounds for kind=='code_defect' with reason 'gate_red' or 'review request_changes'; conflict-kind holds fall through to the notify/escalate branch with a rebase-task hint). The decision.route() path used when planner.autonomous routing is enabled independently confirms this: for a held point with empty failing_ids and in_scope_review_comments=False (true for a rebase conflict, which has no test failures or review comments), fixable is False and the route is 'escalate'/'hold_requires_planner' (orchestrator/decision.py:114-120), never 'routine'. So this hold does not self-heal; it escalates to the Planner, who must hand-author a constraints.fix_round_for task the same way it does for any other Planner-owned hold. The README paragraph (step 5) must not claim automatic resolution.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/scorecard.py",
+          "issue": "scorecard.py (out of scope for this task) already reads sched['stale'] rows via row.get('task')/row.get('goal_id')/row.get('risk')=='high' and pipeline.stale_check.risk to compute the already-shipped 'stale_work_events' metric (scorecard.py:1522-1557, from an already-merged prior commit). The spec's stale.jsonl row shape and stale_check() return dict happen to use the same field names (task, goal_id, risk), but the spec never states this hidden coupling explicitly, and the pipeline.stale_check stamp is only described as '{..., checked_at, head}' without spelling out that the stale_check() return dict (specifically the 'risk' key) must be merged in verbatim. A literal implementation that renames or drops 'risk' from the stamped pipeline.stale_check dict would silently zero out scorecard's stale_work_events metric with no test catching it, since scorecard.py is out of scope and has no test asserting the new integration end-to-end.",
+          "severity": "med",
+          "line": 1557
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The insertion point ('immediately after the green gated_at stamp ... succeeds') is ambiguous about whether stale_check's git subprocess calls (moved_paths) and the conditional 'git rebase' happen inside or outside the `with bus.locked():` block that performs the gated_at stamp (daemon.py:1112-1120). Every existing heavy/subprocess call in gate() (tests-green, merge.merge, _open_reviews) runs after that lock is released, in the surrounding try: block. bus.locked() is a short-lived file lock also used by dispatch(), stamp(), and clear_stage() elsewhere; running a git rebase while holding it would serialize the whole daemon (dispatch of other tasks, other gate() ticks) for the duration of the rebase. The spec should say explicitly that stale_check() and the rebase run after the locked block exits, alongside the merge/_open_reviews call.",
+          "severity": "low",
+          "line": 1112
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789951310.459611,
+  "account": "B",
+  "pid": 27708,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/adaptive-parallelism-program.md",
+      "issue": "Step 4 says the stale_rebase_conflict hold resolves via 'the existing fix-round path' as if it happens automatically. In this codebase, failure_kind() classifies hold_reason 'stale_rebase_conflict' as kind='conflict' (orchestrator/failures.py:121-122), which auto_fix_round() never routes to routine (it only auto-creates fix rounds for kind=='code_defect' with reason 'gate_red' or 'review request_changes'; conflict-kind holds fall through to the notify/escalate branch with a rebase-task hint). The decision.route() path used when planner.autonomous routing is enabled independently confirms this: for a held point with empty failing_ids and in_scope_review_comments=False (true for a rebase conflict, which has no test failures or review comments), fixable is False and the route is 'escalate'/'hold_requires_planner' (orchestrator/decision.py:114-120), never 'routine'. So this hold does not self-heal; it escalates to the Planner, who must hand-author a constraints.fix_round_for task the same way it does for any other Planner-owned hold. The README paragraph (step 5) must not claim automatic resolution.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/scorecard.py",
+      "issue": "scorecard.py (out of scope for this task) already reads sched['stale'] rows via row.get('task')/row.get('goal_id')/row.get('risk')=='high' and pipeline.stale_check.risk to compute the already-shipped 'stale_work_events' metric (scorecard.py:1522-1557, from an already-merged prior commit). The spec's stale.jsonl row shape and stale_check() return dict happen to use the same field names (task, goal_id, risk), but the spec never states this hidden coupling explicitly, and the pipeline.stale_check stamp is only described as '{..., checked_at, head}' without spelling out that the stale_check() return dict (specifically the 'risk' key) must be merged in verbatim. A literal implementation that renames or drops 'risk' from the stamped pipeline.stale_check dict would silently zero out scorecard's stale_work_events metric with no test catching it, since scorecard.py is out of scope and has no test asserting the new integration end-to-end.",
+      "severity": "med",
+      "line": 1557
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The insertion point ('immediately after the green gated_at stamp ... succeeds') is ambiguous about whether stale_check's git subprocess calls (moved_paths) and the conditional 'git rebase' happen inside or outside the `with bus.locked():` block that performs the gated_at stamp (daemon.py:1112-1120). Every existing heavy/subprocess call in gate() (tests-green, merge.merge, _open_reviews) runs after that lock is released, in the surrounding try: block. bus.locked() is a short-lived file lock also used by dispatch(), stamp(), and clear_stage() elsewhere; running a git rebase while holding it would serialize the whole daemon (dispatch of other tasks, other gate() ticks) for the duration of the rebase. The spec should say explicitly that stale_check() and the rebase run after the locked block exits, alongside the merge/_open_reviews call.",
+      "severity": "low",
+      "line": 1112
+    }
+  ]
+}

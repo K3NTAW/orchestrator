@@ -1,0 +1,132 @@
+{
+  "id": "T-0385",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 2,
+  "title": "H8 fix round 4: the bus_events tests added in T-0374/T-0379 leak a monkeypatch into the suite (test_all_reviews_failed_holds_without_merge fails only after tests.test_bus runs); restore every patch and prove ordering independence (gate_red on T-0382)",
+  "spec": "STEP 0: the worktree must contain f43c354, 0751d53, a25898a and bf8898c (T-0360, T-0374, T-0379, T-0382) in git log; never drop or amend them.\nDiagnosis by the Planner (measured): tests.test_daemon.Daemon.test_all_reviews_failed_holds_without_merge passes in isolation on every worktree of this chain (T-0360, T-0374, T-0379, T-0382: OK) and on the Phase G head, but fails with AssertionError 'failed' != 'held' whenever the whole suite runs, and it does so only on this chain (the H6 and H5a chains are green). unittest runs tests.test_bus before tests.test_daemon, so a test added to tests/test_bus.py in T-0374 or T-0379 (the cursor test that \"simulates an insert between the fetch and the filter by monkeypatching\", or the isolation changes in T-0379) leaves a bus module attribute patched (bus.events, bus._event, bus.read, the task index or db connection) or leaves shared sandbox state behind; merge_reviewed then reads wrong review rows and marks the task failed. Do not touch orchestrator/daemon.py or the failing test's assertion.\nFix: in tests/test_bus.py every monkeypatch uses unittest.mock.patch as a decorator or context manager (or addCleanup) so it is restored even on failure; every test uses the file's sandbox base class and tearDown; no test replaces module-level functions by assignment without restoring them. Prove it: run python -m unittest tests.test_bus tests.test_daemon in the worktree (must be OK), then the full .claude/hooks/tests-green.sh twice in a row (exit 0 both times). If the leak is not in tests/test_bus.py, find the leaking test with the ordered run (bisect by module) and fix that file, staying inside scope. git add -A and commit with the task id; report sha, the leaking test name and failures only.",
+  "inputs": [
+    "T-0382"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows bf8898c, a25898a, 0751d53 and f43c354 below your commit",
+    "python -m unittest tests.test_bus tests.test_daemon in the worktree exits 0 and tests.test_daemon.Daemon.test_all_reviews_failed_holds_without_merge passes with its assertion unchanged",
+    "tests/test_bus.py::test_events_filtered_page_never_exceeds_next_since, ::test_events_role_filter_keeps_seq_and_cursor and ::test_events_truncated_flag_and_next_since still pass and use restored patches (grep shows no bare module attribute assignment left unrestored)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "tests/test_bus.py",
+    "tests/_harness.py",
+    "orchestrator/bus.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0382",
+    "task_class": "context"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0385",
+  "codex_thread": "01a0be97-2024-77b1-aac9-d0c751955187",
+  "result": {
+    "summary": "Blocked by an out-of-scope leak; no commit was created.\n\nSummary:\n\n- Added an explicit `BusSandbox` base class and `tearDown()` in `tests/test_bus.py`.\n- `tests.test_bus tests.test_daemon` passes: 128 tests.\n- Actual leaking sequence is:\n  `tests.test_cli` \u2192 `Background.test_autostart_true_starts_thread_and_holds_the_lock` \u2192 `Daemon.test_all_reviews_failed_holds_without_merge`.\n- Fix requires changing `tests/test_cli.py` or `tests/test_daemon.py`, neither of which is in scope.\n- Required commits remain intact: `bf8898c`, `a25898a`, `0751d53`, `f43c354`.\n\nFiles changed:\n\n```text\ntests/test_bus.py | 10 ++++++++--\n```\n\nFailures-only output:\n\n```text\nFAIL: test_all_reviews_failed_holds_without_merge\nAssertionError: 'failed' != 'held'\nFAILED (failures=1)\n```\n\nAlso, both requested `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent; the available `.claude/hooks/tests-green.sh` reproduced the failure.",
+    "executed_by": "codex:sol",
+    "thread": "01a0be97-2024-77b1-aac9-d0c751955187",
+    "usage": {
+      "input_tokens": 1372300,
+      "cached_input_tokens": 1296128,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10151,
+      "reasoning_output_tokens": 5434
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789903968.551233,
+      "pipeline": {
+        "dispatched_at": 1789903968.551185
+      }
+    },
+    {
+      "ts": 1789903970.064577,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0385",
+      "claimed_at": 1789903970.064189
+    },
+    {
+      "ts": 1789903970.066567,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789904515.7609239,
+      "codex_thread": "01a0be97-2024-77b1-aac9-d0c751955187"
+    },
+    {
+      "ts": 1789904515.764705,
+      "status": "done",
+      "result": {
+        "summary": "Blocked by an out-of-scope leak; no commit was created.\n\nSummary:\n\n- Added an explicit `BusSandbox` base class and `tearDown()` in `tests/test_bus.py`.\n- `tests.test_bus tests.test_daemon` passes: 128 tests.\n- Actual leaking sequence is:\n  `tests.test_cli` \u2192 `Background.test_autostart_true_starts_thread_and_holds_the_lock` \u2192 `Daemon.test_all_reviews_failed_holds_without_merge`.\n- Fix requires changing `tests/test_cli.py` or `tests/test_daemon.py`, neither of which is in scope.\n- Required commits remain intact: `bf8898c`, `a25898a`, `0751d53`, `f43c354`.\n\nFiles changed:\n\n```text\ntests/test_bus.py | 10 ++++++++--\n```\n\nFailures-only output:\n\n```text\nFAIL: test_all_reviews_failed_holds_without_merge\nAssertionError: 'failed' != 'held'\nFAILED (failures=1)\n```\n\nAlso, both requested `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent; the available `.claude/hooks/tests-green.sh` reproduced the failure.",
+        "executed_by": "codex:sol",
+        "thread": "01a0be97-2024-77b1-aac9-d0c751955187",
+        "usage": {
+          "input_tokens": 1372300,
+          "cached_input_tokens": 1296128,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10151,
+          "reasoning_output_tokens": 5434
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789904516.783511,
+      "pipeline": {
+        "dispatched_at": 1789903968.551185,
+        "gated_at": 1789904516.783424
+      },
+      "status": "held",
+      "hold_reason": "executor did not commit",
+      "resume_hint": {
+        "dirty": [
+          "tests/test_bus.py"
+        ]
+      }
+    },
+    {
+      "ts": 1789906295.115983,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "rebase T-0388 6b773d8",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789903968.551185,
+    "gated_at": 1789904516.783424
+  },
+  "claimed_at": 1789903970.064189,
+  "rounds": 0,
+  "executor": "sol",
+  "hold_reason": null,
+  "resume_hint": {
+    "dirty": [
+      "tests/test_bus.py"
+    ]
+  },
+  "merged_into": "goal/T-0353",
+  "merged_via": "rebase T-0388 6b773d8"
+}

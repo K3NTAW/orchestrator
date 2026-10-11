@@ -1,0 +1,174 @@
+{
+  "id": "T-0943",
+  "created_at": 1790118194.0423858,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S4: skill scorecard with marginal value and redundancy: skill \u00d7 role \u00d7 task class \u00d7 complexity \u00d7 model \u00d7 workflow strategy, role-without-skill vs role-with-skill comparison, redundancy between co-used skills; reporting only (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P14, P15, P16, P24, P25, P30 (P37 stage 4). Depends on T-0894 (run context carries skills_exposed / skills_used / skill tokens; skill_scorecard.py exists with use_rate and overhead) and T-0913 (skills_selected, skill_recovery_rate). Facts: run rows (bus.log_run) carry role, task, tier/executor (model via attribution.model_of), usage tokens, usd, duration_s; lineage roots via attribution.lineage; task_class via attribution.task_class; complexity band via attribution.band; workflow strategy via strategy.derive(task, tasks); gate/review outcomes live on task pipelines (gate_reds, review verdicts on review tasks with inputs[0]); read_economy gate rows carry per-call paths and tools; promotion CRITERIA min_samples 20.\nDo:\n1. skill_scorecard.py: `usage_rows(root)` = one row per run with skills_used, plus the lineage's outcome (first_pass, fix_rounds, gate_reds, review_request_changes, accepted, accepted_tokens, accepted_usd, latency_s, tool_calls when known) and the dimensions (role, task_class, band, model, strategy, repo = \"orchestrator\"). `by_skill(root, group_by=(\"role\",\"task_class\"))` aggregates per skill \u00d7 the chosen dimensions with n and every metric; unknown values are None, never 0.\n2. Marginal value (P15): `marginal(root, skill, group_by=(\"role\",\"task_class\"), min_samples=cfg)`: for each group, compare runs of the same role/class WITH the skill used vs WITHOUT (neither used nor selected): deltas for first_pass, fix_rounds, accepted_tokens, accepted_usd, latency_s, plus the skill's own token overhead (l2 tokens per use); returns {\"insufficient\": True, \"n_with\", \"n_without\"} below min_samples on either side; otherwise deltas with both n. A `verdict` field: \"valuable\" (quality delta \u2265 0 and cost delta \u2264 0, or quality delta > +0.05 with cost delta within +10%), \"neutral\", \"costly\" (tokens up without quality change), \"harmful\" (quality down) \u2014 reporting only, no state changes (Stage 10 acts on it).\n3. Redundancy (P16): `redundancy(root)`: for skill pairs co-used in one run: count of co-uses, overlap proxy = fraction of paths read by both (from read_economy gate rows joined by session/task when available, else None), duplicated script invocations (same script:<path> tool in both skills' declared tools), unique-findings proxy = None with a note (needs Stage 6 evidence sharing). Reported as a table with n.\n4. Model and workflow interaction (P24/P25): by_skill with group_by (\"model\",) and (\"strategy\",\"task_class\") available through the CLI: `orchestrator scorecard --skills [--by role,task_class|model|strategy,task_class] [--marginal <skill>] [--redundancy]`; `--economy` skills block gains the top-3 \"costly\"/\"harmful\" verdicts when any group has sufficient samples.\n5. docs/skill-intelligence/05-scorecard.md (\u226470 lines): formulas, dimensions, the verdict rules, what is a proxy, min_samples, revert path (reporting only).\nTests (unittest): tests/test_skill_scorecard.py::test_usage_rows_join_lineage_outcomes_and_dimensions, ::test_by_skill_groups_and_none_for_unknown, ::test_marginal_insufficient_below_min_samples, ::test_marginal_verdicts_valuable_costly_harmful, ::test_redundancy_pairs_and_script_overlap, ::test_cli_by_model_and_strategy. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 06:05) after spec review T-0931 (request_changes), binding on top of v1:\n- orchestrator/skill_scorecard.py and tests/test_skill_scorecard.py already exist (from T-0894 and T-0913) and are EXTENDED, never replaced: add usage_rows/by_skill/marginal/redundancy next to the existing build()/format_report(); the three existing tests (test_use_rate_and_overhead_ratio_per_skill, test_skill_tokens_per_accepted_task, test_skill_recovery_rate_and_reduction) must keep passing and are listed in acceptance.\n- CLI grouping: a new flag `--group-by <dims>` (comma-separated, validated against the allowed dimension names role, task_class, band, model, strategy, repo) applies to --skills mode only; the existing single-choice `--by` is untouched. `--marginal <skill>` and `--redundancy` remain as specified.\n- redundancy()'s overlap proxy reads .orchestrator/runs/jev/gate.jsonl rows directly (fields session, task, tool, tool_target) and joins them to runs by task id; read_economy.summary() is not used for this.\n- Acceptance adds: the three existing tests stay green; tests/test_skill_scorecard.py::test_cli_by_model_and_strategy uses --group-by.\n\nSPEC v3 (2026-09-23 06:45) after spec review T-0934 (round 2; three points folded in, further review waived by the Planner, verdict set to approve):\n- redundancy() overlap proxy, precise: for each skill build its aggregate path-set from gate rows of runs where that skill was the ONLY skill used (single-skill runs); the overlap of a pair = |A \u2229 B| / |A \u222a B| over those aggregate sets; co-use count is reported separately from runs where both were used; when either skill has no single-skill runs the overlap is None with note \"no single-skill runs\".\n- usage_rows() resolves each run's owning execute-root lineage with the same task-graph membership logic as strategy._root_id (walk fix_round_for and inputs/parent links to the execute root of the task graph), so scout, spec_review and review runs inherit the outcome of the execute root they served; runs with no execute root keep outcome None.\n- CLI: --group-by, --marginal and --redundancy passed without --skills are rejected with ap.error in the existing mode-conflict style; an unknown --group-by dimension is rejected the same way. Test tests/test_skill_scorecard.py::test_cli_rejects_skill_flags_without_skills_mode.",
+  "inputs": [
+    "T-0938"
+  ],
+  "acceptance": [
+    "tests/test_skill_scorecard.py::test_usage_rows_join_lineage_outcomes_and_dimensions passes",
+    "tests/test_skill_scorecard.py::test_by_skill_groups_and_none_for_unknown passes",
+    "tests/test_skill_scorecard.py::test_marginal_insufficient_below_min_samples passes",
+    "tests/test_skill_scorecard.py::test_marginal_verdicts_valuable_costly_harmful passes",
+    "tests/test_skill_scorecard.py::test_redundancy_pairs_and_script_overlap passes",
+    "tests/test_skill_scorecard.py::test_cli_by_model_and_strategy passes",
+    "docs/skill-intelligence/05-scorecard.md exists; `uv run orchestrator scorecard --skills --redundancy` runs; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_scorecard.py::test_use_rate_and_overhead_ratio_per_skill passes",
+    "tests/test_skill_scorecard.py::test_skill_tokens_per_accepted_task passes",
+    "tests/test_skill_scorecard.py::test_skill_recovery_rate_and_reduction passes",
+    "tests/test_skill_scorecard.py::test_cli_rejects_skill_flags_without_skills_mode passes"
+  ],
+  "scope": [
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/cli.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_skill_scorecard.py",
+    "docs/skill-intelligence/05-scorecard.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0943",
+  "codex_thread": null,
+  "result": {
+    "summary": "Core logic, tests, docs, and CLI wiring match SPEC v2/v3 (group-by validation, mode-conflict rejection, marginal verdict rules, execute-root lineage walk, single-skill-run overlap definition). The one substantive defect is the tool-name casing mismatch in redundancy()'s gate-row filter, which makes the overlap proxy permanently return None on real data while the test suite (using synthetic lowercase tool names) masks it.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/skill_scorecard.py",
+        "line": 277,
+        "issue": "redundancy()'s tool filter checks row.get(\"tool\") against lowercase (\"read\",\"search\",\"find\"), but the actual jev_gate.py hook logs the raw Claude tool_name verbatim (\"Read\",\"Grep\",\"Glob\",\"Edit\",\"Write\",\"Bash\" \u2014 see jev_gate.py:140 and :344, no .lower() anywhere). In production gate.jsonl this filter never matches, so `paths` stays empty for every skill and overlap is always None with note \"no single-skill runs\", even when real single-skill runs with read activity exist. The unit test only passes because it fabricates gate rows with tool:\"read\" (lowercase), which doesn't reflect real data, so the bug is undetected by the suite. This silently defeats the P16 redundancy overlap proxy \u2014 one of this task's core deliverables \u2014 for all real usage.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "47e02728f227",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790118194.043652,
+      "reviewed_sha": "b7e8075b8941ed9d2bf94a167a0709536ea7c0b1"
+    },
+    {
+      "ts": 1790118197.783042,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0943",
+      "claimed_at": 1790118197.782709
+    },
+    {
+      "ts": 1790118197.784439,
+      "account": "B"
+    },
+    {
+      "ts": 1790118198.5303411,
+      "pid": 2326,
+      "account": "B"
+    },
+    {
+      "ts": 1790118277.0625029,
+      "status": "done",
+      "result": {
+        "summary": "Core logic, tests, docs, and CLI wiring match SPEC v2/v3 (group-by validation, mode-conflict rejection, marginal verdict rules, execute-root lineage walk, single-skill-run overlap definition). The one substantive defect is the tool-name casing mismatch in redundancy()'s gate-row filter, which makes the overlap proxy permanently return None on real data while the test suite (using synthetic lowercase tool names) masks it.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/skill_scorecard.py",
+            "line": 277,
+            "issue": "redundancy()'s tool filter checks row.get(\"tool\") against lowercase (\"read\",\"search\",\"find\"), but the actual jev_gate.py hook logs the raw Claude tool_name verbatim (\"Read\",\"Grep\",\"Glob\",\"Edit\",\"Write\",\"Bash\" \u2014 see jev_gate.py:140 and :344, no .lower() anywhere). In production gate.jsonl this filter never matches, so `paths` stays empty for every skill and overlap is always None with note \"no single-skill runs\", even when real single-skill runs with read activity exist. The unit test only passes because it fabricates gate rows with tool:\"read\" (lowercase), which doesn't reflect real data, so the bug is undetected by the suite. This silently defeats the P16 redundancy overlap proxy \u2014 one of this task's core deliverables \u2014 for all real usage.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "47e02728f227",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790118277.06346,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790118277.140934,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "b7e8075b8941ed9d2bf94a167a0709536ea7c0b1",
+        "packet_version": "47e02728f227",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "b7e8075b8941ed9d2bf94a167a0709536ea7c0b1",
+      "packet_version": "47e02728f227",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "b7e8075b8941ed9d2bf94a167a0709536ea7c0b1",
+  "claimed_at": 1790118197.782709,
+  "account": "B",
+  "pid": 2326,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "b7e8075b8941ed9d2bf94a167a0709536ea7c0b1",
+    "packet_version": "47e02728f227",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "47e02728f227",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

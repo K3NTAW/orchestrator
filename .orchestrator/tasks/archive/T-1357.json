@@ -1,0 +1,220 @@
+{
+  "id": "T-1357",
+  "created_at": 1790194322.855287,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S2b: capacity admission and fallback treat provider=\"claude\" rows as Claude capacity; README plug-and-play",
+  "spec": "Goal T-1334 (S1 T-1352 merged). Replaces the capacity half of T-1353 after its spec review T-1355. The daemon's dispatch capacity (capacity.snapshot capacity.py:9, eligible_executors_from_snapshot :54, admit :101, used at daemon.py:806) and fallback mode (snapshot \"fallback\" :45, daemon._codex_available daemon.py:454) treat every row like a Codex row, so a claude row would ignore max_parallel_claude_workers and could mask fallback.\n\n1. capacity.snapshot: each executor row carries \"provider\" (pool executor provider). snapshot stays read-only (no state-rolling calls).\n2. One definition, used by eligible_executors_from_snapshot, admit, _reason and the snapshot \"fallback\" flag: a claude row is usable only when it is not cooling and at least one snapshot account has cooling_s == 0; codex rows unchanged. fallback = there are enabled execute rows and none is usable.\n3. admit: claude rows draw from one shared counter free[\"claude_rows\"] = snapshot[\"claude_workers_free\"] in addition to their own row \"free\"; an admission onto a claude row decrements both. The legacy \"claude\" fallback pseudo-executor keeps using free[\"claude\"] as today. _reason returns \"account_capacity\" when a claude row is otherwise eligible but the shared counter is 0.\n4. daemon._codex_available (daemon.py:454): same rule through the pool: a claude row counts only when not cooling and Pool.pick(\"execute\") returns an account.\n5. README.md \"Executors and routing\" (README.md:278): provider=\"claude\" rows (id, full model id, quota_group, roles, complexity band, max_parallel), Claude headroom from [[claude_accounts]] and [limits].max_parallel_claude_workers, reviewer never runs the executing model (S1), and the plug-and-play recipe: add a row to add a model; enabled=false on every codex row to run without Codex.\nTests (unittest.TestCase methods): two ready tasks, one shared Claude slot -> one admitted, one deferred account_capacity; claude row excluded when every account cools; all codex rows cooling + healthy claude row -> fallback False and the claude row eligible; codex-only snapshots give the same admit result as before (hard-coded expected ids); _codex_available with a claude row with and without headroom. No pool.toml edit, no new dependencies. Additive; git revert restores the old admission.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_capacity.py::test_claude_rows_share_claude_worker_slots",
+    "tests/test_capacity.py::test_claude_row_unusable_when_every_account_cools",
+    "tests/test_capacity.py::test_healthy_claude_row_prevents_fallback",
+    "tests/test_capacity.py::test_codex_only_admission_unchanged",
+    "tests/test_daemon.py::test_codex_available_counts_claude_row_with_headroom",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_capacity.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-1352"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1353",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/executor.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Uses S1: Pool.executor_identity, Pool.is_claude_executor. Snapshot executor rows gain 'provider'. S2a (dispatch) is independent: executor.py, spawn.py."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790194327.534624,
+      "pipeline": {
+        "first_ready_at": 1790194327.5345469
+      }
+    },
+    {
+      "ts": 1790194327.763055,
+      "pipeline": {
+        "first_ready_at": 1790194327.5345469,
+        "spec_review_at": 1790194327.762857,
+        "spec_review_at_lease": 1790195227.762857
+      }
+    },
+    {
+      "ts": 1790194327.771963,
+      "pipeline": {
+        "first_ready_at": 1790194327.5345469,
+        "spec_review_at": 1790194327.762857,
+        "spec_review_at_lease": 1790195227.762857,
+        "spec_review_at_done": 1790194327.771838
+      }
+    },
+    {
+      "ts": 1790194381.551945,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "Item 2 defines claude usability as 'some snapshot account has cooling_s == 0', but item 4 uses Pool.pick('execute'). pick also checks execute affinity, daily budget and the utilization ceiling minus reserve. An account that is not cooling but is over budget or at its ceiling makes the snapshot say usable and the daemon say unavailable. The snapshot 'fallback' flag and daemon._fallback_mode then disagree, and the admit path can pick a claude row that eligible_executors would reject.",
+          "severity": "high",
+          "line": 45
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "admit filters candidates with free.get(executor_id) > 0, which only checks the row's own counter. The shared free['claude_rows'] check is not placed anywhere. The imminent-reservation logic (`free[executor_id] == 1`, imminent_sets from eligible_executors_from_snapshot) also ignores the shared counter, so a claude row can be chosen when the pool is at 0, or reserved when the shared slot is really the limit. choice_key sorts on the row's free only. The spec lists no insertion point for the check in the `available` list, the reservation blocker or choice_key.",
+          "severity": "high",
+          "line": 126
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "claude_workers_free comes from running_claude_workers, which only counts bus tasks whose assigned_to or executor starts with 'claude:'. If claude-row executor ids do not carry that prefix (daemon.py:1100 and :1272 resolve claude rows via executor_identity), running claude-row tasks never reduce the shared counter. The row's own free is decremented but the shared cap is never enforced, and the required test can pass on synthetic snapshots while production stays unbounded. running_claude_workers and inflight_claude_dispatches may need to change, and the spec doesn't name them. daemon.py is in scope, but the spec must state this.",
+          "severity": "high",
+          "line": 43
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "When every execute row is unusable, fallback is True and the legacy 'claude' pseudo-executor is offered. That pseudo-executor draws on the same Claude accounts as the claude rows. Under the new definition, 'all accounts cooling' sets fallback True and offers Claude capacity that cannot run. The spec does not say what _reason returns in that case (cooldown vs account_capacity). It also does not say whether the shared claude_workers_free counter and the legacy free['claude'] count the same running tasks, which risks double counting.",
+          "severity": "med",
+          "line": 57
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "Adding 'provider' to snapshot rows is not backward safe. concurrency.py and speculation.py consume snapshots, and speculation.py:96 mentions a smaller public row shape. Existing tests and callers build rows without 'provider'. Reads must use row.get('provider', 'codex'). Otherwise the codex-only regression test fails on missing keys, or a missing provider is silently treated as claude.",
+          "severity": "med",
+          "line": 17
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_codex_available now calls Pool.pick('execute') from the daemon. pick calls a.utilization, which can roll the window. It is also called once per row unless memoized, and the name no longer describes the behaviour. Pool.eligible_executors caches headroom once per call and the new code should do the same. The spec does not say to rename the function or memoize.",
+          "severity": "low",
+          "line": 455
+        },
+        {
+          "path": "tests/test_capacity.py",
+          "issue": "The acceptance tests cover the shared slot, all-accounts-cooling and no-fallback cases. None cover: account not cooling but over budget or at its ceiling (the snapshot vs pick divergence), a claude row plus the imminent reservation, the day-budget or complexity band on claude rows, or a real running claude-row task reducing claude_workers_free. Those are the main risk paths.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790194407.6082702,
+      "pipeline": {
+        "first_ready_at": 1790194327.5345469,
+        "spec_review_at": 1790194327.762857,
+        "spec_review_at_lease": 1790195227.762857,
+        "spec_review_at_done": 1790194327.771838,
+        "spec_review_held_at": 1790194407.608212
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790194409.204663,
+      "pipeline": {
+        "first_ready_at": 1790194327.5345469,
+        "spec_review_at": 1790194327.762857,
+        "spec_review_at_lease": 1790195227.762857,
+        "spec_review_at_done": 1790194327.771838,
+        "spec_review_held_at": 1790194407.608212,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790194409.316261,
+      "pipeline": {
+        "first_ready_at": 1790194327.5345469,
+        "spec_review_at": 1790194327.762857,
+        "spec_review_at_lease": 1790195227.762857,
+        "spec_review_at_done": 1790194327.771838,
+        "spec_review_held_at": 1790194407.608212,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790194407.6082702": true
+        }
+      }
+    },
+    {
+      "ts": 1790194474.799786,
+      "status": "superseded",
+      "hold_reason": "respec after spec review T-1359: one advisory usable-row rule, shared slot in available/blocker, provider via .get"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790194327.5345469,
+    "spec_review_at": 1790194327.762857,
+    "spec_review_at_lease": 1790195227.762857,
+    "spec_review_at_done": 1790194327.771838,
+    "spec_review_held_at": 1790194407.608212,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790194407.6082702": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "Item 2 defines claude usability as 'some snapshot account has cooling_s == 0', but item 4 uses Pool.pick('execute'). pick also checks execute affinity, daily budget and the utilization ceiling minus reserve. An account that is not cooling but is over budget or at its ceiling makes the snapshot say usable and the daemon say unavailable. The snapshot 'fallback' flag and daemon._fallback_mode then disagree, and the admit path can pick a claude row that eligible_executors would reject.",
+      "severity": "high",
+      "line": 45
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "admit filters candidates with free.get(executor_id) > 0, which only checks the row's own counter. The shared free['claude_rows'] check is not placed anywhere. The imminent-reservation logic (`free[executor_id] == 1`, imminent_sets from eligible_executors_from_snapshot) also ignores the shared counter, so a claude row can be chosen when the pool is at 0, or reserved when the shared slot is really the limit. choice_key sorts on the row's free only. The spec lists no insertion point for the check in the `available` list, the reservation blocker or choice_key.",
+      "severity": "high",
+      "line": 126
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "claude_workers_free comes from running_claude_workers, which only counts bus tasks whose assigned_to or executor starts with 'claude:'. If claude-row executor ids do not carry that prefix (daemon.py:1100 and :1272 resolve claude rows via executor_identity), running claude-row tasks never reduce the shared counter. The row's own free is decremented but the shared cap is never enforced, and the required test can pass on synthetic snapshots while production stays unbounded. running_claude_workers and inflight_claude_dispatches may need to change, and the spec doesn't name them. daemon.py is in scope, but the spec must state this.",
+      "severity": "high",
+      "line": 43
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "When every execute row is unusable, fallback is True and the legacy 'claude' pseudo-executor is offered. That pseudo-executor draws on the same Claude accounts as the claude rows. Under the new definition, 'all accounts cooling' sets fallback True and offers Claude capacity that cannot run. The spec does not say what _reason returns in that case (cooldown vs account_capacity). It also does not say whether the shared claude_workers_free counter and the legacy free['claude'] count the same running tasks, which risks double counting.",
+      "severity": "med",
+      "line": 57
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "Adding 'provider' to snapshot rows is not backward safe. concurrency.py and speculation.py consume snapshots, and speculation.py:96 mentions a smaller public row shape. Existing tests and callers build rows without 'provider'. Reads must use row.get('provider', 'codex'). Otherwise the codex-only regression test fails on missing keys, or a missing provider is silently treated as claude.",
+      "severity": "med",
+      "line": 17
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_codex_available now calls Pool.pick('execute') from the daemon. pick calls a.utilization, which can roll the window. It is also called once per row unless memoized, and the name no longer describes the behaviour. Pool.eligible_executors caches headroom once per call and the new code should do the same. The spec does not say to rename the function or memoize.",
+      "severity": "low",
+      "line": 455
+    },
+    {
+      "path": "tests/test_capacity.py",
+      "issue": "The acceptance tests cover the shared slot, all-accounts-cooling and no-fallback cases. None cover: account not cooling but over budget or at its ceiling (the snapshot vs pick divergence), a claude row plus the imminent reservation, the day-budget or complexity band on claude rows, or a real running claude-row task reducing claude_workers_free. Those are the main risk paths.",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "hold_reason": "respec after spec review T-1359: one advisory usable-row rule, shared slot in available/blocker, provider via .get"
+}

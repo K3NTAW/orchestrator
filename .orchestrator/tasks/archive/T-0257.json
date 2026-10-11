@@ -1,0 +1,95 @@
+{
+  "id": "T-0257",
+  "parent": "T-0240",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: F7: bus.db() leaks one sqlite connection per call; ResourceWarnings from the leaks break test_handover's stderr count in the gate",
+  "spec": "Finding 2026-09-19 19:40 (T-0254 gate red three times on tests/test_handover.py::test_handover_survives_jev_exception with AssertionError 272..365 != 2): orchestrator/bus.py:42 db() opens a new sqlite3.Connection on every call and _save()/_event() (lines 50-59) call db().execute(...) without ever closing it, so every bus write leaks a connection until garbage collection. Under `python -W always::ResourceWarning -m unittest tests.test_cli tests.test_handover` about 130 'ResourceWarning: unclosed database in <sqlite3.Connection>' lines appear; when the collector runs inside handover.write() while the test has redirect_stderr active, the test's assertion that stderr has exactly rank.call_count lines fails. It reproduces with tests.test_cli or tests.test_planner_runs before tests.test_handover (both gained tests that create many bus tasks in Phase F) and is invisible when test_handover runs alone.\nChange:\n1. orchestrator/bus.py: make the connection lifetime explicit. Either a module-level cached connection per STATE path (re-opened when STATE changes, which tests do) that is closed at interpreter exit via atexit, or db() as a contextlib.contextmanager that closes on exit, with _save/_event/and every other db() caller using `with db() as c:`. Pick the smaller diff that leaves zero unclosed connections; keep create-table-if-not-exists semantics and isolation_level=None. Search the package for every db() caller (grep \"db()\" orchestrator/ tests/ .claude/) and adapt them.\n2. tests/test_bus.py (create if absent): test_db_leaves_no_unclosed_connection: run a few create_task/update/post_result calls under warnings.catch_warnings(record=True) with simplefilter('always', ResourceWarning) followed by gc.collect(), assert no ResourceWarning mentioning sqlite3.Connection was recorded.\n3. tests/test_handover.py::test_handover_survives_jev_exception (about line 314): count only the lines that start with 'handover:' instead of every stderr line, so an unrelated warning from garbage collection cannot fail this test again; keep the rank.call_count == 2 assertion.\nReport in the final message the number of db() call sites changed and the ResourceWarning count before and after under -W always::ResourceWarning for tests.test_cli tests.test_handover.",
+  "inputs": [
+    "T-0256"
+  ],
+  "acceptance": [
+    "tests/test_bus.py::test_db_leaves_no_unclosed_connection passes",
+    "uv run --project . python -W always::ResourceWarning -m unittest tests.test_cli tests.test_handover prints zero lines containing 'unclosed database' and the suite passes",
+    "uv run --project . python -m unittest tests.test_planner_runs tests.test_handover passes (the pair that failed before)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "tests/test_bus.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0257",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/bus.py",
+        "line": 55,
+        "issue": "atexit.register(_close_db) closes the shared connection without acquiring _connection_lock. If a daemon worker thread is still mid-execute() against the bus during interpreter shutdown, this can race and raise sqlite3.ProgrammingError('Cannot operate on a closed database'). Narrow window, not covered by the given acceptance tests, but worth a lock/guard given the code's own comment that worker threads share this connection.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789839000.9471931,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0257",
+      "claimed_at": 1789839000.946795
+    },
+    {
+      "ts": 1789839000.948834,
+      "account": "B"
+    },
+    {
+      "ts": 1789839000.9914298,
+      "pid": 6847,
+      "account": "B"
+    },
+    {
+      "ts": 1789839188.077604,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/bus.py",
+            "line": 55,
+            "issue": "atexit.register(_close_db) closes the shared connection without acquiring _connection_lock. If a daemon worker thread is still mid-execute() against the bus during interpreter shutdown, this can race and raise sqlite3.ProgrammingError('Cannot operate on a closed database'). Narrow window, not covered by the given acceptance tests, but worth a lock/guard given the code's own comment that worker threads share this connection.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789839188.0809941,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789839000.946795,
+  "account": "B",
+  "pid": 6847,
+  "review_verdict": "approve"
+}

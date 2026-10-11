@@ -1,0 +1,154 @@
+{
+  "id": "T-0286",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "G6 v3: stage leases with explicit field mapping, pre-lease stamps left alone, dispatched_at recovery limited to the stamp-to-spawn window, gated_at reconciled against reviews_expected (spec reviews T-0269 and T-0282 folded in)",
+  "spec": "Replaces T-0281 (spec review T-0282 request_changes) and T-0268 (T-0269). Problem unchanged: daemon.stamp() claims pipeline.<field> under bus.locked() before a stage acts and nothing clears it, so a crash between stamp and action wedges the task.\nDesign:\n1. Field mapping: for each claim field F in {dispatched_at, spec_review_at, gated_at, merged_at}, stamp(tid, F, ...) also writes pipeline.<F>_lease = now + [daemon].stage_lease_s (pool.toml, default 900), and complete(tid, F) writes pipeline.<F>_done = now, both under the lock. Callers pass the same F strings as today. A stamp that also sets status=held (review_held_at, spec_review_held_at, gate()'s worktree-missing, dirty-scope and gate_red branches) writes no lease.\n2. complete() calls: dispatch right after spawn_async is issued; spec_review after bus.create_task returns; gate after the review tasks exist or the direct merge returned; merge_reviewed after merge.merge returns whatever its status.\n3. sweep_leases(), first in tick(), considers only tasks with status queued, running or done and only stages that carry a <F>_lease key: a stamp without a lease key predates this change and is never reconciled (its action ran synchronously under the old code). For a leased stage with no <F>_done and an expired lease:\n   - dispatched_at: only when status is still queued (never running): clear dispatched_at and its lease so dispatch() re-runs. A running task is the existing dead-pid requeue's responsibility; Codex runs have no pid on the bus, so this branch protects exactly the stamp-to-spawn_async window and the README says so.\n   - spec_review_at: if a spec_review task with inputs[0] == id exists, mark done; else clear.\n   - gated_at: count review tasks with inputs[0] == id against pipeline.reviews_expected; if already_merged(), mark done and set merged_into; if the count equals reviews_expected, mark done; if fewer, create the missing reviews through the same helper gate() uses (spawn the review, same tier rules) and then mark done; if reviews_expected is unset, clear gated_at so gate() re-runs.\n   - merged_at: if already_merged(), mark done and set merged_into; else increment pipeline.merge_retries and clear merged_at so merge_reviewed() retries; at merge_retries 2 hold with hold_reason 'merge lease expired twice' (a held task is never touched again by the status filter).\n4. pool.toml [daemon] stage_lease_s = 900 with a comment; README Pipeline: replace the crash-and-retry sentence with the lease, done marker, pre-lease exemption, dispatched_at window and held-task exclusion.\n5. Tests in tests/test_daemon.py: test_lease_dispatch_rerun_only_when_queued, test_lease_spec_review_rerun, test_lease_gate_creates_missing_second_review (code_review='always', complexity at two_reviews_from, crash between the two create_task calls), test_lease_gate_done_when_count_matches, test_lease_merge_retry_then_hold, test_lease_reconciles_already_merged, test_sweep_skips_held_tasks, test_sweep_skips_prelease_stamps (a task stamped without a lease key is untouched), test_hold_stamps_have_no_lease. Every existing test stays green; the harness runs spawn_async synchronously.",
+  "inputs": [
+    "T-0263",
+    "T-0269",
+    "T-0282"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_lease_dispatch_rerun_only_when_queued, ::test_lease_spec_review_rerun, ::test_lease_gate_creates_missing_second_review, ::test_lease_gate_done_when_count_matches, ::test_lease_merge_retry_then_hold, ::test_lease_reconciles_already_merged, ::test_sweep_skips_held_tasks, ::test_sweep_skips_prelease_stamps, ::test_hold_stamps_have_no_lease pass",
+    "every existing test_daemon test passes unchanged in intent",
+    "pool.toml documents [daemon].stage_lease_s and README describes the lease rules including the pre-lease exemption and the dispatched_at window",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789845749.93347,
+      "pipeline": {
+        "spec_review_at": 1789845749.933425
+      }
+    },
+    {
+      "ts": 1789846046.5997,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "gated_at reconciliation (design point 3) only counts review tasks against pipeline.reviews_expected. It never covers review_reason=='none' (reviews_expected=0, the direct-merge branch at line 522: `report_merge(t[\"id\"], merge.merge(t[\"id\"])); continue`). If the daemon crashes after gate()'s stamp() but before that merge.merge() call runs, sweep_leases sees count(0)==reviews_expected(0) and marks gated_at done -- the merge itself never happens, and merge_reviewed() explicitly no-ops on a done execute task with zero reviews (`if not reviews: return`). The task is permanently done-but-unmerged with no path to recovery: the exact silent, worse-than-before wedge this task is meant to eliminate.",
+          "severity": "high",
+          "line": 522
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The tests_red retry branch of merge_reviewed (`pipeline.pop(\"merged_at\", None)`) only clears the claim timestamp, not the new merged_at_done/merged_at_lease keys complete()/stamp() would add. After a human un-holds the task and it re-enters done, stamp(t['id'],'merged_at') succeeds again (merged_at was popped) and creates a fresh claim+lease, but the stale merged_at_done from the failed attempt is still true. sweep_leases only reconciles a stage with 'no <F>_done', so it will never examine this new claim -- a crash mid this retry's merge.merge() call is permanently unhealed.",
+          "severity": "high",
+          "line": 661
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "spec_review_at and gated_at reconciliation treat 'a child task with inputs[0]==id exists' as proof the stage completed, but the real action is two steps: bus.create_task(...) then spawn_async(spawn.run_worker, id) (lines 358-361 for spec_review; 532-568 for review). A crash between those two sub-steps leaves the created spec_review/review task stuck 'queued' forever -- nothing else in the codebase sweeps stale queued spec_review/review tasks or times them out (only running tasks with a pid are reconciled). The lease sweep will mark the parent stage done and never revisit it, silently wedging the child task one level down instead of healing it.",
+          "severity": "med",
+          "line": 356
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Design point 3 says sweep_leases() runs 'first in tick()'. tick() currently loads review-policy globals (SPEC_REVIEW_TIER, SECURITY_REVIEW_TIER, DIRECT_MERGE_MAX, and presumably the new stage_lease_s) via _load_review_cfg(pool) after pool.tally_planner(). If sweep_leases is placed literally before that load, it reconciles gated_at (recreating missing reviews with tier rules) and computes lease expiry using stale or hardcoded-default config for that tick instead of the current pool.toml values.",
+          "severity": "med",
+          "line": 733
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The 'if reviews_expected is unset, clear gated_at' branch in the gated_at reconciliation is unreachable: reviews_expected is always written atomically with the lease inside the same stamp(pipeline_fields=...) call (line 514-515), and rule 3 already excludes any stamp lacking a lease key from being swept at all. There is no state in which a leased gated_at can have an unset reviews_expected.",
+          "severity": "low",
+          "line": 515
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "gated_at reconciliation compares the review-task count to reviews_expected with equality ('if the count equals reviews_expected, mark done'). A stray extra review (e.g. a race that created one more than expected) satisfies neither 'equals' nor 'fewer', so the task falls through every listed branch and is never marked done -- sweep_leases re-evaluates it every tick indefinitely.",
+          "severity": "low",
+          "line": 513
+        }
+      ]
+    },
+    {
+      "ts": 1789846058.994039,
+      "pipeline": {
+        "spec_review_at": 1789845749.933425,
+        "spec_review_held_at": 1789846058.993985
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789846103.5790458,
+      "reason": "superseded by G6 v4 after spec review T-0287; v4 runs at complexity 5 (spec review waived after three rounds); mark T-0268, T-0281, T-0286 done+merged_into when v4 merges so T-0272 (G7) becomes ready"
+    },
+    {
+      "ts": 1789847297.823377,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "superseded by G6 v4 T-0290 6105987",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789845749.933425,
+    "spec_review_held_at": 1789846058.993985
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "gated_at reconciliation (design point 3) only counts review tasks against pipeline.reviews_expected. It never covers review_reason=='none' (reviews_expected=0, the direct-merge branch at line 522: `report_merge(t[\"id\"], merge.merge(t[\"id\"])); continue`). If the daemon crashes after gate()'s stamp() but before that merge.merge() call runs, sweep_leases sees count(0)==reviews_expected(0) and marks gated_at done -- the merge itself never happens, and merge_reviewed() explicitly no-ops on a done execute task with zero reviews (`if not reviews: return`). The task is permanently done-but-unmerged with no path to recovery: the exact silent, worse-than-before wedge this task is meant to eliminate.",
+      "severity": "high",
+      "line": 522
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The tests_red retry branch of merge_reviewed (`pipeline.pop(\"merged_at\", None)`) only clears the claim timestamp, not the new merged_at_done/merged_at_lease keys complete()/stamp() would add. After a human un-holds the task and it re-enters done, stamp(t['id'],'merged_at') succeeds again (merged_at was popped) and creates a fresh claim+lease, but the stale merged_at_done from the failed attempt is still true. sweep_leases only reconciles a stage with 'no <F>_done', so it will never examine this new claim -- a crash mid this retry's merge.merge() call is permanently unhealed.",
+      "severity": "high",
+      "line": 661
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "spec_review_at and gated_at reconciliation treat 'a child task with inputs[0]==id exists' as proof the stage completed, but the real action is two steps: bus.create_task(...) then spawn_async(spawn.run_worker, id) (lines 358-361 for spec_review; 532-568 for review). A crash between those two sub-steps leaves the created spec_review/review task stuck 'queued' forever -- nothing else in the codebase sweeps stale queued spec_review/review tasks or times them out (only running tasks with a pid are reconciled). The lease sweep will mark the parent stage done and never revisit it, silently wedging the child task one level down instead of healing it.",
+      "severity": "med",
+      "line": 356
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Design point 3 says sweep_leases() runs 'first in tick()'. tick() currently loads review-policy globals (SPEC_REVIEW_TIER, SECURITY_REVIEW_TIER, DIRECT_MERGE_MAX, and presumably the new stage_lease_s) via _load_review_cfg(pool) after pool.tally_planner(). If sweep_leases is placed literally before that load, it reconciles gated_at (recreating missing reviews with tier rules) and computes lease expiry using stale or hardcoded-default config for that tick instead of the current pool.toml values.",
+      "severity": "med",
+      "line": 733
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The 'if reviews_expected is unset, clear gated_at' branch in the gated_at reconciliation is unreachable: reviews_expected is always written atomically with the lease inside the same stamp(pipeline_fields=...) call (line 514-515), and rule 3 already excludes any stamp lacking a lease key from being swept at all. There is no state in which a leased gated_at can have an unset reviews_expected.",
+      "severity": "low",
+      "line": 515
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "gated_at reconciliation compares the review-task count to reviews_expected with equality ('if the count equals reviews_expected, mark done'). A stray extra review (e.g. a race that created one more than expected) satisfies neither 'equals' nor 'fewer', so the task falls through every listed branch and is never marked done -- sweep_leases re-evaluates it every tick indefinitely.",
+      "severity": "low",
+      "line": 513
+    }
+  ],
+  "hold_reason": null,
+  "reason": "superseded by G6 v4 after spec review T-0287; v4 runs at complexity 5 (spec review waived after three rounds); mark T-0268, T-0281, T-0286 done+merged_into when v4 merges so T-0272 (G7) becomes ready",
+  "merged_into": "goal/T-0260",
+  "merged_via": "superseded by G6 v4 T-0290 6105987"
+}

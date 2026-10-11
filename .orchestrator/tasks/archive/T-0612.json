@@ -1,0 +1,168 @@
+{
+  "id": "T-0612",
+  "created_at": 1789973900.195692,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R14a v3: jev_route active ranking (Phase I P5) \u2014 bounded Jev suitability adjustment on hypothetical()'s single favoured executor, shrunk by a shared per-class sample count; cold start and failure reproduce baseline",
+  "spec": "Why: [jev.routing].mode accepts \"active\" but jev_route.shadow_context (orchestrator/jev_route.py:165-176) only emits a notify() stub; hypothetical() (146-163) is the shadow heuristic. Phase I P5 requires active mode to modify ranking among eligible candidates as candidate_score = configured_weight x empirical_score x jev_suitability_adjustment, with extreme probabilities unable to overwhelm strong empirical evidence, cold start safe, failure reproducing baseline. v3 after spec reviews T-0590 and T-0604.\nWhat (the executor.start hook that feeds adjusted scores into pool.pick_executor is a later integration task). Tests are unittest.TestCase methods in the named files.\n- scorecard.py: extract the resolved-task filter of class_success (scorecard.py:73-91: tasks with execute run rows, role execute, executor id, task_class, merged or failed) into a private helper _class_resolved(executor_id, task_class_name, root) -> list; class_success calls it and keeps its behaviour and signature; new class_sample_size(executor_id, task_class_name, root=STATE) -> int returns len(_class_resolved(...)). jev_route.evidence_for() adds \"n\": class_sample_size(...) per executor.\n- jev_route.adjustment(signals, evidence, eligible_ids, cfg) -> {executor_id: multiplier}. cfg [jev.routing] max_adjustment (default 0.25), evidence_floor_n (default 10). Exactly one favoured id per active branch, chosen by the same selection hypothetical() uses: branch A when max(substantial_reasoning, architectural, stronger_executor_helps) >= 0.6 -> the eligible id with the highest class_success (ties by id, ids with class_success None excluded); branch B when localized_simple >= 0.7 and elevated_risk < 0.3 -> the eligible id with the lowest expected_cost (None excluded, ties by id); branch A wins when both apply; no branch or no measurable id -> every multiplier 1.0. magnitude = max_adjustment x max(branch signal) x (confidence if confidence is not None else 0.5) x shrink, shrink = evidence_floor_n / (n_favoured + evidence_floor_n). The favoured id gets 1 + magnitude, every other eligible id gets 1.0 (never below 1 - max_adjustment, never above 1 + max_adjustment). Ids outside eligible_ids never appear; missing or malformed signals (non-numeric or outside [0, 1]) -> all 1.0.\n- jev_route.active_scores(task, pool, eligible, classification, evidence, base_scores=None) -> {executor_id: base x multiplier} only when [jev.routing].mode == \"active\"; base_scores None -> {id: 1.0 for eligible}; shadow/off return base_scores unchanged (or that 1.0 map when None); classification None, malformed signals or empty eligible -> base_scores unchanged (baseline reproduced).\n- shadow_context() keeps its shape and adds \"adjustment\" (computed for shadow and active) and \"active\": bool; the notify stub is removed; record_shadow logs adjustment and mode. No pool.toml edit; defaults in code and documented in the module docstring.",
+  "inputs": [
+    "T-0606"
+  ],
+  "acceptance": [
+    "tests/test_scorecard.py::test_class_sample_size_matches_class_success_filter \u2014 the count equals the number of resolved execute tasks class_success uses for that executor and class, and class_success's return values are unchanged",
+    "tests/test_jev_route.py::test_active_mode_adjusts_ranking_within_bounds \u2014 mode active, three eligible executors, signals favouring a stronger executor with confidence 0.9 and n 3 yield exactly one multiplier above 1.0 within [1.0, 1.25], the others 1.0, and the favoured executor's score rises relative to the rest",
+    "tests/test_jev_route.py::test_shadow_mode_never_changes_scores \u2014 mode shadow returns base_scores unchanged while shadow_context still reports the adjustment",
+    "tests/test_jev_route.py::test_extreme_probability_cannot_overturn_strong_evidence \u2014 signal 1.0 favouring executor B with n 2 against executor A with n 200, class_success 0.95 and a base score 30 percent higher leaves A ranked first",
+    "tests/test_jev_route.py::test_cold_start_default_scores_and_failure_reproduce_baseline \u2014 no evidence yields multipliers 1.0; base_scores None in active mode yields 1.0 per eligible executor before adjustment; classification None returns base_scores identical to the input",
+    "tests/test_jev_route.py::test_active_scores_never_add_ineligible_executor \u2014 an executor absent from eligible receives no score even when signals favour it"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    "orchestrator/scorecard.py",
+    "tests/test_jev_route.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0612",
+  "codex_thread": null,
+  "result": {
+    "summary": "Core logic (class_sample_size, adjustment, active_scores, shadow_context shape) matches the packet spec and acceptance tests appear satisfiable, but the diff leaves the notify stub in shadow_context() that the spec says to remove, and its message is now stale/misleading given P5 is implemented in this same change.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/jev_route.py",
+        "line": 222,
+        "issue": "Spec explicitly requires 'the notify stub is removed' from shadow_context(), but the notification_transition/notify call at lines 222-224 is still present and unchanged. Worse, its message text ('active ranking lands in P5') is now false: this very diff implements P5 active ranking (adjustment/active_scores), so the notification misleads operators into thinking active routing still isn't wired up when it is.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "63b7247f3dbe",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789973900.1965692,
+      "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319"
+    },
+    {
+      "ts": 1789973903.147927,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0612",
+      "claimed_at": 1789973903.147572
+    },
+    {
+      "ts": 1789973903.148899,
+      "account": "B"
+    },
+    {
+      "ts": 1789973903.5442739,
+      "pid": 57003,
+      "account": "B"
+    },
+    {
+      "ts": 1789973992.846622,
+      "status": "done",
+      "result": {
+        "summary": "Core logic (class_sample_size, adjustment, active_scores, shadow_context shape) matches the packet spec and acceptance tests appear satisfiable, but the diff leaves the notify stub in shadow_context() that the spec says to remove, and its message is now stale/misleading given P5 is implemented in this same change.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev_route.py",
+            "line": 222,
+            "issue": "Spec explicitly requires 'the notify stub is removed' from shadow_context(), but the notification_transition/notify call at lines 222-224 is still present and unchanged. Worse, its message text ('active ranking lands in P5') is now false: this very diff implements P5 active ranking (adjustment/active_scores), so the notification misleads operators into thinking active routing still isn't wired up when it is.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "63b7247f3dbe",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973992.847817,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789973992.880571,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+        "packet_version": "63b7247f3dbe",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+      "packet_version": "63b7247f3dbe",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+  "claimed_at": 1789973903.147572,
+  "account": "B",
+  "pid": 57003,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "b27a157715a6a542473b1c5d71d7fbcf2b889319",
+    "packet_version": "63b7247f3dbe",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "63b7247f3dbe",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,1875 @@
+{
+  "id": "T-1298",
+  "created_at": 1790178762.771934,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2d2 cache-aware tool and skill disclosure in shadow: stable Level-0 tool catalog view and stable skill catalog block, measured on the existing tool_disclosure and skill_selection rows (P9, P10)",
+  "spec": "orchestrator/tool_catalog.py exposes a pure function cache_view(role, keep, previous_row) returning {stable_catalog_chars (the Level-0 catalog: names and one-line purposes of every known tool for the role, identical across tasks), dynamic_chars (the selected Level-2 schemas), changed_since_previous (True, False, or None when previous_row is None)}; orchestrator/bus.py (scope), where tool_disclosure rows are written (near line 285), calls it and stores the three fields on the row; previous_row is the last tool_disclosure row of the same role among the most recent 200 decision_log rows (bounded read, no module state). Active presentation ([tool_disclosure].cache_mode active): the stable catalog text precedes the dynamic schemas in the tool disclosure text built for the packet. Skills: orchestrator/skill_router.py exposes catalog_block(role, registry) (sorted ids and triggers of every active skill for the role, identical across tasks); orchestrator/spawn.py (scope), where _prepare_skills builds the presented skills section, prepends that block ONLY when [skills].cache_mode is active, and always records catalog_chars and selected_chars on the existing skill_selection row. Both sections get cache_mode = \"shadow\" with dated comments and revert instructions, missing key means off, validated in pool (S2d1 adds the validation helper; reuse it), inert when the section's mode is off. Docs: sections 2 and 3 of docs/hermes-hardening/10-cache-aware-disclosure.md with a reproducible command (`orchestrator scorecard --economy --disclosure-cache`, scope orchestrator/cli.py) printing row counts, date range, mean stable vs dynamic chars and the share of runs whose dynamic list changed since the previous task of the role; when no rows exist the doc says so.\nSpec review T-1293 folded in: (1) One helper, two callers: tool_catalog.cache_view(role, kept_ids, previous_row) is pure; the two existing tool_disclosure row writers call it: spawn._shadow_tool_disclosure (Claude roles) and bus.log_run's Codex row; the escalation row (reason hidden_tool_requested) is left untouched and never used as a previous row. (2) previous_row = the most recent tool_disclosure row for the same role whose subject is a DIFFERENT task and which carries deterministic.kept; found through a new bounded helper decision_log.last_row(kind, *, role, exclude_subject, require_key) that reads only today's decision_log file from the end (scope adds orchestrator/decision_log.py and tests/test_decision_log.py); an older row without the new fields still qualifies as previous when it has kept; none found -> changed_since_previous None. (3) changed_since_previous compares the SETS of kept ids (order ignored). (4) Level-0 catalog = tool_catalog.level0(ids) rendered as one line per tool (name and purpose) over the role's static disclosed id list (no mcp measurements, so it is identical across tasks); Level-2 = the schema text tool_catalog.disclosed(role) already renders; the active ordering is applied in the spawn.py function that renders disclosed tools into the prompt (find it as the caller of tool_catalog.disclosed and name it in the docs), with an acceptance test asserting the stable block precedes the schemas only in active mode. (5) Skills: catalog_block is prepended inside spawn._prepare_skills as before; both cache_mode keys validated by the S2d1 helper pattern (a small cache_mode(cfg, section) in tool_catalog/skill_router, invalid -> off with invalid_config on the row).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1294"
+  ],
+  "acceptance": [
+    "tests/test_tool_catalog.py::test_cache_view_stable_across_tasks_and_changed_flag_none_first (identical stable text for two tasks of a role; changed flag None without a previous row, True/False with one)",
+    "tests/test_bus.py::test_tool_disclosure_row_carries_cache_view_fields",
+    "tests/test_skill_router.py::test_catalog_block_sorted_and_stable",
+    "tests/test_spawn.py::test_skill_catalog_block_only_in_active_cache_mode_and_chars_recorded",
+    "tests/test_cli.py::test_scorecard_disclosure_cache_summary",
+    "tests/test_decision_log.py::test_last_row_bounded_same_role_different_subject_with_kept",
+    "tests/test_spawn.py::test_active_tool_cache_mode_puts_stable_catalog_before_schemas_only_in_active",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/tool_catalog.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_tool_catalog.py",
+    "tests/test_bus.py",
+    "tests/test_skill_router.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/10-cache-aware-disclosure.md",
+    "orchestrator/decision_log.py",
+    "tests/test_decision_log.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1298",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/decision_log.py",
+        "issue": "last_row filters by role, but decision_log.record only sets a top-level role when the caller passes role=. Neither tool_disclosure writer (spawn.py:484, bus.py:290) passes it. The role sits in deterministic.role, so a filter on row['role'] matches nothing and previous_row is always None. The spec must say to match deterministic.role, or to make both writers pass role=.",
+        "severity": "high",
+        "line": 110
+      },
+      {
+        "path": "orchestrator/decision_log.py",
+        "issue": "last_row reads only today's decision_log file. After midnight (Europe/Zurich, or UTC, depending on schedlog) or on the first task of the day, changed_since_previous is None even when a previous row exists yesterday. The scorecard share then depends on when the run happened, and this is a silent fallback. The spec should either read yesterday's file as well (still bounded) or state the limitation in the docs and count None rows separately.",
+        "severity": "med",
+        "line": 169
+      },
+      {
+        "path": "orchestrator/bus.py",
+        "issue": "log_run writes a Codex tool_disclosure row on every codex event or attempt for a task, not once per task. Rows are duplicated per task, which skews the row counts, the mean stable and dynamic chars and the changed share in the scorecard. The spec should require one row per task or dedupe by subject in the scorecard. The Codex row also has candidates=['CODEX_TOOLS'] and no static disclosed id list. tool_catalog.disclosed('codex_execute') is unverified, so the spec should say what the Level-0 catalog is for codex_execute (stable_catalog_chars may be 0). The write sits inside a bare try/except that swallows errors, so a cache_view failure silently drops the whole existing row. Compute cache_view in its own guard so the existing row still gets written.",
+        "severity": "med",
+        "line": 285
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The spec says 'find it as the caller of tool_catalog.disclosed'. The real callers at spawn.py:469 and :1493 only build row candidates and do not render prompt text. It does not say which function builds the tool disclosure text for the packet, or whether one exists. It should name the function, or require the implementer to create it. The active-order acceptance test cannot be written without that. The second caller (spawn.py:1492, escalation row) must stay untouched.",
+        "severity": "med",
+        "line": 469
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "cache_mode(cfg, section) is added in both tool_catalog and skill_router, and the spec cites 'the S2d1 helper' as context_router.cache_mode. That helper raises ValueError, and spawn._context_mode wraps it to set invalid_config. The spec should say to reuse one shared helper, or how the two copies differ, so it does not create three divergent validators. It should also say that invalid config records invalid_config on the skill_selection and tool_disclosure rows, and that cache_mode is inert when the section's mode is off (tool_disclosure mode from promotion.mode, skill_routing mode).",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "The [tool_disclosure] and [skills] sections need a cache_mode key with a dated comment. Line 358 already has one for context_router, and a test_pool.py check for unknown keys or values may need updating. That test file is not in scope. Verify that adding the keys does not break it, or add tests/test_pool.py to scope.",
+        "severity": "low",
+        "line": 358
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "issue": "The scorecard spec does not define how rows with changed_since_previous None are counted. It should say the denominator for 'share of runs whose dynamic list changed' excludes None rows and that the None count is printed. It should also specify the date range source (row ts, ISO dates, Europe/Zurich), the zero-row output text, and whether Codex and Claude rows are pooled or split by role. The acceptance test should assert exact fields.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/decision_log.py",
+        "issue": "decision_log._bounded may truncate large rows. If it trims deterministic.kept, or the new char fields, then last_row's require_key check and the set comparison in changed_since_previous become unreliable. The spec should confirm the kept list survives _bounded, or add a test.",
+        "severity": "low",
+        "line": 68
+      }
+    ],
+    "suggested_spec_changes": [
+      "last_row must match role against deterministic.role (or the writers must pass role=), and the test must build rows through decision_log.record as the real writers do.",
+      "Decide and state the behavior at day rollover: read the previous day's file too (bounded), or document that None can mean 'no row today'.",
+      "Codex row: guard cache_view separately from the existing row write, define its Level-0 source (or 0), and dedupe per task or state that the scorecard counts distinct subjects.",
+      "Name the exact spawn.py function that renders tool schemas into the prompt, or say to add one, and keep the escalation row untouched (assert it in a test).",
+      "Specify one shared cache_mode validator, the invalid_config field on both rows, and that cache_mode is inert when the parent section mode is off. Add a test for invalid, missing and off values.",
+      "Scorecard: define the None handling in the denominator, the empty-state text, the ISO date range, and print the None count.",
+      "Add a rollback note: with cache_mode off or removed, behavior and prompt text are byte-identical to before, and the extra row fields are additive only."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790178764.535657,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790178766.483718,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1298",
+      "claimed_at": 1790178766.4833431
+    },
+    {
+      "ts": 1790178766.484895,
+      "account": "A"
+    },
+    {
+      "ts": 1790178767.510786,
+      "pid": 87112,
+      "account": "A"
+    },
+    {
+      "ts": 1790178805.526304,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d7bafde5-ed1e-4743-9a0f-c6c1292b7b36"
+      }
+    },
+    {
+      "ts": 1790178805.5518458,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d7bafde5-ed1e-4743-9a0f-c6c1292b7b36",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790178805.557245,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "ache_mode is off (fields still written, only the presentation is inert). State this explicitly, and say that stable_catalog_chars is computed from level0(disclosed(role)) even in shadow, with no prompt change.\",\"severity\":\"low\",\"line\":466}]\",\"suggested_spec_changes\":[\"Either drop the active-ordering requirement and its acceptance test from this task, or specify the exact new rendering path: which function builds the tool text in the packet, what the stable block and the dynamic block contain, and where they are inserted. As written the target function does not exist.\",\"Define dynamic_chars concretely (for example len(level0(kept)) or a sum over a named field), because no schema text exists in tool_catalog.CATALOG. Document the chosen proxy in section 2 of the doc so the scorecard numbers are interpretable.\",\"Reword fold-in (4): tool_catalog.disclosed(role) returns ids, not rendered schema text.\",\"Do not swallow exceptions around cache_view and last_row in bus.log_run. Either narrow the except so the row is still written with the three fields set to None and invalid_config or error marked, or add a test that a last_row failure still yields a row.\",\"Specify the last_row read bound (max bytes or lines from the end), tolerance for a truncated trailing line, and the day-boundary behavior. Exclude None from the denominator of the changed-share and print that count in the scorecard.\",\"Clarify whether Codex rows count in the changed-share, or compute the share per role and exclude codex_execute.\",\"Reuse or unify the cache_mode validation with context_router.cache_mode instead of adding a differently-behaving same-named helper. Add a pool.toml test in tests/test_pool.py for the two new keys, since pool.toml is in scope and its existing test is listed as present.\",\"Add rollback notes: dated comments in pool.toml for both new sections stating that setting cache_mode to off restores prior behavior, and state that shadow rows without the new fields stay readable by scorecard.\"]}"
+      }
+    },
+    {
+      "ts": 1790178807.379112,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 1
+      },
+      "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)"
+    },
+    {
+      "ts": 1790178899.7443929,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 1,
+        "respawned_at": 1790178899.522202,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790178902.577801,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790178903.808126,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1298",
+      "claimed_at": 1790178903.8078148
+    },
+    {
+      "ts": 1790178903.809141,
+      "account": "A"
+    },
+    {
+      "ts": 1790178904.602096,
+      "pid": 96890,
+      "account": "A"
+    },
+    {
+      "ts": 1790178943.352766,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "e78dc6c3-0106-4307-8bb9-1485d45d7ba2"
+      }
+    },
+    {
+      "ts": 1790178943.37554,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "e78dc6c3-0106-4307-8bb9-1485d45d7ba2",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 1,
+        "respawned_at": 1790178899.522202,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790178943.3811781,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "tradicts it.\",\"severity\":\"low\",\"line\":1493},{\"path\":\".orchestrator/pool.toml\",\"issue\":\"The existing cache_mode = shadow at line 359 sits under context_router, before the [tool_disclosure] header at line 361. New keys must go inside [tool_disclosure] and [skills] (line 435), not next to it. The spec does not require a test in tests/test_pool.py that an invalid or missing value gives off, and test_pool.py is not in scope.\",\"severity\":\"low\",\"line\":358}]],\"suggested_spec_changes\":[\"Name the real insertion point. Either add a new function in spawn.py that renders the disclosed tools into the packet, with an explicit call site, or drop the active-ordering criterion and the stable-before-schemas test. As written, the acceptance test cannot be satisfied without inventing new prompt-building code.\",\"Define dynamic_chars exactly. For example: len of tool_catalog.level0(kept_ids) for Level-2, or a new schema-text renderer. Also define stable_catalog_chars as len(level0(disclosed(role))) and state that neither uses est_schema_tokens.\",\"For codex_execute, either skip cache_view fields on the Codex row (write None) or exclude codex_execute from the scorecard means and changed-share. Do not compute changed_since_previous from a constant list.\",\"Specify cache_mode(cfg, section) as a wrapper around or replacement for context_router.cache_mode. It should return (mode, invalid_config) instead of raising. Add a tests/test_pool.py or tests/test_tool_catalog.py case covering missing, invalid and valid values. Put the keys under [tool_disclosure] and [skills] with dated comments and revert lines.\",\"State the scorecard edge cases. Rows with changed_since_previous None are excluded from the share denominator, and the doc reports both counts. An empty result prints 'no rows'. Say how last_row handles a missing file, an empty file and a malformed line.\",\"Remove the leftover 'most recent 200 decision_log rows' and 'keep' wording so the spec has a single contract (kept_ids, last_row helper).\"]}"
+      }
+    },
+    {
+      "ts": 1790178988.177865,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 2
+      },
+      "reason": "Planner sweeper: no parseable verdict; re-queued (retry 2)"
+    },
+    {
+      "ts": 1790179000.788341,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 2,
+        "respawned_at": 1790179000.6926,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790179001.790716,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790179002.604032,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1298",
+      "claimed_at": 1790179002.603704
+    },
+    {
+      "ts": 1790179002.605222,
+      "account": "A"
+    },
+    {
+      "ts": 1790179003.414408,
+      "pid": 2896,
+      "account": "A"
+    },
+    {
+      "ts": 1790179043.213802,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "53ab4460-06e7-486c-a00a-82c8bc82e220"
+      }
+    },
+    {
+      "ts": 1790179043.23793,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "53ab4460-06e7-486c-a00a-82c8bc82e220",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 2,
+        "respawned_at": 1790179000.6926,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790179043.244426,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "},{\"path\":\"docs/hermes-hardening/10-cache-aware-disclosure.md\",\"issue\":\"The docs acceptance is not verifiable as written. 'Sections 2 and 3' assumes the file already has section 1 from T-1282. Confirm it exists on this branch and extend it rather than creating it. The 'no rows exist' text is not covered by any listed test. test_scorecard_disclosure_cache_summary should also cover the empty case and the date range in Europe/Zurich ISO format.\",\"severity\":\"low\",\"line\":0}]],\"suggested_spec_changes\":[\"Replace 'reads only today's decision_log file from the end' with a bounded tail read of decisions.jsonl (last N bytes or the last 200 rows, malformed lines skipped), and test it against a file larger than the bound.\",\"Drop or redefine the active ordering criterion. Either add a new small function in spawn.py that renders a tool disclosure block into the prompt (gated by tool_disclosure.cache_mode active, shadow and off unchanged) and name it, or record only the fields in this task and defer active presentation. The test must exercise the real insertion point.\",\"State how role is matched in last_row (deterministic.role vs top-level role) and have both writers set it consistently. Also state that the escalation row is excluded by the kept requirement, and test that.\",\"Define dynamic_chars as the length of the schema text for kept ids only, and define the Codex row values explicitly (0 and 0, or the row is skipped) so the scorecard means are not skewed. Log cache_view failures on the Codex path rather than swallowing them silently.\",\"Specify the cache_mode validation helpers as new functions returning (mode, invalid_config) and where invalid_config is stored on each row, or widen scope to context_router.py. Add tests for the missing-key, off and invalid paths that assert output identical to the pre-change behaviour.\",\"Add tests/test_pool.py to scope if pool validation changes, and add a rollback note: set cache_mode = 'off' or remove the key to revert to current behaviour.\"]}"
+      }
+    },
+    {
+      "ts": 1790179167.796947,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 0
+      },
+      "reason": "Planner: third attempt after two no-verdict runs; approve by waiver if this one fails too"
+    },
+    {
+      "ts": 1790179167.99696,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 0,
+        "respawned_at": 1790179167.746728,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790179170.892571,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790179172.2491882,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1298",
+      "claimed_at": 1790179172.2488089
+    },
+    {
+      "ts": 1790179172.250518,
+      "account": "A"
+    },
+    {
+      "ts": 1790179173.0497139,
+      "pid": 25317,
+      "account": "A"
+    },
+    {
+      "ts": 1790179227.060004,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3c32f7b3-bbfa-491f-a60d-47e1231af3df"
+      }
+    },
+    {
+      "ts": 1790179227.083022,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3c32f7b3-bbfa-491f-a60d-47e1231af3df",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 0,
+        "respawned_at": 1790179167.746728,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790179227.08941,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "ure].cache_mode == active (with mode also active), and name it in the spec, or downgrade active tool mode to a recorded no-op until a renderer exists. Rewrite the acceptance test to match.\",\"Say where the skills catalog is prepended. It must happen only when skill_routing is active, choice['mode'] is still active after the downgrade checks, and [skills].cache_mode is active. Record catalog_chars and selected_chars on the skill_selection row that _skill_routing writes, and say what is recorded when the section is empty.\",\"Reuse the S2d1 helper. Either add orchestrator/context_router.py to scope and generalize cache_mode(cfg, section='context_router') with invalid mapped to off plus invalid_config, or make the two per-module helpers one-line wrappers around it. Do not create parallel validators.\",\"Define dynamic_chars precisely, and state whether the compared set is choice['keep'] or the specialist-selected list. Say how Codex rows (fixed CODEX_TOOLS) are treated in the scorecard means and in the changed share (exclude them or report them per role).\",\"Require cache_view to be exception-safe at both call sites (catch inside the helper wrapper and leave the row written, marked invalid_config or with null fields). bus.log_run currently swallows all errors around the row write.\",\"Define last_row bounds (maximum lines or bytes read from the end of the file, skipping malformed lines), the timezone used to pick today's file, and the midnight-rollover behaviour (None). Have the doc state the caveat.\",\"Specify the scorecard flag's interplay with the existing mutual-exclusion and allowed-flag checks in cli.py (lines 362 and 377). Also specify the denominators (rows with non-None changed_since_previous) and the exact 'no rows' string that the test asserts.\",\"Add tests/test_pool.py (or whichever test validates pool.toml keys) to scope if a new key needs an allow-list entry. State the rollback as 'cache_mode = \\\"off\\\" (or delete the key) restores prior behaviour byte for byte'.\"]}"
+      }
+    },
+    {
+      "ts": 1790179229.117244,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 1
+      },
+      "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)"
+    },
+    {
+      "ts": 1790179237.0975208,
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 1,
+        "respawned_at": 1790179236.9830542,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790179238.673876,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790179239.6590211,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1298",
+      "claimed_at": 1790179239.658717
+    },
+    {
+      "ts": 1790179239.660362,
+      "account": "A"
+    },
+    {
+      "ts": 1790179240.392289,
+      "pid": 31890,
+      "account": "A"
+    },
+    {
+      "ts": 1790179277.714615,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "2079e371-d413-4908-9fe1-426410276e71"
+      }
+    },
+    {
+      "ts": 1790179277.738813,
+      "packet_meta": {
+        "chars": 6741,
+        "est_tokens": 1685,
+        "presented_tokens": 1685,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+          },
+          "spec": {
+            "chars": 4420,
+            "est_tokens": 1105,
+            "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+          },
+          "acceptance": {
+            "chars": 742,
+            "est_tokens": 185,
+            "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+          },
+          "scope": {
+            "chars": 398,
+            "est_tokens": 99,
+            "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 938,
+            "est_tokens": 234,
+            "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "5976c3a70dcf",
+        "version": "5976c3a70dcf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1294 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "2079e371-d413-4908-9fe1-426410276e71",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": [],
+        "verdict_retries": 1,
+        "respawned_at": 1790179236.9830542,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790179277.7447062,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/decision_log.py",
+            "issue": "last_row filters by role, but decision_log.record only sets a top-level role when the caller passes role=. Neither tool_disclosure writer (spawn.py:484, bus.py:290) passes it. The role sits in deterministic.role, so a filter on row['role'] matches nothing and previous_row is always None. The spec must say to match deterministic.role, or to make both writers pass role=.",
+            "severity": "high",
+            "line": 110
+          },
+          {
+            "path": "orchestrator/decision_log.py",
+            "issue": "last_row reads only today's decision_log file. After midnight (Europe/Zurich, or UTC, depending on schedlog) or on the first task of the day, changed_since_previous is None even when a previous row exists yesterday. The scorecard share then depends on when the run happened, and this is a silent fallback. The spec should either read yesterday's file as well (still bounded) or state the limitation in the docs and count None rows separately.",
+            "severity": "med",
+            "line": 169
+          },
+          {
+            "path": "orchestrator/bus.py",
+            "issue": "log_run writes a Codex tool_disclosure row on every codex event or attempt for a task, not once per task. Rows are duplicated per task, which skews the row counts, the mean stable and dynamic chars and the changed share in the scorecard. The spec should require one row per task or dedupe by subject in the scorecard. The Codex row also has candidates=['CODEX_TOOLS'] and no static disclosed id list. tool_catalog.disclosed('codex_execute') is unverified, so the spec should say what the Level-0 catalog is for codex_execute (stable_catalog_chars may be 0). The write sits inside a bare try/except that swallows errors, so a cache_view failure silently drops the whole existing row. Compute cache_view in its own guard so the existing row still gets written.",
+            "severity": "med",
+            "line": 285
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The spec says 'find it as the caller of tool_catalog.disclosed'. The real callers at spawn.py:469 and :1493 only build row candidates and do not render prompt text. It does not say which function builds the tool disclosure text for the packet, or whether one exists. It should name the function, or require the implementer to create it. The active-order acceptance test cannot be written without that. The second caller (spawn.py:1492, escalation row) must stay untouched.",
+            "severity": "med",
+            "line": 469
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "cache_mode(cfg, section) is added in both tool_catalog and skill_router, and the spec cites 'the S2d1 helper' as context_router.cache_mode. That helper raises ValueError, and spawn._context_mode wraps it to set invalid_config. The spec should say to reuse one shared helper, or how the two copies differ, so it does not create three divergent validators. It should also say that invalid config records invalid_config on the skill_selection and tool_disclosure rows, and that cache_mode is inert when the section's mode is off (tool_disclosure mode from promotion.mode, skill_routing mode).",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "The [tool_disclosure] and [skills] sections need a cache_mode key with a dated comment. Line 358 already has one for context_router, and a test_pool.py check for unknown keys or values may need updating. That test file is not in scope. Verify that adding the keys does not break it, or add tests/test_pool.py to scope.",
+            "severity": "low",
+            "line": 358
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "issue": "The scorecard spec does not define how rows with changed_since_previous None are counted. It should say the denominator for 'share of runs whose dynamic list changed' excludes None rows and that the None count is printed. It should also specify the date range source (row ts, ISO dates, Europe/Zurich), the zero-row output text, and whether Codex and Claude rows are pooled or split by role. The acceptance test should assert exact fields.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/decision_log.py",
+            "issue": "decision_log._bounded may truncate large rows. If it trims deterministic.kept, or the new char fields, then last_row's require_key check and the set comparison in changed_since_previous become unreliable. The spec should confirm the kept list survives _bounded, or add a test.",
+            "severity": "low",
+            "line": 68
+          }
+        ],
+        "suggested_spec_changes": [
+          "last_row must match role against deterministic.role (or the writers must pass role=), and the test must build rows through decision_log.record as the real writers do.",
+          "Decide and state the behavior at day rollover: read the previous day's file too (bounded), or document that None can mean 'no row today'.",
+          "Codex row: guard cache_view separately from the existing row write, define its Level-0 source (or 0), and dedupe per task or state that the scorecard counts distinct subjects.",
+          "Name the exact spawn.py function that renders tool schemas into the prompt, or say to add one, and keep the escalation row untouched (assert it in a test).",
+          "Specify one shared cache_mode validator, the invalid_config field on both rows, and that cache_mode is inert when the parent section mode is off. Add a test for invalid, missing and off values.",
+          "Scorecard: define the None handling in the denominator, the empty-state text, the ISO date range, and print the None count.",
+          "Add a rollback note: with cache_mode off or removed, behavior and prompt text are byte-identical to before, and the extra row fields are additive only."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790179277.745973,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "last_row filters by role, but decision_log.record only sets a top-level role when the caller passes role=. Neither tool_disclosure writer (spawn.py:484, bus.py:290) passes it. The role sits in deterministic.role, so a filter on row['role'] matches nothing and previous_row is always None. The spec must say to match deterministic.role, or to make both writers pass role=.",
+          "severity": "high",
+          "line": 110
+        },
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "last_row reads only today's decision_log file. After midnight (Europe/Zurich, or UTC, depending on schedlog) or on the first task of the day, changed_since_previous is None even when a previous row exists yesterday. The scorecard share then depends on when the run happened, and this is a silent fallback. The spec should either read yesterday's file as well (still bounded) or state the limitation in the docs and count None rows separately.",
+          "severity": "med",
+          "line": 169
+        },
+        {
+          "path": "orchestrator/bus.py",
+          "issue": "log_run writes a Codex tool_disclosure row on every codex event or attempt for a task, not once per task. Rows are duplicated per task, which skews the row counts, the mean stable and dynamic chars and the changed share in the scorecard. The spec should require one row per task or dedupe by subject in the scorecard. The Codex row also has candidates=['CODEX_TOOLS'] and no static disclosed id list. tool_catalog.disclosed('codex_execute') is unverified, so the spec should say what the Level-0 catalog is for codex_execute (stable_catalog_chars may be 0). The write sits inside a bare try/except that swallows errors, so a cache_view failure silently drops the whole existing row. Compute cache_view in its own guard so the existing row still gets written.",
+          "severity": "med",
+          "line": 285
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The spec says 'find it as the caller of tool_catalog.disclosed'. The real callers at spawn.py:469 and :1493 only build row candidates and do not render prompt text. It does not say which function builds the tool disclosure text for the packet, or whether one exists. It should name the function, or require the implementer to create it. The active-order acceptance test cannot be written without that. The second caller (spawn.py:1492, escalation row) must stay untouched.",
+          "severity": "med",
+          "line": 469
+        },
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "cache_mode(cfg, section) is added in both tool_catalog and skill_router, and the spec cites 'the S2d1 helper' as context_router.cache_mode. That helper raises ValueError, and spawn._context_mode wraps it to set invalid_config. The spec should say to reuse one shared helper, or how the two copies differ, so it does not create three divergent validators. It should also say that invalid config records invalid_config on the skill_selection and tool_disclosure rows, and that cache_mode is inert when the section's mode is off (tool_disclosure mode from promotion.mode, skill_routing mode).",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "The [tool_disclosure] and [skills] sections need a cache_mode key with a dated comment. Line 358 already has one for context_router, and a test_pool.py check for unknown keys or values may need updating. That test file is not in scope. Verify that adding the keys does not break it, or add tests/test_pool.py to scope.",
+          "severity": "low",
+          "line": 358
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "The scorecard spec does not define how rows with changed_since_previous None are counted. It should say the denominator for 'share of runs whose dynamic list changed' excludes None rows and that the None count is printed. It should also specify the date range source (row ts, ISO dates, Europe/Zurich), the zero-row output text, and whether Codex and Claude rows are pooled or split by role. The acceptance test should assert exact fields.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "decision_log._bounded may truncate large rows. If it trims deterministic.kept, or the new char fields, then last_row's require_key check and the set comparison in changed_since_previous become unreliable. The spec should confirm the kept list survives _bounded, or add a test.",
+          "severity": "low",
+          "line": 68
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 6741,
+    "est_tokens": 1685,
+    "presented_tokens": 1685,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "a1224ce899d5d363f41b8c3a2ba276382a01c96102ad772c7856367531af3a9b"
+      },
+      "spec": {
+        "chars": 4420,
+        "est_tokens": 1105,
+        "sha256": "c0d75360fdb9a1751db153402b9a56a34b99fe024f3913317fb0e1d9c5ac14df"
+      },
+      "acceptance": {
+        "chars": 742,
+        "est_tokens": 185,
+        "sha256": "cd1016dbc32a2049e5fea3a728ae97cc739fac4fd0ce37cf0c9483ca01f61c98"
+      },
+      "scope": {
+        "chars": 398,
+        "est_tokens": 99,
+        "sha256": "c76a283f908bd8ea2aee77a777725ab5dd354a5d164ad8a5c8d79fdb0a5cf42b"
+      },
+      "depends_on": {
+        "chars": 144,
+        "est_tokens": 36,
+        "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+      },
+      "existing tests": {
+        "chars": 938,
+        "est_tokens": 234,
+        "sha256": "aa80005ad5866b783d65f2b269572e59a88c80fbccaf6630d1857cb77b2eae57"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "5976c3a70dcf",
+    "version": "5976c3a70dcf",
+    "candidate_known": false,
+    "base": "3a364e634c4f",
+    "sources": "task@T-1294 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "2079e371-d413-4908-9fe1-426410276e71",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790179239.658717,
+  "account": "A",
+  "pid": 31890,
+  "pipeline": {
+    "skills_used": [],
+    "verdict_retries": 1,
+    "respawned_at": 1790179236.9830542,
+    "respawn_count": 1
+  },
+  "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)",
+  "resume_hint": {
+    "raw": "ure].cache_mode == active (with mode also active), and name it in the spec, or downgrade active tool mode to a recorded no-op until a renderer exists. Rewrite the acceptance test to match.\",\"Say where the skills catalog is prepended. It must happen only when skill_routing is active, choice['mode'] is still active after the downgrade checks, and [skills].cache_mode is active. Record catalog_chars and selected_chars on the skill_selection row that _skill_routing writes, and say what is recorded when the section is empty.\",\"Reuse the S2d1 helper. Either add orchestrator/context_router.py to scope and generalize cache_mode(cfg, section='context_router') with invalid mapped to off plus invalid_config, or make the two per-module helpers one-line wrappers around it. Do not create parallel validators.\",\"Define dynamic_chars precisely, and state whether the compared set is choice['keep'] or the specialist-selected list. Say how Codex rows (fixed CODEX_TOOLS) are treated in the scorecard means and in the changed share (exclude them or report them per role).\",\"Require cache_view to be exception-safe at both call sites (catch inside the helper wrapper and leave the row written, marked invalid_config or with null fields). bus.log_run currently swallows all errors around the row write.\",\"Define last_row bounds (maximum lines or bytes read from the end of the file, skipping malformed lines), the timezone used to pick today's file, and the midnight-rollover behaviour (None). Have the doc state the caveat.\",\"Specify the scorecard flag's interplay with the existing mutual-exclusion and allowed-flag checks in cli.py (lines 362 and 377). Also specify the denominators (rows with non-None changed_since_previous) and the exact 'no rows' string that the test asserts.\",\"Add tests/test_pool.py (or whichever test validates pool.toml keys) to scope if a new key needs an allow-list entry. State the rollback as 'cache_mode = \\\"off\\\" (or delete the key) restores prior behaviour byte for byte'.\"]}"
+  },
+  "hold_reason": null,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "last_row filters by role, but decision_log.record only sets a top-level role when the caller passes role=. Neither tool_disclosure writer (spawn.py:484, bus.py:290) passes it. The role sits in deterministic.role, so a filter on row['role'] matches nothing and previous_row is always None. The spec must say to match deterministic.role, or to make both writers pass role=.",
+      "severity": "high",
+      "line": 110
+    },
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "last_row reads only today's decision_log file. After midnight (Europe/Zurich, or UTC, depending on schedlog) or on the first task of the day, changed_since_previous is None even when a previous row exists yesterday. The scorecard share then depends on when the run happened, and this is a silent fallback. The spec should either read yesterday's file as well (still bounded) or state the limitation in the docs and count None rows separately.",
+      "severity": "med",
+      "line": 169
+    },
+    {
+      "path": "orchestrator/bus.py",
+      "issue": "log_run writes a Codex tool_disclosure row on every codex event or attempt for a task, not once per task. Rows are duplicated per task, which skews the row counts, the mean stable and dynamic chars and the changed share in the scorecard. The spec should require one row per task or dedupe by subject in the scorecard. The Codex row also has candidates=['CODEX_TOOLS'] and no static disclosed id list. tool_catalog.disclosed('codex_execute') is unverified, so the spec should say what the Level-0 catalog is for codex_execute (stable_catalog_chars may be 0). The write sits inside a bare try/except that swallows errors, so a cache_view failure silently drops the whole existing row. Compute cache_view in its own guard so the existing row still gets written.",
+      "severity": "med",
+      "line": 285
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The spec says 'find it as the caller of tool_catalog.disclosed'. The real callers at spawn.py:469 and :1493 only build row candidates and do not render prompt text. It does not say which function builds the tool disclosure text for the packet, or whether one exists. It should name the function, or require the implementer to create it. The active-order acceptance test cannot be written without that. The second caller (spawn.py:1492, escalation row) must stay untouched.",
+      "severity": "med",
+      "line": 469
+    },
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "cache_mode(cfg, section) is added in both tool_catalog and skill_router, and the spec cites 'the S2d1 helper' as context_router.cache_mode. That helper raises ValueError, and spawn._context_mode wraps it to set invalid_config. The spec should say to reuse one shared helper, or how the two copies differ, so it does not create three divergent validators. It should also say that invalid config records invalid_config on the skill_selection and tool_disclosure rows, and that cache_mode is inert when the section's mode is off (tool_disclosure mode from promotion.mode, skill_routing mode).",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "The [tool_disclosure] and [skills] sections need a cache_mode key with a dated comment. Line 358 already has one for context_router, and a test_pool.py check for unknown keys or values may need updating. That test file is not in scope. Verify that adding the keys does not break it, or add tests/test_pool.py to scope.",
+      "severity": "low",
+      "line": 358
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "The scorecard spec does not define how rows with changed_since_previous None are counted. It should say the denominator for 'share of runs whose dynamic list changed' excludes None rows and that the None count is printed. It should also specify the date range source (row ts, ISO dates, Europe/Zurich), the zero-row output text, and whether Codex and Claude rows are pooled or split by role. The acceptance test should assert exact fields.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "decision_log._bounded may truncate large rows. If it trims deterministic.kept, or the new char fields, then last_row's require_key check and the set comparison in changed_since_previous become unreliable. The spec should confirm the kept list survives _bounded, or add a test.",
+      "severity": "low",
+      "line": 68
+    }
+  ]
+}

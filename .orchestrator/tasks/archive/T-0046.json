@@ -1,0 +1,302 @@
+{
+  "id": "T-0046",
+  "parent": "T-0043",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C3: where a pre-execution spec review plugs in (role, prompt, hold, test approach)",
+  "spec": "HARD OUTPUT CAP: JSON under 4,500 chars; \u226410 findings; evidence path:line only. Read-only.\nRead: orchestrator/bus.py ROLES and create_task; orchestrator/spawn.py run_worker prompt selection per role and the review path (review verdict capture); .orchestrator/prompts/review.md, scout.md, challenge.md; orchestrator/mcp.py spawn_review/spawn_challenge; skills/review/adversarial-review/SKILL.md. Answer: (1) minimal way to add a spec review: new role \"spec_review\" in ROLES with a prompts/spec-review.md template (inputs[0] = the execute task id; the reviewer reads that task's spec, acceptance, scope and the current code at the scoped paths, and returns {\"verdict\":\"approve|request_changes\",\"risks\":[{\"path\":\"\",\"issue\":\"\",\"severity\":\"\"}],\"suggested_spec_changes\":[...]}) vs reusing role review with a flag \u2014 cite the code that would change either way; (2) where the hold lives: bus task status \"held\" with hold_reason \"spec_review pending\" set at creation for complexity \u22655, cleared by the daemon or Planner on approve \u2014 cite the fields; (3) how run_worker should write the verdict onto the execute task (spec_review_verdict) like review_verdict does; (4) an mcp tool spawn_spec_review(task_id) mirroring spawn_review; (5) test approach without spawning claude: FakeProc pattern in tests (Executor tests) \u2014 cite it. suggested_next: file list with insertion points.",
+  "inputs": [],
+  "acceptance": [
+    "role/prompt/hold/verdict/tool insertion points cited with path:line",
+    "test approach cites the existing FakeProc pattern",
+    "result under 4,500 chars"
+  ],
+  "scope": [
+    "orchestrator/**",
+    ".orchestrator/prompts/**",
+    "skills/review/**"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0046",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Minimal path: add 'spec_review' to ROLES set and a prompts/spec-review.md; role dispatch in run_worker needs a new elif branch mirroring the review branch (which reads inputs[0] as the reviewed task id and renders diff/acceptance)",
+        "evidence": [
+          "orchestrator/bus.py:10",
+          "orchestrator/spawn.py:180",
+          "orchestrator/spawn.py:191-193",
+          "orchestrator/mcp.py:38-39"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Alternative: reuse role='review' with a flag (e.g. inputs[0] flagged as spec vs diff) avoids touching ROLES/TOOLS/create_task validation, but forces render() and the verdict-write branch to branch internally on task metadata instead of role, which is messier than a new role given render() already dispatches by name string",
+        "evidence": [
+          "orchestrator/spawn.py:69-70",
+          "orchestrator/spawn.py:191-197",
+          "orchestrator/spawn.py:215-219"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "STATUSES already includes 'held'; hold_reason is not a declared task field in create_task's dict but is set dynamically via bus.update(**fields) kwargs, exactly as spawn.py does for 'no account with headroom' and rate_limit holds",
+        "evidence": [
+          "orchestrator/bus.py:11",
+          "orchestrator/bus.py:60-69",
+          "orchestrator/spawn.py:128",
+          "orchestrator/spawn.py:187",
+          "orchestrator/spawn.py:223"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "For a spec_review hold at creation (complexity>=5), create_task would need a status='held' + hold_reason override since it currently hardcodes status:'queued' at bus.py:55; simplest is to call bus.update(new_task['id'], status='held', hold_reason='spec_review pending') right after create_task rather than modifying create_task's signature",
+        "evidence": [
+          "orchestrator/bus.py:52-56",
+          "orchestrator/bus.py:60-69"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Verdict is written onto the target execute task inside run_worker's post-processing: role=='review' checks result.get('verdict') and calls bus.update(task_id, review_verdict=...) plus bus.update(inputs[0], review_verdict=...) on the reviewed task; a spec_review branch would mirror this with spec_review_verdict",
+        "evidence": [
+          "orchestrator/spawn.py:215-219"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "mcp.py exposes spawn_review as a thin @srv.tool() wrapping the shared _bg(task_id) background dispatcher; spawn_spec_review(task_id) would be an identical 3-line addition calling _bg(task_id)",
+        "evidence": [
+          "orchestrator/mcp.py:10-12",
+          "orchestrator/mcp.py:21-24"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "review.md prompt template shows the shape a spec-review.md would need: static instruction + {{complexity}}/{{security}} + task content placeholders ({{diff}} becomes spec/acceptance/scope) + a fixed 'Return ONLY JSON' contract line",
+        "evidence": [
+          ".orchestrator/prompts/review.md:1-5"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Tests avoid spawning real claude/codex by monkeypatching executor.subprocess.run with a FakeProc(stdout, returncode) stand-in for CompletedProcess, restored via addCleanup; the same pattern (patching subprocess.run in the relevant module) applies to testing a spec_review worker path",
+        "evidence": [
+          "tests/test_orchestrator.py:83-86",
+          "tests/test_orchestrator.py:102-107"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "run_worker's role dispatch for review already special-cases inputs[0] as a string task id to fetch a worktree/branch context before rendering, which is the same access pattern a spec_review reviewer would use to read the execute task's spec/acceptance/scope and scoped code",
+        "evidence": [
+          "orchestrator/spawn.py:38-39",
+          "orchestrator/spawn.py:180"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Exact complexity threshold enforcement point (create_task caller vs a hook) for auto-holding new execute tasks pending spec_review isn't in bus.py/spawn.py \u2014 likely lives in Planner-side task-creation flow, not scouted here",
+      "Whether TOOLS dict (spawn.py:8) needs a new 'spec_review' entry for allowed tool access \u2014 not fully inspected"
+    ],
+    "suggested_next": [
+      "orchestrator/bus.py:10 add 'spec_review' to ROLES",
+      "orchestrator/spawn.py:8 add TOOLS['spec_review'] entry (copy 'review' entry, read-only)",
+      "orchestrator/spawn.py:191-197 add elif role=='spec_review' branch rendering .orchestrator/prompts/spec-review.md with spec/acceptance/scope/code-at-scope",
+      "orchestrator/spawn.py:215-219 add elif role=='spec_review' writing spec_review_verdict via bus.update on both task_id and inputs[0]",
+      ".orchestrator/prompts/spec-review.md new file mirroring review.md structure",
+      "orchestrator/mcp.py:27-30 add spawn_spec_review(task_id) calling _bg(task_id)",
+      "tests/test_orchestrator.py: new Executor-style test using FakeProc (line 83) to fake the spec_review worker run and assert spec_review_verdict lands on the execute task"
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789671471.105397,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0046",
+      "claimed_at": 1789671471.10516
+    },
+    {
+      "ts": 1789671471.1577358,
+      "pid": 46476,
+      "account": "B"
+    },
+    {
+      "ts": 1789671513.613454,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Minimal path: add 'spec_review' to ROLES set and a prompts/spec-review.md; role dispatch in run_worker needs a new elif branch mirroring the review branch (which reads inputs[0] as the reviewed task id and renders diff/acceptance)",
+            "evidence": [
+              "orchestrator/bus.py:10",
+              "orchestrator/spawn.py:180",
+              "orchestrator/spawn.py:191-193",
+              "orchestrator/mcp.py:38-39"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Alternative: reuse role='review' with a flag (e.g. inputs[0] flagged as spec vs diff) avoids touching ROLES/TOOLS/create_task validation, but forces render() and the verdict-write branch to branch internally on task metadata instead of role, which is messier than a new role given render() already dispatches by name string",
+            "evidence": [
+              "orchestrator/spawn.py:69-70",
+              "orchestrator/spawn.py:191-197",
+              "orchestrator/spawn.py:215-219"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "STATUSES already includes 'held'; hold_reason is not a declared task field in create_task's dict but is set dynamically via bus.update(**fields) kwargs, exactly as spawn.py does for 'no account with headroom' and rate_limit holds",
+            "evidence": [
+              "orchestrator/bus.py:11",
+              "orchestrator/bus.py:60-69",
+              "orchestrator/spawn.py:128",
+              "orchestrator/spawn.py:187",
+              "orchestrator/spawn.py:223"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "For a spec_review hold at creation (complexity>=5), create_task would need a status='held' + hold_reason override since it currently hardcodes status:'queued' at bus.py:55; simplest is to call bus.update(new_task['id'], status='held', hold_reason='spec_review pending') right after create_task rather than modifying create_task's signature",
+            "evidence": [
+              "orchestrator/bus.py:52-56",
+              "orchestrator/bus.py:60-69"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Verdict is written onto the target execute task inside run_worker's post-processing: role=='review' checks result.get('verdict') and calls bus.update(task_id, review_verdict=...) plus bus.update(inputs[0], review_verdict=...) on the reviewed task; a spec_review branch would mirror this with spec_review_verdict",
+            "evidence": [
+              "orchestrator/spawn.py:215-219"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "mcp.py exposes spawn_review as a thin @srv.tool() wrapping the shared _bg(task_id) background dispatcher; spawn_spec_review(task_id) would be an identical 3-line addition calling _bg(task_id)",
+            "evidence": [
+              "orchestrator/mcp.py:10-12",
+              "orchestrator/mcp.py:21-24"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "review.md prompt template shows the shape a spec-review.md would need: static instruction + {{complexity}}/{{security}} + task content placeholders ({{diff}} becomes spec/acceptance/scope) + a fixed 'Return ONLY JSON' contract line",
+            "evidence": [
+              ".orchestrator/prompts/review.md:1-5"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Tests avoid spawning real claude/codex by monkeypatching executor.subprocess.run with a FakeProc(stdout, returncode) stand-in for CompletedProcess, restored via addCleanup; the same pattern (patching subprocess.run in the relevant module) applies to testing a spec_review worker path",
+            "evidence": [
+              "tests/test_orchestrator.py:83-86",
+              "tests/test_orchestrator.py:102-107"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "run_worker's role dispatch for review already special-cases inputs[0] as a string task id to fetch a worktree/branch context before rendering, which is the same access pattern a spec_review reviewer would use to read the execute task's spec/acceptance/scope and scoped code",
+            "evidence": [
+              "orchestrator/spawn.py:38-39",
+              "orchestrator/spawn.py:180"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Exact complexity threshold enforcement point (create_task caller vs a hook) for auto-holding new execute tasks pending spec_review isn't in bus.py/spawn.py \u2014 likely lives in Planner-side task-creation flow, not scouted here",
+          "Whether TOOLS dict (spawn.py:8) needs a new 'spec_review' entry for allowed tool access \u2014 not fully inspected"
+        ],
+        "suggested_next": [
+          "orchestrator/bus.py:10 add 'spec_review' to ROLES",
+          "orchestrator/spawn.py:8 add TOOLS['spec_review'] entry (copy 'review' entry, read-only)",
+          "orchestrator/spawn.py:191-197 add elif role=='spec_review' branch rendering .orchestrator/prompts/spec-review.md with spec/acceptance/scope/code-at-scope",
+          "orchestrator/spawn.py:215-219 add elif role=='spec_review' writing spec_review_verdict via bus.update on both task_id and inputs[0]",
+          ".orchestrator/prompts/spec-review.md new file mirroring review.md structure",
+          "orchestrator/mcp.py:27-30 add spawn_spec_review(task_id) calling _bg(task_id)",
+          "tests/test_orchestrator.py: new Executor-style test using FakeProc (line 83) to fake the spec_review worker run and assert spec_review_verdict lands on the execute task"
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789671471.10516,
+  "pid": 46476,
+  "account": "B"
+}

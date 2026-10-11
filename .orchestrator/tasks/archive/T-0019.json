@@ -1,0 +1,53 @@
+{
+  "id": "T-0019",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 4,
+  "title": "B4: bench.json hand-taken benchmark snapshot + `orchestrator bench set/show` + prior weight when the scorecard is cold",
+  "spec": "Why: the user wants artificialanalysis.ai/models as an input for \"what to use for what\". Scout T-0007: no public API; the site's Terms of Use forbid automated scraping or mining (confidence 0.85). So the input is a snapshot entered by a human or by the Planner reading the page interactively, with provenance, never a fetcher. Depends on B1\u2013B3 merged into goal/T-0005.\n\nWhat (\u22644 files: orchestrator/bench.py (new), orchestrator/cli.py, orchestrator/scorecard.py, tests/test_orchestrator.py):\n1. orchestrator/bench.py \u2014 file STATE/bench.json: {\"source\": \"https://artificialanalysis.ai/models\", \"taken_at\": ISO, \"taken_by\": str, \"models\": {\"<model id>\": {\"intelligence\": float|null, \"coding\": float|null, \"speed_tps\": float|null, \"price_in\": float|null, \"price_out\": float|null, \"display_name\": str|null}}}. `def load()`, `def set_model(model_id, taken_by, **metrics)` (validates keys, numbers only, updates taken_at), `def prior_weights(executors) -> dict[executor_id, float]`: for each executor, if its model has a coding value: weight = 0.5 + coding / max_coding_in_file (range 0.5\u20131.5); else 1.0. Never fetch anything over the network; the module must not import urllib/requests/httpx (test asserts this).\n2. scorecard.scores(): when an executor has fewer than min_runs runs, use bench.prior_weights() for it instead of 1.0 (cold-start prior); once warm, live data wins.\n3. cli.py: `orchestrator bench show` (table: model id, display name, coding, speed, price, taken_at) and `orchestrator bench set <model_id> --by <name> key=value ...` (e.g. coding=61.2 speed_tps=120 price_in=2.5). Print the file path after set.\n4. tests: set two models, prior_weights ranks them 1.5 and \u22650.5 in order; scores() for a cold executor equals its prior weight; `import bench` source contains no network module names.\nSeed the file with model ids only and null metrics for gpt-6-astra, gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol, taken_by \"seed\", so `bench show` works before anyone enters numbers. Add a top comment in bench.py: \"No scraper by design: artificialanalysis.ai Terms of Use forbid automated data mining (checked 2026-09-17). Numbers are entered by a human or a Planner reading the page interactively.\"\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"bench: hand-taken benchmark snapshot with provenance; cold-start prior for pick_executor; cli bench show/set\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new bench tests",
+    "uv run orchestrator bench show lists the four seeded model ids",
+    "uv run orchestrator bench set gpt-5.6-luna --by test coding=50 then bench show reflects it and taken_at updates",
+    "grep -E 'urllib|requests|httpx|socket' orchestrator/bench.py returns nothing",
+    "git diff --stat limited to orchestrator/bench.py, orchestrator/cli.py, orchestrator/scorecard.py, tests/test_orchestrator.py, .orchestrator/bench.json"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "orchestrator/cli.py",
+    "orchestrator/scorecard.py",
+    "tests/test_orchestrator.py",
+    ".orchestrator/bench.json"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded before execution: user decision 2026-09-17 18:20 \u2014 use a Scrapling-based fetcher for artificialanalysis.ai/models instead of a hand-taken snapshot (Planner had flagged the site's Terms of Use; user reaffirmed). Replacement spec follows scout T-0022.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789657913.5255182,
+      "status": "failed",
+      "result": {
+        "summary": "superseded before execution: user decision 2026-09-17 18:20 \u2014 use a Scrapling-based fetcher for artificialanalysis.ai/models instead of a hand-taken snapshot (Planner had flagged the site's Terms of Use; user reaffirmed). Replacement spec follows scout T-0022.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ]
+}

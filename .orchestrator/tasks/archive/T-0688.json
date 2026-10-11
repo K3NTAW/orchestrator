@@ -1,0 +1,151 @@
+{
+  "id": "T-0688",
+  "created_at": 1789998329.638724,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Q1: orchestrator/planner_taxonomy.py \u2014 decision taxonomy for Planner invocations (purpose over complexity), pure and testable (P2)",
+  "spec": "Why: decision.py routes points by kind (held/scouts_done/closable) and risk, but nothing names the PURPOSE of a Planner decision; the router (Q4), telemetry (Q2) and Planner scorecard (Q5) need a stable decision_type to group by (brief .orchestrator/planner-routing-program.md P2).\nWhat: new pure module orchestrator/planner_taxonomy.py; no bus reads, no config reads, inputs never mutated.\n- DECISION_TYPES = (\"initial_goal_plan\", \"scout_results\", \"held_task\", \"architectural_replan\", \"fix_strategy\", \"closable_goal\", \"retrospective\", \"ambiguous_requirement\", \"other\").\n- classify(point, ctx, *, goal=None, task=None) -> {\"decision_type\", \"architectural\": bool, \"ambiguous\": bool, \"risk_class\": \"none\"|\"low\"|\"high\", \"signals\": [str], \"band\", \"task_class\"}. point is planner_runs' dict {goal_id, kind, payload_key, task_id?}; ctx is decision.route's ctx (see orchestrator/decision.py docstring and planner_runs.build_ctx lines 1002-1062); goal/task are bus task dicts or None.\n- Rules, first match wins: kind \"retrospective\" -> retrospective. kind \"scouts_done\": ctx.scout_count == 0 -> initial_goal_plan, else scout_results. kind \"held\": ctx.signature_repeated or ctx.spec_review_request_changes >= 2 or ctx.auto_fix_rounds_used >= ctx.auto_fix_rounds -> architectural_replan; else ctx.failing_ids non-empty or ctx.in_scope_review_comments -> fix_strategy; else held_task. kind \"closable\" -> closable_goal. Unknown kind -> other. After that, ambiguous_requirement overrides initial_goal_plan/scout_results when the goal text (title + spec) carries ambiguity markers: two or more of the tokens \"or\", \"either\", \"unclear\", \"tbd\", \"?\", \"conflict\", \"maybe\", \"alternatively\" (case-insensitive, whole words, \"?\" counted per occurrence), or ctx.get(\"ambiguous\") is True; signals records which markers fired.\n- architectural = attribution.task_class(task or goal) in (\"architectural\", \"security\") or (complexity >= 7) or ctx.touches_interfaces or ctx.touches_migrations or decision_type == architectural_replan; use task complexity for held, goal complexity otherwise.\n- risk_class: high when ctx.touches_auth or ctx.touches_data_deletion or ctx.security_trigger or task_class == \"security\"; low when ctx.touches_interfaces or ctx.touches_migrations or ctx.semantic_trigger; else none. Missing ctx fields count as False/0 and add signal \"unknown:<field>\" (never raise).\n- band via attribution.band(complexity); task_class via attribution.task_class(task or goal) guarded so a missing pool.toml never raises (attribution already guards).\n- explain(classification) -> one line string \"type=... arch=... risk=... signals=a,b\".\nDocstring states purpose-over-complexity with the example: a complexity 8 closable_goal is routine, a complexity 6 ambiguous_requirement is not.",
+  "inputs": [
+    "T-0675"
+  ],
+  "acceptance": [
+    "tests/test_planner_taxonomy.py::test_held_with_failing_tests_is_fix_strategy \u2014 held ctx with failing_ids and no risk flags classifies fix_strategy, architectural False, risk none",
+    "tests/test_planner_taxonomy.py::test_repeated_signature_is_architectural_replan \u2014 held ctx with signature_repeated True classifies architectural_replan and architectural True regardless of complexity 3",
+    "tests/test_planner_taxonomy.py::test_scouts_done_without_scouts_is_initial_goal_plan \u2014 scout_count 0 gives initial_goal_plan; scout_count 2 gives scout_results",
+    "tests/test_planner_taxonomy.py::test_ambiguity_markers_override_to_ambiguous_requirement \u2014 goal spec 'use redis or postgres, unclear which?' classifies ambiguous_requirement with signals naming the markers; a plain spec does not",
+    "tests/test_planner_taxonomy.py::test_risk_and_missing_fields_never_raise \u2014 touches_auth True gives risk high; a ctx missing every optional field classifies without raising and lists unknown:<field> signals; closable kind gives closable_goal at complexity 8 with architectural True"
+  ],
+  "scope": [
+    "orchestrator/planner_taxonomy.py",
+    "tests/test_planner_taxonomy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0688",
+  "codex_thread": null,
+  "result": {
+    "summary": "All 5 acceptance tests pass (verified via unittest run). DECISION_TYPES, classify() routing rules, ambiguity-marker detection, risk_class/architectural derivation, and explain() all match the spec's stated formulas. Checked one candidate discrepancy \u2014 architectural/task_class uses an entity selected by kind==\"held\" rather than the spec's literal \"task or goal\" \u2014 but planner_runs' point structure only ever supplies a task_id for kind==\"held\" (scouts_done/closable key on goal_id alone), so the two formulations are equivalent for every real call site; not a live bug. Missing-ctx fields are defaulted and signaled per spec without raising, guards around attribution.task_class/band hold up under empty/None entities.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "904882a587dd",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998329.639646,
+      "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+    },
+    {
+      "ts": 1789998332.15517,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0688",
+      "claimed_at": 1789998332.154856
+    },
+    {
+      "ts": 1789998332.1560519,
+      "account": "B"
+    },
+    {
+      "ts": 1789998332.563581,
+      "pid": 6395,
+      "account": "B"
+    },
+    {
+      "ts": 1789998502.2299032,
+      "status": "done",
+      "result": {
+        "summary": "All 5 acceptance tests pass (verified via unittest run). DECISION_TYPES, classify() routing rules, ambiguity-marker detection, risk_class/architectural derivation, and explain() all match the spec's stated formulas. Checked one candidate discrepancy \u2014 architectural/task_class uses an entity selected by kind==\"held\" rather than the spec's literal \"task or goal\" \u2014 but planner_runs' point structure only ever supplies a task_id for kind==\"held\" (scouts_done/closable key on goal_id alone), so the two formulations are equivalent for every real call site; not a live bug. Missing-ctx fields are defaulted and signaled per spec without raising, guards around attribution.task_class/band hold up under empty/None entities.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "904882a587dd",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998502.231045,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789998502.266874,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+        "packet_version": "904882a587dd",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+      "packet_version": "904882a587dd",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+  "claimed_at": 1789998332.154856,
+  "account": "B",
+  "pid": 6395,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+    "packet_version": "904882a587dd",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "904882a587dd",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

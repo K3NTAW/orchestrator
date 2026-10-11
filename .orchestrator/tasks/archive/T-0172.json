@@ -1,0 +1,155 @@
+{
+  "id": "T-0172",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): D1 fix round 5 on task/T-0169 \u2014 delta 2f37982..c593794 (T-0169, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0169 delta: `git diff 2f37982 c593794` in worktree wt/T-0169 (orchestrator/daemon.py, tests/test_daemon.py). Fix round for review T-0164; confirm each item resolved: (1) merge_reviewed buckets every done review's verdict exhaustively (approve \u2192 approved; anything else \u2192 rejected/hold with the verdict in hold_reason), never indexes an empty list, and wraps the per-task body so one task's exception cannot stop the sweep (tests a, b); (2) gate() stamps pipeline.reviews_expected and merge_reviewed honours it, falling back only when absent (test with a config change between gate and merge); (3) src.review_verdict fallback only for single-review tasks (test); (4) the sweep includes done tasks with reviews but no gated_at (test); (5) constraints.second_review and its assertion removed; (6) cheap filters before already_merged(). Also confirm the earlier D1 guarantees still hold (reviews_expected for orphaned results, failed/held siblings hold with a reason, second review never on the executor's model). Run `uv run python -m unittest tests.test_daemon -q` once. This is the fourth opus review of D1 (T-0150, T-0159, T-0164): approve unless a defect would stall or mis-merge tasks in production; everything smaller goes into notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0169"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the six T-0164 items confirmed resolved or named unresolved with evidence",
+    "Earlier D1 guarantees confirmed intact"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0120",
+      "T-0151",
+      "T-0154",
+      "T-0157",
+      "T-0160",
+      "T-0169"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0172",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 476,
+        "issue": "The empty-hold_reason defect T-0164 item 1(b) flagged still has one live path: when there are fewer review records than `needed`, no rejections and no stuck/unknown siblings, the final `else` produces hold_reason `'review state unknown: '` with an empty join. Reproduced twice against this tree: (a) a hand-gated complexity-7 execute task (no worktree, so gate() never runs) with one Planner-spawned done+approve review -> needed=reviews_expected(t)=2, approved=1, pending/stuck/unknown all empty -> held with `'review state unknown: '`; (b) a task carrying pipeline.reviews_expected=2 but only one review record (pre-T-0169 gate, or a hand-deleted/never-created sibling) -> same. Held+notified so it is not a silent stall, but the Planner gets no diagnostic, and the true state ('1 of 2 approvals, only 1 review exists, gate() will never open the second because gated_at is already stamped') is exactly what the message should name. Suggest a branch for len(reviews) < needed: `reason = f\"reviews missing: {len(approved)}/{needed} approvals from {len(reviews)} review(s)\"`.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 26,
+        "issue": "_load_review_cfg() takes the four [review] values straight from pool.cfg with no type check, and they are then compared against int complexity and passed as a bus tier. A typo in pool.toml (spec_review_min = \"6\") makes dispatch() raise TypeError on `t[\"complexity\"] < SPEC_REVIEW_MIN` every tick; tick()'s per-stage try/except swallows it to one stderr line, so the pipeline stops dispatching with no held task and no notify. spec_review_tier accepts any string and lands on the created spec_review task, where the model lookup fails inside the spawn_async thread (no task-level hold either). int()/whitelist coercion in _load_review_cfg would fail loudly at the top of the tick instead.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 420,
+        "issue": "Efficiency, same family as T-0164 item 6: merge_reviewed() now walks every done execute task and _merge_reviewed_one() calls bus.read(role=\"review\") inside that loop, so the whole task store is scanned once per done execute task per tick (O(n^2) file reads) where the old review-centric loop scanned once. Hoisting one bus.read(role=\"review\") into merge_reviewed() and grouping by inputs[0] keeps the new sweep semantics at a single scan.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 326,
+        "issue": "`self.assertNotIn(\"avoid_account\", reviews[1][\"constraints\"])` is vacuous: nothing in the tree writes avoid_account any more (grep finds only this line), so the assertion can never fail and documents a field that no longer exists. Same inert-assertion pattern T-0159 item 4 and T-0164 item 6 asked to be removed; the tier-list assertion on the line above is the one carrying the guarantee.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 358,
+        "issue": "The comment on the `existing` dedupe reads as if it guards a gate() re-entry, but gate() cannot re-enter this block: stamp(\"gated_at\") at line 338 is one-shot and precedes it, so a second tick never reaches the review-creation code. The check is only meaningful when the Planner pre-spawned a review before the gate ran (which is real, so the code should stay) -- the comment should say that instead, otherwise a future reader may drop it as redundant or rely on it for idempotency it does not provide.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789752976.399352,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0172",
+      "claimed_at": 1789752976.398976
+    },
+    {
+      "ts": 1789752976.4337149,
+      "pid": 46980,
+      "account": "B"
+    },
+    {
+      "ts": 1789753254.262666,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 476,
+            "issue": "The empty-hold_reason defect T-0164 item 1(b) flagged still has one live path: when there are fewer review records than `needed`, no rejections and no stuck/unknown siblings, the final `else` produces hold_reason `'review state unknown: '` with an empty join. Reproduced twice against this tree: (a) a hand-gated complexity-7 execute task (no worktree, so gate() never runs) with one Planner-spawned done+approve review -> needed=reviews_expected(t)=2, approved=1, pending/stuck/unknown all empty -> held with `'review state unknown: '`; (b) a task carrying pipeline.reviews_expected=2 but only one review record (pre-T-0169 gate, or a hand-deleted/never-created sibling) -> same. Held+notified so it is not a silent stall, but the Planner gets no diagnostic, and the true state ('1 of 2 approvals, only 1 review exists, gate() will never open the second because gated_at is already stamped') is exactly what the message should name. Suggest a branch for len(reviews) < needed: `reason = f\"reviews missing: {len(approved)}/{needed} approvals from {len(reviews)} review(s)\"`.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 26,
+            "issue": "_load_review_cfg() takes the four [review] values straight from pool.cfg with no type check, and they are then compared against int complexity and passed as a bus tier. A typo in pool.toml (spec_review_min = \"6\") makes dispatch() raise TypeError on `t[\"complexity\"] < SPEC_REVIEW_MIN` every tick; tick()'s per-stage try/except swallows it to one stderr line, so the pipeline stops dispatching with no held task and no notify. spec_review_tier accepts any string and lands on the created spec_review task, where the model lookup fails inside the spawn_async thread (no task-level hold either). int()/whitelist coercion in _load_review_cfg would fail loudly at the top of the tick instead.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 420,
+            "issue": "Efficiency, same family as T-0164 item 6: merge_reviewed() now walks every done execute task and _merge_reviewed_one() calls bus.read(role=\"review\") inside that loop, so the whole task store is scanned once per done execute task per tick (O(n^2) file reads) where the old review-centric loop scanned once. Hoisting one bus.read(role=\"review\") into merge_reviewed() and grouping by inputs[0] keeps the new sweep semantics at a single scan.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 326,
+            "issue": "`self.assertNotIn(\"avoid_account\", reviews[1][\"constraints\"])` is vacuous: nothing in the tree writes avoid_account any more (grep finds only this line), so the assertion can never fail and documents a field that no longer exists. Same inert-assertion pattern T-0159 item 4 and T-0164 item 6 asked to be removed; the tier-list assertion on the line above is the one carrying the guarantee.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 358,
+            "issue": "The comment on the `existing` dedupe reads as if it guards a gate() re-entry, but gate() cannot re-enter this block: stamp(\"gated_at\") at line 338 is one-shot and precedes it, so a second tick never reaches the review-creation code. The check is only meaningful when the Planner pre-spawned a review before the gate ran (which is real, so the code should stay) -- the comment should say that instead, otherwise a future reader may drop it as redundant or rely on it for idempotency it does not provide.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789753254.265117,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789753277.746774,
+      "pipeline": {
+        "merged_at": 1789753277.746707
+      }
+    }
+  ],
+  "claimed_at": 1789752976.398976,
+  "pid": 46980,
+  "account": "B",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789753277.746707
+  }
+}

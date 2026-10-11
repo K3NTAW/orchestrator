@@ -1,0 +1,224 @@
+{
+  "id": "T-0188",
+  "parent": "T-0109",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: D3 v2: Planner as a function \u2014 the daemon invokes a fresh headless Planner only at decision points, only when no Planner session is attached (spec round 2 after T-0182; supersedes T-0122)",
+  "spec": "Why: the interactive Planner spent about 11.2M tokens on 2026-09-18 and session 2 repeated the pattern; most of it was re-sending a large context on wait notifications. Round 2 folds in spec review T-0182: handover.py now exists on goal/T-0109 (D0 rebase); the daemon must never launch a decision Planner while an interactive Planner session is attached; no repo-generic root parameter; account and budget checked before launch; the launch step shared with goals.start.\n\ngoals.py (additive refactor): extract the launch step of start() into `launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None) -> dict` (trust_workspace, env incl. CLAUDE_CONFIG_DIR / CLAUDE_CODE_OAUTH_TOKEN / ORCH_ROOT / filtered target secrets via the existing _filter_target_secrets + resolve_secrets, argv with --model models.planner, --output-format json, --max-budget-usd, --mcp-config .mcp.planner.json, --strict-mcp-config, --append-system-prompt <planner.md>, --dangerously-skip-permissions, Popen start_new_session, stdout+stderr to log_path); start() calls it; behaviour and tests unchanged (tests/test_goals.py stays green, one new test that start() goes through launch_planner).\n\norchestrator/planner_runs.py (works on ROOT only; bus.py binds one STATE per process): decision_points() scans the bus for goals (parentless triage tasks not done) and yields (goal_id, kind, payload_key) for: \"scouts_done\" when the goal has scout children, all are done or failed, no execute child exists yet and no run of this kind is recorded for the goal; \"held\" for each execute child with status held and no run recorded for (goal, task, hold_reason); \"closable\" when every execute child is merged, no queued or running children remain, and no run of kind closable exists. run(goal_id, kind, payload_key): (a) ATTACHED-SESSION GUARD: skip with reason \"planner session attached\" when the daemon runs inside an MCP server of an interactive session (mcp.py's autostart sets env ORCH_DAEMON_HOST=mcp before start_background; a standalone `orchestrator daemon` leaves it unset) or when .orchestrator/planner_session.json exists with a live pid (the resume/orchestrate skills may write it later; treat a stale pid as absent); also skip when goals.status() shows a running Planner for ROOT via identity(); (b) ACCOUNT GUARD: acct = Pool().pick(\"planner\"); None \u2192 skip with reason \"no account with headroom\" (respects cooldowns, daily budget and the planner reserve); (c) handover.write(f\"decision {kind}\"); (d) prompt from .orchestrator/prompts/planner-decision.md ({{kind}}, {{goal_id}}, {{payload}}: \"Read .orchestrator/plan.md and the bus. Decision: <kind> for <goal_id>. Do only what this decision needs, write plan.md, and finish.\"); (e) goals.launch_planner(ROOT, prompt, acct.id, limits.max_budget_usd.get(\"planner_decision\", 3), runs/planner-decision-<goal_id>-<kind>.log); (f) record {goal_id, kind, payload_key, pid, started_at, account, log, skipped_reason?} in .orchestrator/runs/planner_runs.json under bus.locked(); skips are recorded too (so a skipped decision is retried next tick only when the skip reason was a guard, never when it already launched).\ndaemon.tick(): after the stages, when pool.cfg.get(\"planner\", {}).get(\"autonomous\", False) is true, iterate decision_points() and run at most one launch per tick, wrapped like the stages. pool.toml: `[planner] autonomous = false` with a comment (default off: the interactive Planner owns decisions; turn on only in the executor container) and `planner_decision = 3.0` in limits.max_budget_usd. mcp.py: set os.environ[\"ORCH_DAEMON_HOST\"] = \"mcp\" before daemon.start_background (one line). README.md: a paragraph \"Autonomous decisions\" under Pipeline.\nTests tests/test_planner_runs.py (harness): decision_points_scouts_done_held_closable (three fixtures), run_skips_when_session_attached (env ORCH_DAEMON_HOST=mcp \u2192 no Popen, skip recorded), run_skips_without_account_headroom (pick patched to None), run_launches_once_per_decision (launch_planner patched; second tick no relaunch), tick_launches_nothing_when_autonomous_false (default cfg), plus tests/test_goals.py: start_uses_launch_planner. No new dependency; commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0187"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py has the five named tests and tests/test_goals.py the launch_planner test; all green; existing goals and daemon tests untouched and green",
+    "With [planner] autonomous = false (committed default) tick() launches nothing; with it true and ORCH_DAEMON_HOST=mcp nothing launches either (skip recorded)",
+    "planner_runs.json records one entry per (goal, kind, payload_key); a second tick does not relaunch a launched decision; guard skips are retried",
+    "goals.start behaviour unchanged and routed through launch_planner (secrets filter preserved); mcp.py sets ORCH_DAEMON_HOST=mcp before autostart",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the eight scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/goals.py",
+    "orchestrator/daemon.py",
+    "orchestrator/mcp.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0188",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The 'held' dedup key is (goal, task, hold_reason), but hold_reason strings are static and reused across independent rounds (daemon.py:275 'spec_review request_changes', daemon.py:331 'worktree missing', daemon.py:336 'gate_red'). Once a decision run is recorded for that tuple, a genuinely new hold on the same task with the same reason in a later fix round is silently skipped forever \u2014 exactly the multi-round scenario CLAUDE.md's escalation policy ('Executor fails 3 rounds on one criterion') exists to catch, except autonomous mode stops trying after round 1.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "No reconciliation exists for a decision-Planner process that dies before finishing. goals.py already solves this exact class of problem for regular goal launches via identity()/_reconcile() (dead pid -> status exited). Here, once run() records an entry with no skipped_reason, decision_points() treats it as permanently done regardless of whether the launched Planner actually completed \u2014 a crashed/killed decision Planner leaves that (goal, kind, payload_key) stuck with no retry path.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The attached-session guard's second clause ('goals.status() shows a running Planner for ROOT via identity()') checks a mechanism that likely never applies to ROOT: goals.start()/status() track headless Planner sessions launched against target repos via serve.py/cli.py, while the actual interactive session on ROOT is launched out-of-band via the `f orch` shell function (README.md:28), which never calls goals.start() against ROOT. This clause probably always finds no record, giving false assurance that two independent guards exist when only the ORCH_DAEMON_HOST check is live.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "tests/test_planner_runs.py",
+        "issue": "The five named tests cover only the ORCH_DAEMON_HOST=mcp half of the attached-session guard (run_skips_when_session_attached). No named test exercises the .orchestrator/planner_session.json live-pid branch, so half of a safety-critical guard (the one meant to prevent a second Planner racing an attached interactive one) ships unverified by the stated acceptance criteria.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "payload_key is only unambiguous for 'held' (task_id + hold_reason). For 'scouts_done' and 'closable' the spec doesn't say what payload_key should be, leaving the dedup key's shape to implementer judgment and risking an inconsistent convention between kinds.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Change the 'held' dedup key to also require the current hold to be 'new since the last recorded run' (e.g. compare against the task's pipeline timestamp for that stage, or clear/replace the recorded run when the task's status transitions away from held and back), so a recurring hold with the same static hold_reason still gets a fresh decision each round.",
+      "Add a liveness check on record playback: before treating a (goal, kind, payload_key) as already-decided, verify the recorded pid is still alive or the goal/task state has since changed; if the pid is dead and the decision's expected outcome never landed (goal still open for 'closable', task still held for 'held'), allow one retry \u2014 mirroring goals.py's identity()/_reconcile() pattern.",
+      "Either specify what goals.status()-for-ROOT is actually meant to detect (and confirm some path populates a goals.json record for ROOT), or drop that clause from the attached-session guard and rely solely on ORCH_DAEMON_HOST + planner_session.json.",
+      "Add a sixth named test exercising the planner_session.json branch (live pid present -> skip; stale/dead pid -> proceed) so the guard's file-based path is covered by the stated acceptance criteria.",
+      "Explicitly define payload_key for 'scouts_done' and 'closable' (e.g. a fixed constant such as the goal_id itself, or null) so the dedup key shape is consistent across all three kinds."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789764243.8796291,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0188",
+      "claimed_at": 1789764243.879153
+    },
+    {
+      "ts": 1789764243.8894331,
+      "pid": 23143,
+      "account": "B"
+    },
+    {
+      "ts": 1789764425.473303,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The 'held' dedup key is (goal, task, hold_reason), but hold_reason strings are static and reused across independent rounds (daemon.py:275 'spec_review request_changes', daemon.py:331 'worktree missing', daemon.py:336 'gate_red'). Once a decision run is recorded for that tuple, a genuinely new hold on the same task with the same reason in a later fix round is silently skipped forever \u2014 exactly the multi-round scenario CLAUDE.md's escalation policy ('Executor fails 3 rounds on one criterion') exists to catch, except autonomous mode stops trying after round 1.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "No reconciliation exists for a decision-Planner process that dies before finishing. goals.py already solves this exact class of problem for regular goal launches via identity()/_reconcile() (dead pid -> status exited). Here, once run() records an entry with no skipped_reason, decision_points() treats it as permanently done regardless of whether the launched Planner actually completed \u2014 a crashed/killed decision Planner leaves that (goal, kind, payload_key) stuck with no retry path.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The attached-session guard's second clause ('goals.status() shows a running Planner for ROOT via identity()') checks a mechanism that likely never applies to ROOT: goals.start()/status() track headless Planner sessions launched against target repos via serve.py/cli.py, while the actual interactive session on ROOT is launched out-of-band via the `f orch` shell function (README.md:28), which never calls goals.start() against ROOT. This clause probably always finds no record, giving false assurance that two independent guards exist when only the ORCH_DAEMON_HOST check is live.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "tests/test_planner_runs.py",
+            "issue": "The five named tests cover only the ORCH_DAEMON_HOST=mcp half of the attached-session guard (run_skips_when_session_attached). No named test exercises the .orchestrator/planner_session.json live-pid branch, so half of a safety-critical guard (the one meant to prevent a second Planner racing an attached interactive one) ships unverified by the stated acceptance criteria.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "payload_key is only unambiguous for 'held' (task_id + hold_reason). For 'scouts_done' and 'closable' the spec doesn't say what payload_key should be, leaving the dedup key's shape to implementer judgment and risking an inconsistent convention between kinds.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Change the 'held' dedup key to also require the current hold to be 'new since the last recorded run' (e.g. compare against the task's pipeline timestamp for that stage, or clear/replace the recorded run when the task's status transitions away from held and back), so a recurring hold with the same static hold_reason still gets a fresh decision each round.",
+          "Add a liveness check on record playback: before treating a (goal, kind, payload_key) as already-decided, verify the recorded pid is still alive or the goal/task state has since changed; if the pid is dead and the decision's expected outcome never landed (goal still open for 'closable', task still held for 'held'), allow one retry \u2014 mirroring goals.py's identity()/_reconcile() pattern.",
+          "Either specify what goals.status()-for-ROOT is actually meant to detect (and confirm some path populates a goals.json record for ROOT), or drop that clause from the attached-session guard and rely solely on ORCH_DAEMON_HOST + planner_session.json.",
+          "Add a sixth named test exercising the planner_session.json branch (live pid present -> skip; stale/dead pid -> proceed) so the guard's file-based path is covered by the stated acceptance criteria.",
+          "Explicitly define payload_key for 'scouts_done' and 'closable' (e.g. a fixed constant such as the goal_id itself, or null) so the dedup key shape is consistent across all three kinds."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789764425.476322,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The 'held' dedup key is (goal, task, hold_reason), but hold_reason strings are static and reused across independent rounds (daemon.py:275 'spec_review request_changes', daemon.py:331 'worktree missing', daemon.py:336 'gate_red'). Once a decision run is recorded for that tuple, a genuinely new hold on the same task with the same reason in a later fix round is silently skipped forever \u2014 exactly the multi-round scenario CLAUDE.md's escalation policy ('Executor fails 3 rounds on one criterion') exists to catch, except autonomous mode stops trying after round 1.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "No reconciliation exists for a decision-Planner process that dies before finishing. goals.py already solves this exact class of problem for regular goal launches via identity()/_reconcile() (dead pid -> status exited). Here, once run() records an entry with no skipped_reason, decision_points() treats it as permanently done regardless of whether the launched Planner actually completed \u2014 a crashed/killed decision Planner leaves that (goal, kind, payload_key) stuck with no retry path.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The attached-session guard's second clause ('goals.status() shows a running Planner for ROOT via identity()') checks a mechanism that likely never applies to ROOT: goals.start()/status() track headless Planner sessions launched against target repos via serve.py/cli.py, while the actual interactive session on ROOT is launched out-of-band via the `f orch` shell function (README.md:28), which never calls goals.start() against ROOT. This clause probably always finds no record, giving false assurance that two independent guards exist when only the ORCH_DAEMON_HOST check is live.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "tests/test_planner_runs.py",
+          "issue": "The five named tests cover only the ORCH_DAEMON_HOST=mcp half of the attached-session guard (run_skips_when_session_attached). No named test exercises the .orchestrator/planner_session.json live-pid branch, so half of a safety-critical guard (the one meant to prevent a second Planner racing an attached interactive one) ships unverified by the stated acceptance criteria.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "payload_key is only unambiguous for 'held' (task_id + hold_reason). For 'scouts_done' and 'closable' the spec doesn't say what payload_key should be, leaving the dedup key's shape to implementer judgment and risking an inconsistent convention between kinds.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789764243.879153,
+  "pid": 23143,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The 'held' dedup key is (goal, task, hold_reason), but hold_reason strings are static and reused across independent rounds (daemon.py:275 'spec_review request_changes', daemon.py:331 'worktree missing', daemon.py:336 'gate_red'). Once a decision run is recorded for that tuple, a genuinely new hold on the same task with the same reason in a later fix round is silently skipped forever \u2014 exactly the multi-round scenario CLAUDE.md's escalation policy ('Executor fails 3 rounds on one criterion') exists to catch, except autonomous mode stops trying after round 1.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "No reconciliation exists for a decision-Planner process that dies before finishing. goals.py already solves this exact class of problem for regular goal launches via identity()/_reconcile() (dead pid -> status exited). Here, once run() records an entry with no skipped_reason, decision_points() treats it as permanently done regardless of whether the launched Planner actually completed \u2014 a crashed/killed decision Planner leaves that (goal, kind, payload_key) stuck with no retry path.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The attached-session guard's second clause ('goals.status() shows a running Planner for ROOT via identity()') checks a mechanism that likely never applies to ROOT: goals.start()/status() track headless Planner sessions launched against target repos via serve.py/cli.py, while the actual interactive session on ROOT is launched out-of-band via the `f orch` shell function (README.md:28), which never calls goals.start() against ROOT. This clause probably always finds no record, giving false assurance that two independent guards exist when only the ORCH_DAEMON_HOST check is live.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "tests/test_planner_runs.py",
+      "issue": "The five named tests cover only the ORCH_DAEMON_HOST=mcp half of the attached-session guard (run_skips_when_session_attached). No named test exercises the .orchestrator/planner_session.json live-pid branch, so half of a safety-critical guard (the one meant to prevent a second Planner racing an attached interactive one) ships unverified by the stated acceptance criteria.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "payload_key is only unambiguous for 'held' (task_id + hold_reason). For 'scouts_done' and 'closable' the spec doesn't say what payload_key should be, leaving the dedup key's shape to implementer judgment and risking an inconsistent convention between kinds.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "id": "T-0015",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "spawn.run_worker: never lose a worker result \u2014 truncate oversize results instead of raising",
+  "spec": "Why: scouts T-0009 and T-0010 finished (runs log outcome=done, 10k and 8.7k output tokens) but their results never reached the bus and the tasks stayed \"running\". bus.post_result raises ValueError when json.dumps(result) > MAX_RESULT_CHARS (bus.py:75-80); spawn.run_worker (spawn.py, `if r[\"status\"] == \"done\"` branches) calls it without a guard, so the exception died inside the daemon thread.\n\nWhat (2 files):\n1. orchestrator/spawn.py \u2014 add `def fit_result(result, cap=bus.MAX_RESULT_CHARS)`: if json.dumps(result) fits, return it unchanged; otherwise drop `findings` beyond the first N (binary search or loop) and truncate `summary` to 1,500 chars so the JSON fits under cap minus 200, and set `result[\"truncated\"] = {\"reason\": \"over MAX_RESULT_CHARS\", \"original_chars\": <int>}`. In run_worker wrap both post_result calls: `bus.post_result(task_id, fit_result(...), \"done\")`; and wrap the whole post in try/except Exception as e \u2192 `bus.update(task_id, status=\"failed\", reason=f\"post_result failed: {e}\"[:500])` so a task can never stay \"running\" after its process exits. Also log via bus.log_run(task=..., role=..., outcome=\"post_failed\") in that except.\n2. tests/test_orchestrator.py \u2014 add tests: (a) fit_result on a result with 40 findings of 400 chars each returns JSON under MAX_RESULT_CHARS with `truncated.original_chars` set and at least 1 finding kept; (b) fit_result on a small result returns it unchanged with no `truncated` key. Do not spawn a real claude process in tests.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit on the task branch: \"spawn: fit oversize worker results to the bus cap; never leave a task running after exit\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with two new fit_result tests",
+    "spawn.fit_result exists and json.dumps(fit_result(big)) length < bus.MAX_RESULT_CHARS",
+    "run_worker has no unguarded bus.post_result call (grep shows post_result only inside try or wrapped by fit_result)",
+    "git diff --stat shows only orchestrator/spawn.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0015",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean (`git status` shows nothing left uncommitted).\n\n## Summary\n\nFixed the bug where oversize scout/executor results silently died in `spawn.run_worker`'s daemon thread, leaving tasks stuck \"running\" forever after the process actually exited.\n\n**Files changed:**\n- `orchestrator/spawn.py` \u2014 added `fit_result(result, cap=bus.MAX_RESULT_CHARS)`: returns the result unchanged if it already fits, otherwise truncates `summary` to 1,500 chars, binary-searches the largest prefix of `findings` that fits under `cap - 200`, and tags `result[\"truncated\"] = {\"reason\": ..., \"original_chars\": ...}`. Wrapped both `bus.post_result` calls in `run_worker` in `try/except Exception as e`, which now marks the task `failed` with `f\"post_result failed: {e}\"[:500]` and logs `outcome=\"post_failed\"` via `bus.log_run`.\n- `tests/test_orchestrator.py` \u2014 added `test_fit_result_shrinks_oversize` (40 findings \u00d7 ~380 chars \u2192 fits under cap, `truncated.original_chars` set, \u22651 finding kept) and `test_fit_result_leaves_small_result_unchanged` (small result passes through untouched, no `truncated` key).\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 24 tests, all pass (no failures). `tests_green.sh` gate also exits 0.\n\n`git diff --stat` confirms only the two scoped files changed. Committed on `task/T-0015` (687fa75); not pushed, per the approval-gate rule.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789657623.263959,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789657623.266748,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0015",
+      "claimed_at": 1789657623.266631
+    },
+    {
+      "ts": 1789657623.2714381,
+      "pid": 670,
+      "account": "A"
+    },
+    {
+      "ts": 1789657727.1417549,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean (`git status` shows nothing left uncommitted).\n\n## Summary\n\nFixed the bug where oversize scout/executor results silently died in `spawn.run_worker`'s daemon thread, leaving tasks stuck \"running\" forever after the process actually exited.\n\n**Files changed:**\n- `orchestrator/spawn.py` \u2014 added `fit_result(result, cap=bus.MAX_RESULT_CHARS)`: returns the result unchanged if it already fits, otherwise truncates `summary` to 1,500 chars, binary-searches the largest prefix of `findings` that fits under `cap - 200`, and tags `result[\"truncated\"] = {\"reason\": ..., \"original_chars\": ...}`. Wrapped both `bus.post_result` calls in `run_worker` in `try/except Exception as e`, which now marks the task `failed` with `f\"post_result failed: {e}\"[:500]` and logs `outcome=\"post_failed\"` via `bus.log_run`.\n- `tests/test_orchestrator.py` \u2014 added `test_fit_result_shrinks_oversize` (40 findings \u00d7 ~380 chars \u2192 fits under cap, `truncated.original_chars` set, \u22651 finding kept) and `test_fit_result_leaves_small_result_unchanged` (small result passes through untouched, no `truncated` key).\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 24 tests, all pass (no failures). `tests_green.sh` gate also exits 0.\n\n`git diff --stat` confirms only the two scoped files changed. Committed on `task/T-0015` (687fa75); not pushed, per the approval-gate rule.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789657772.315886,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "cd5048a9b12e426e1c4d53ce29a4ac44f478e7d8"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789657623.266631,
+  "pid": 670,
+  "account": "A",
+  "merged_into": "goal/T-0005",
+  "sha": "cd5048a9b12e426e1c4d53ce29a4ac44f478e7d8"
+}

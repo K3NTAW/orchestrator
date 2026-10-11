@@ -1,0 +1,562 @@
+{
+  "id": "T-0567",
+  "created_at": 1789970897.245158,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 5,
+  "title": "R3: orchestrator/merge_pressure.py \u2014 measure integration contention and defer only coupled work when the merge queue is demonstrably saturated (AP P11)",
+  "spec": "Why: nothing measures the merge queue. merge.merge (orchestrator/merge.py:25-99) fails tasks with reason rebase_conflict, daemon._stale_rebase logs stale rows with action rebase_conflict, and done-but-unmerged execute tasks wait on reviews, but no module aggregates this or informs dispatch (AP P11; brief P6).\nWhat: new pure module orchestrator/merge_pressure.py; no daemon edits.\n- assess(root=STATE, now=None, window_s=86400, cfg=None) -> {\"waiting\": [task ids done, unmerged, gated (pipeline.gated_at or reviews exist)], \"queue_depth\": len, \"median_wait_s\": median(now - first_green_at) over waiting or None, \"recent_conflicts\": count of execute tasks with reason rebase_conflict or hold_reason starting 'merge conflict' or stale rows action rebase_conflict within window_s, \"recent_rebases\": count of stale rows action rebased, \"stale_events\": stale rows with risk high in window, \"invalidated\": tasks whose approval was voided (events with 'approval void' or pipeline.reviews_expected reset) if detectable else 0, \"pressure\": none|elevated|saturated, \"reason\": text}. Thresholds from cfg (pool_config()['scheduler']): merge_pressure_mode = \"observe\"|\"throttle\" (default observe), merge_queue_elevated = 3, merge_queue_saturated = 5, merge_conflicts_saturated = 2. elevated when queue_depth >= elevated; saturated when queue_depth >= saturated OR (queue_depth >= elevated AND recent_conflicts >= merge_conflicts_saturated). One waiting task is never pressure.\n- throttle(candidate_ids, tasks, waiting_ids, assessment, pairwise_rows=None, cfg=None) -> {\"keep\": [...], \"deferred\": {id: \"merge_pressure:<waiting id>\"}, \"applied\": bool}. Applies only when assessment pressure == saturated AND mode == throttle; defers a candidate only if interference.classify(candidate, waiting task) level is hard or soft against any waiting task; independent candidates always kept; in observe mode returns everything kept with applied False but still lists would_defer for telemetry.\n- Read stale rows via schedlog.read('stale'); tasks via the tasks dir under root; tolerate malformed rows.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_merge_pressure.py::test_single_waiting_task_is_no_pressure \u2014 one done unmerged task yields pressure none and throttle keeps every candidate",
+    "tests/test_merge_pressure.py::test_saturated_queue_defers_only_coupled_candidates \u2014 six waiting tasks, mode throttle: a candidate sharing a scope file with a waiting task is deferred with reason merge_pressure:<id>, an independent candidate is kept",
+    "tests/test_merge_pressure.py::test_conflicts_plus_elevated_queue_is_saturated \u2014 three waiting tasks and two recent rebase_conflict events yield pressure saturated with a reason naming both facts",
+    "tests/test_merge_pressure.py::test_observe_mode_records_would_defer_without_applying \u2014 saturated queue in observe mode keeps all candidates, applied is False and would_defer lists the coupled one",
+    "tests/test_merge_pressure.py::test_malformed_stale_rows_are_tolerated \u2014 a stale.jsonl with a broken line still produces an assessment"
+  ],
+  "scope": [
+    "orchestrator/merge_pressure.py",
+    "tests/test_merge_pressure.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/merge.py",
+      "orchestrator/daemon.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/interference.py",
+      "orchestrator/bus.py",
+      "tests/test_schedlog.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "assess(root=STATE, now=None, window_s=86400, cfg=None) -> {waiting, queue_depth, median_wait_s, recent_conflicts, recent_rebases, stale_events, invalidated, pressure none|elevated|saturated, reason}; throttle(candidate_ids, tasks, waiting_ids, assessment, pairwise_rows=None, cfg=None) -> {keep, deferred {id: 'merge_pressure:<id>'}, would_defer, applied}; config under [scheduler]: merge_pressure_mode observe|throttle default observe, merge_queue_elevated 3, merge_queue_saturated 5, merge_conflicts_saturated 2"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0567",
+  "codex_thread": "01a0c294-c3d1-7013-8320-8edf3bca3146",
+  "result": {
+    "summary": "Implemented merge-pressure assessment and selective coupled-work throttling, including observe-mode telemetry and malformed-log tolerance.\n\nFiles changed:\n\n- `orchestrator/merge_pressure.py`\n- `tests/test_merge_pressure.py`\n\nGate: `tests-green: OK 827 58ee5d1 93s`  \nCommit: `333101f0fbd791523ed880a0f0a885cf31f304b6`  \nFailures-only output: empty  \nWorktree: clean",
+    "executed_by": "codex:sol",
+    "thread": "01a0c294-c3d1-7013-8320-8edf3bca3146",
+    "usage": {
+      "input_tokens": 580788,
+      "cached_input_tokens": 550144,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6710,
+      "reasoning_output_tokens": 1354,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789970917.2474189,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383
+      }
+    },
+    {
+      "ts": 1789970917.248786,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735
+      }
+    },
+    {
+      "ts": 1789970917.942613,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302
+      }
+    },
+    {
+      "ts": 1789970924.459643,
+      "packet_meta": {
+        "chars": 4924,
+        "est_tokens": 1231,
+        "hash": "409119ff1148",
+        "version": "409119ff1148",
+        "base": "8c6e2aecf245",
+        "sources": "pool.toml@dd1847e523fe gotchas@c30581ff9742 memory@notes over cap by 124 chars: acceptance kept whole",
+        "policy_version": "dd1847e523fe",
+        "gotchas": "c30581ff9742"
+      }
+    },
+    {
+      "ts": 1789970924.460789,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0567",
+      "claimed_at": 1789970924.4606779
+    },
+    {
+      "ts": 1789970924.461605,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789971285.4904199,
+      "codex_thread": "01a0c294-c3d1-7013-8320-8edf3bca3146",
+      "codex_thread_head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+    },
+    {
+      "ts": 1789971285.494313,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        }
+      }
+    },
+    {
+      "ts": 1789971285.496715,
+      "status": "done",
+      "result": {
+        "summary": "Implemented merge-pressure assessment and selective coupled-work throttling, including observe-mode telemetry and malformed-log tolerance.\n\nFiles changed:\n\n- `orchestrator/merge_pressure.py`\n- `tests/test_merge_pressure.py`\n\nGate: `tests-green: OK 827 58ee5d1 93s`  \nCommit: `333101f0fbd791523ed880a0f0a885cf31f304b6`  \nFailures-only output: empty  \nWorktree: clean",
+        "executed_by": "codex:sol",
+        "thread": "01a0c294-c3d1-7013-8320-8edf3bca3146",
+        "usage": {
+          "input_tokens": 580788,
+          "cached_input_tokens": 550144,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6710,
+          "reasoning_output_tokens": 1354,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971391.084378,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789971484.593067,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789971484.6250849,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        }
+      }
+    },
+    {
+      "ts": 1789971484.8106399,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+      }
+    },
+    {
+      "ts": 1789971484.816929,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847
+      }
+    },
+    {
+      "ts": 1789971676.8361442,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847,
+        "review_held_at": 1789971676.836034
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-0587"
+    },
+    {
+      "ts": 1789971677.152719,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847,
+        "review_held_at": 1789971676.836034,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789971677.183605,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847,
+        "review_held_at": 1789971676.836034,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971676.8361442": true
+        }
+      }
+    },
+    {
+      "ts": 1789972213.490346,
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789972414.588755,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847,
+        "review_held_at": 1789971676.836034,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971676.8361442": true
+        },
+        "merged_at": 1789972414.588612,
+        "merged_at_lease": 1789973314.588612
+      }
+    },
+    {
+      "ts": 1789972501.315886,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c"
+    },
+    {
+      "ts": 1789972501.6271338,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847,
+        "review_held_at": 1789971676.836034,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971676.8361442": true
+        },
+        "merged_at": 1789972414.588612,
+        "merged_at_lease": 1789973314.588612,
+        "accepted_at": 1789972501.6267729
+      }
+    },
+    {
+      "ts": 1789972501.716757,
+      "pipeline": {
+        "first_ready_at": 1789970917.247383,
+        "dispatched_at": 1789970917.248735,
+        "dispatched_at_lease": 1789971817.248735,
+        "dispatched_at_done": 1789970917.9425302,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971484.59295,
+        "gated_at_lease": 1789972384.59295,
+        "first_green_at": 1789971484.592449,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0567",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971484.6246989,
+          "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+        },
+        "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+        "gated_at_done": 1789971484.816847,
+        "review_held_at": 1789971676.836034,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971676.8361442": true
+        },
+        "merged_at": 1789972414.588612,
+        "merged_at_lease": 1789973314.588612,
+        "accepted_at": 1789972501.6267729,
+        "merged_at_done": 1789972501.716636
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789970917.247383,
+    "dispatched_at": 1789970917.248735,
+    "dispatched_at_lease": 1789971817.248735,
+    "dispatched_at_done": 1789970917.9425302,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "257b97fb66675f9ef79e7297c2b51142052ec3ee"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789971484.59295,
+    "gated_at_lease": 1789972384.59295,
+    "first_green_at": 1789971484.592449,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0567",
+      "goal_head": "goal/T-0561",
+      "moved_count": 0,
+      "stale_paths": [],
+      "risk": "unknown",
+      "checked_at": 1789971484.6246989,
+      "head": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+    },
+    "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+    "gated_at_done": 1789971484.816847,
+    "review_held_at": 1789971676.836034,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789971676.8361442": true
+    },
+    "merged_at": 1789972414.588612,
+    "merged_at_lease": 1789973314.588612,
+    "accepted_at": 1789972501.6267729,
+    "merged_at_done": 1789972501.716636
+  },
+  "packet_meta": {
+    "chars": 4924,
+    "est_tokens": 1231,
+    "hash": "409119ff1148",
+    "version": "409119ff1148",
+    "base": "8c6e2aecf245",
+    "sources": "pool.toml@dd1847e523fe gotchas@c30581ff9742 memory@notes over cap by 124 chars: acceptance kept whole",
+    "policy_version": "dd1847e523fe",
+    "gotchas": "c30581ff9742"
+  },
+  "claimed_at": 1789970924.4606779,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+  "hold_reason": null,
+  "merged_into": "goal/T-0561",
+  "sha": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c"
+}

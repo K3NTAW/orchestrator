@@ -1,0 +1,100 @@
+{
+  "id": "T-0028",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Review B2 (T-0017), rerun on a correctly based worktree: executor routing, per-executor -m, quota-group cooldowns, run-log fields",
+  "spec": "Adversarial review of the T-0017 diff (commit a01dc3c on task/T-0017, which sits on goal/T-0005 = B1 executors table + fix round). Your worktree is based on task/T-0017, so Pool.pick_executor, cooldown_executor, codex_available(complexity) and the [[executors]] table in .orchestrator/pool.toml exist; verify that first (grep pick_executor orchestrator/pool.py) before judging. The previous review (T-0026) ran on an origin/main worktree and its findings were artefacts of the missing base; ignore them. Review only the changes in orchestrator/executor.py, orchestrator/spawn.py, orchestrator/bus.py and the new tests in tests/test_orchestrator.py from commit a01dc3c (`git show a01dc3c`). Focus: (1) start() picks by the task's real complexity and passes that executor's model to -m; reply() reuses the recorded executor and never re-picks; (2) usage-limit \u2192 cooldown_executor cools the whole quota_group; running/day_tasks increments and decrements balance on every path incl. timeout/exception; (3) log_run entries carry executor and complexity; token key normalized to cache_read_input_tokens without losing the Codex value; (4) legacy pool.codex fields keep status() meaningful or are removed consistently; (5) does new code worsen last-writer-wins clobbering of pool_state.json across concurrent Pool() instances; (6) tests assert behaviour, not implementation. Run `uv run python -m unittest tests/test_orchestrator.py` in your worktree and report its result line. Return ONLY the review JSON {\"verdict\":\"approve|request_changes\",\"comments\":[{\"path\":\"\",\"line\":0,\"issue\":\"\",\"severity\":\"low|med|high\"}]}; under 3,000 chars.",
+  "inputs": [
+    "T-0017"
+  ],
+  "acceptance": [
+    "reviewer confirms pick_executor exists in its worktree before judging",
+    "verdict with line-anchored comments on commit a01dc3c only",
+    "unit test result line reported",
+    "result under 3,000 chars"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0028",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 100,
+        "issue": "start() no longer calls pool.codex_available(), which used to reset pool.codex.day/day_tasks on a new day. Now only status()/codex_available() do that reset, so if start() runs before either on a fresh day, pool.codex.day_tasks keeps incrementing against a stale codex.day and never rolls over in that path. Low impact: real routing decisions use ex.day_tasks (correctly rolled via pick_executor's ex.roll_day()), so this only staleness in the deprecated legacy-mirror field pool.codex.*, not a routing bug.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "line": 94,
+        "issue": "getattr(pool, 'scores', dict)() silently returns {} today since Pool has no scores attribute; if a future B3 change adds self.scores as a plain dict rather than a zero-arg method, this call breaks (dict object not callable). Not exploitable now, worth a comment for whoever wires up B3.",
+        "severity": "low"
+      }
+    ],
+    "unit_tests": "python3 -m unittest tests.test_orchestrator: Ran 33 tests in 7.876s - OK",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789659155.0814269,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0028",
+      "claimed_at": 1789659155.081322
+    },
+    {
+      "ts": 1789659155.110271,
+      "pid": 41969,
+      "account": "B"
+    },
+    {
+      "ts": 1789659402.077887,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 100,
+            "issue": "start() no longer calls pool.codex_available(), which used to reset pool.codex.day/day_tasks on a new day. Now only status()/codex_available() do that reset, so if start() runs before either on a fresh day, pool.codex.day_tasks keeps incrementing against a stale codex.day and never rolls over in that path. Low impact: real routing decisions use ex.day_tasks (correctly rolled via pick_executor's ex.roll_day()), so this only staleness in the deprecated legacy-mirror field pool.codex.*, not a routing bug.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 94,
+            "issue": "getattr(pool, 'scores', dict)() silently returns {} today since Pool has no scores attribute; if a future B3 change adds self.scores as a plain dict rather than a zero-arg method, this call breaks (dict object not callable). Not exploitable now, worth a comment for whoever wires up B3.",
+            "severity": "low"
+          }
+        ],
+        "unit_tests": "python3 -m unittest tests.test_orchestrator: Ran 33 tests in 7.876s - OK",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789659155.081322,
+  "pid": 41969,
+  "account": "B"
+}

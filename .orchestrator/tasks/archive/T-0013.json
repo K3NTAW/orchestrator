@@ -1,0 +1,190 @@
+{
+  "id": "T-0013",
+  "parent": "T-0005",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout (telemetry gap, capped rerun of T-0010): outcome data that exists vs a per-executor scorecard",
+  "spec": "HARD OUTPUT CAP: your entire JSON result must be under 4,500 characters or it is dropped by the bus (T-0010 was lost this way). At most 10 findings; each claim \u2264160 chars; evidence = path:line only; no code quotes.\nRead-only. Inventory: (1) every bus.log_run call site and the fields it writes (orchestrator/spawn.py, orchestrator/executor.py); (2) per-task outcome fields on the bus json: status, rounds, reason, resume_hint, review verdict/comments, merged_into, sha, fallback, tier, account (bus.py, executor.py, merge.py, spawn.py); (3) how cli.py cost --by aggregates. Then, in suggested_next (\u22646 items, \u2264220 chars each): for each scorecard metric \u2014 merged vs failed, rounds to green, wall time, tokens/USD, usage-limit hits, review request_changes, complexity bucket \u2014 name the existing field or \"missing: write at <path:function>\", and give a \u22648-line scorecard.json shape keyed by executor id.",
+  "inputs": [],
+  "acceptance": [
+    "result JSON under 4,500 chars and posted to the bus",
+    "all log_run call sites listed with path:line",
+    "each scorecard metric mapped to a field or a missing-write location"
+  ],
+  "scope": [
+    "orchestrator/**",
+    ".orchestrator/runs/**"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0013",
+  "codex_thread": null,
+  "result": {
+    "summary": "Posted to the bus as T-0013, status done. Summary: 4 `log_run` call sites (executor.py:58/61, spawn.py:92/101) found, one field-naming inconsistency flagged (`cached_input_tokens` vs `cache_read_input_tokens`). All 7 scorecard metrics mapped \u2014 3 have existing fields (status, rounds, duration_s/tokens), 4 need new writes (USD for Codex, outcome/complexity grouping in cli.py, review verdict). Result is 3,180 chars, under the 4,500 cap that lost T-0010.",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789657410.2954812,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0013",
+      "claimed_at": 1789657410.295169
+    },
+    {
+      "ts": 1789657410.373868,
+      "pid": 91557,
+      "account": "B"
+    },
+    {
+      "ts": 1789657490.403847,
+      "status": "done",
+      "result": {
+        "findings": [
+          {
+            "claim": "log_run call site: Codex usage-limit hit logs outcome=usage_limit + cooldown_s",
+            "evidence": [
+              "orchestrator/executor.py:58"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "log_run call site: Codex run end logs duration_s, outcome, cached_input_tokens (not cache_read_input_tokens)",
+            "evidence": [
+              "orchestrator/executor.py:61"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "log_run call site: Claude worker rate-limit logs outcome=rate_limit + cooldown_s",
+            "evidence": [
+              "orchestrator/spawn.py:92"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "log_run call site: Claude worker run end logs duration_s, outcome, usd, cache_read/creation_input_tokens",
+            "evidence": [
+              "orchestrator/spawn.py:101"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Token field names diverge across tiers (cached_input_tokens vs cache_read_input_tokens), breaking cross-tier aggregation",
+            "evidence": [
+              "orchestrator/executor.py:62",
+              "orchestrator/spawn.py:103"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Per-task outcome lives in task json via bus.update: status/rounds/hold_reason/resume_hint/reason",
+            "evidence": [
+              "orchestrator/executor.py:105",
+              "orchestrator/merge.py:24"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "merged_into+sha set only on successful merge; fallback+tier+account set on Codex-to-Claude fallback",
+            "evidence": [
+              "orchestrator/merge.py:35",
+              "orchestrator/spawn.py:93"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "No review verdict/request_changes field anywhere; review output is opaque result JSON via post_result",
+            "evidence": [
+              "orchestrator/spawn.py:145"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "cli.py cost() only sums input/output/cache_read_input_tokens + run count; no usd/duration_s/outcome rollup",
+            "evidence": [
+              "orchestrator/cli.py:13"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "--by choices are role/tier/account/task only; no outcome or complexity grouping possible",
+            "evidence": [
+              "orchestrator/cli.py:23"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Does prompts/review.md define a structured verdict the Planner parses out-of-band, outside these 4 files?"
+        ],
+        "suggested_next": [
+          "merged/failed+rounds: field task.status (bus.py:11,52; merge.py:35=done). rounds written executor.py:110 only; missing for Claude execute path in spawn.py run_worker.",
+          "wall time+tokens: duration_s & tokens via log_run (executor.py:58/61, spawn.py:92/101); cli.py:14 sums tokens only, not duration_s -> add it.",
+          "USD: field only in spawn.py:102 (Claude runs); missing: no usd capture for Codex at executor.py:58/61.",
+          "usage-limit hits: outcome=usage_limit/rate_limit at executor.py:58, spawn.py:92; missing: cli.py:23 has no by=outcome choice to count them.",
+          "review request_changes: missing entirely - no verdict field; review result opaque via spawn.py:145 post_result; would need explicit write there.",
+          "complexity bucket: never passed to log_run (executor.py:58/61, spawn.py:92/101). scorecard.json shape: {\"<executor_id>\":{\"merged\":0,\"failed\":0,\"rounds_avg\":0,\"wall_s\":0,\"tokens\":{\"in\":0,\"out\":0},\"usd\":0,\"usage_limit_hits\":0,\"review_request_changes\":0}}"
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789657494.681293,
+      "status": "done",
+      "result": {
+        "summary": "Posted to the bus as T-0013, status done. Summary: 4 `log_run` call sites (executor.py:58/61, spawn.py:92/101) found, one field-naming inconsistency flagged (`cached_input_tokens` vs `cache_read_input_tokens`). All 7 scorecard metrics mapped \u2014 3 have existing fields (status, rounds, duration_s/tokens), 4 need new writes (USD for Codex, outcome/complexity grouping in cli.py, review verdict). Result is 3,180 chars, under the 4,500 cap that lost T-0010.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789657410.295169,
+  "pid": 91557,
+  "account": "B"
+}

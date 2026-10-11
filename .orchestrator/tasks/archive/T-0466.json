@@ -1,0 +1,146 @@
+{
+  "id": "T-0466",
+  "parent": "T-0445",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "P2b: fix rounds resume the parent Codex thread when the worktree is compatible \u2014 daemon.auto_fix_round and Planner fix-round tasks dispatch as executor.reply with a delta (failures or review comments) on the held task's thread instead of a fresh exec with the full spec; fresh dispatch only when incompatible, with the reason recorded; run rows log resume mode so tokens for resumed vs fresh fix rounds are comparable",
+  "spec": "Phase I P2 (brief .orchestrator/phase-i-program.md: preserve resume, avoid forcing models to reread unchanged state). Base goal/T-0445 after P1c (T-0463) merges (P1a already merged: packets reach Codex, packet_meta and prompt_chars on rows). Scout facts: executor.reply resumes the same codex thread with a short delta when _resume_compatible (worktree clean, expected head an ancestor of HEAD), MAX_ROUNDS 5, and falls back to packet()+delta as a fresh exec when incompatible (executor.py:17, 155-170, 309-339); daemon.auto_fix_round creates a new bus task with a fresh worktree and a fresh codex thread through the normal dispatch path (daemon.py:139-201, _fix_round_spec 104-136); fix-round lineage via constraints.fix_round_for and auto_round; H7 added the worktree compatibility check.\n1. daemon.dispatch for a task with constraints.fix_round_for = P (the held parent): if P has a codex_thread and executor._resume_compatible(P's worktree, P's expected head) holds and P's rounds < MAX_ROUNDS, dispatch the fix round as executor.reply(P, delta) where delta = the fix-round task's spec reduced to its failure section (resume_hint.failures or the review comments and the acceptance ids), not the full packet; the fix-round task records pipeline.resume = {\"mode\": \"resume\", \"thread\": <id>, \"parent\": P} and the resulting commit lands on P's branch, which the fix-round task then adopts as its worktree and branch (so gate and merge treat it as before). Otherwise dispatch fresh as today (P1a packet) with pipeline.resume = {\"mode\": \"fresh\", \"reason\": \"no_thread\" | \"incompatible_worktree\" | \"rounds_exhausted\" | \"executor_not_codex\"}.\n2. executor.reply logs its run row with resume_mode = \"resume\" and the fix-round task id (so attribution puts the row in bucket fix_round under the lineage root); fresh fix rounds log resume_mode = \"fresh\". Existing MAX_ROUNDS and the incompatible-resume repair path stay.\n3. The fix-round task remains its own bus task with its own id and lineage (P0 metrics and G7 reconciliation unchanged); only the executor invocation changes.\nTests tests/test_daemon.py: test_fix_round_dispatch_resumes_parent_thread_when_compatible (mock executor.reply, assert called with the parent and a delta containing the failures and not the full spec; pipeline.resume mode resume), test_fix_round_dispatch_fresh_when_worktree_incompatible_records_reason, test_fix_round_dispatch_fresh_when_parent_has_no_thread; tests/test_executor.py: test_reply_run_row_logs_resume_mode_and_fix_round_task, test_fresh_fix_round_row_logs_resume_mode_fresh. Existing tests green (the H7 resume tests and G7 lineage tests stay); .claude/hooks/tests-green.sh exits 0; commit with the task id including every named test; report sha and failures only.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_fix_round_dispatch_resumes_parent_thread_when_compatible, test_fix_round_dispatch_fresh_when_worktree_incompatible_records_reason, test_fix_round_dispatch_fresh_when_parent_has_no_thread pass",
+    "tests/test_executor.py::test_reply_run_row_logs_resume_mode_and_fix_round_task, test_fresh_fix_round_row_logs_resume_mode_fresh pass",
+    "a compatible fix round never re-sends the full spec or packet; every fix-round task carries pipeline.resume with mode and reason; lineage and MAX_ROUNDS unchanged",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [
+    "T-0463"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "fix-rounds"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0466",
+  "codex_thread": "01a0c044-0ce9-7ec3-9f16-c1576e12a6c2",
+  "result": {
+    "summary": "Implemented and committed T-0466.\n\n- Compatible fix rounds resume the parent Codex thread using failure-only deltas.\n- Fresh fallbacks record explicit reasons.\n- Run rows correctly attribute resume mode and fix-round task lineage.\n- All five named tests pass.\n- Full gate passed: `tests-green: OK 701 29606ef 112s`\n- Commit: `21c34a77d9baff7dfee3d0165651a5a1dbb8b071`\n\nFiles changed:\n\n```text\norchestrator/daemon.py   | 54 ++++++++++++++++++++++++++++++++++++++++++++++++\norchestrator/executor.py | 16 ++++++++++----\ntests/test_daemon.py     | 36 ++++++++++++++++++++++++++++++++\ntests/test_executor.py   | 21 +++++++++++++++++++\n4 files changed, 123 insertions(+), 4 deletions(-)\n```\n\nFailures-only output:\n\n```text\nscripts/failures_only.sh: No such file or directory\n```\n\nThe requested `scripts/tests_green.sh` was also absent; the repository\u2019s `.claude/hooks/tests-green.sh .` completed successfully.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c044-0ce9-7ec3-9f16-c1576e12a6c2",
+    "usage": {
+      "input_tokens": 624143,
+      "cached_input_tokens": 583936,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6079,
+      "reasoning_output_tokens": 989
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789932078.498324,
+      "pipeline": {
+        "dispatched_at": 1789932078.498274
+      }
+    },
+    {
+      "ts": 1789932080.051908,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0466",
+      "claimed_at": 1789932080.0514839
+    },
+    {
+      "ts": 1789932080.053438,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789932338.2834601,
+      "codex_thread": "01a0c044-0ce9-7ec3-9f16-c1576e12a6c2"
+    },
+    {
+      "ts": 1789932338.28739,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed T-0466.\n\n- Compatible fix rounds resume the parent Codex thread using failure-only deltas.\n- Fresh fallbacks record explicit reasons.\n- Run rows correctly attribute resume mode and fix-round task lineage.\n- All five named tests pass.\n- Full gate passed: `tests-green: OK 701 29606ef 112s`\n- Commit: `21c34a77d9baff7dfee3d0165651a5a1dbb8b071`\n\nFiles changed:\n\n```text\norchestrator/daemon.py   | 54 ++++++++++++++++++++++++++++++++++++++++++++++++\norchestrator/executor.py | 16 ++++++++++----\ntests/test_daemon.py     | 36 ++++++++++++++++++++++++++++++++\ntests/test_executor.py   | 21 +++++++++++++++++++\n4 files changed, 123 insertions(+), 4 deletions(-)\n```\n\nFailures-only output:\n\n```text\nscripts/failures_only.sh: No such file or directory\n```\n\nThe requested `scripts/tests_green.sh` was also absent; the repository\u2019s `.claude/hooks/tests-green.sh .` completed successfully.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c044-0ce9-7ec3-9f16-c1576e12a6c2",
+        "usage": {
+          "input_tokens": 624143,
+          "cached_input_tokens": 583936,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6079,
+          "reasoning_output_tokens": 989
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789932458.9751198,
+      "pipeline": {
+        "dispatched_at": 1789932078.498274,
+        "gated_at": 1789932458.974984,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789932762.108765,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789932767.491454,
+      "pipeline": {
+        "dispatched_at": 1789932078.498274,
+        "gated_at": 1789932458.974984,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789932767.49134
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0478 (request_changes)"
+    },
+    {
+      "ts": 1789933920.1727948,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789934846.612211,
+      "status": "done",
+      "merged_into": "goal/T-0445",
+      "merged_via": "fix round T-0482 e5d451e",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789932078.498274,
+    "gated_at": 1789932458.974984,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789932767.49134
+  },
+  "claimed_at": 1789932080.0514839,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0445",
+  "merged_via": "fix round T-0482 e5d451e"
+}

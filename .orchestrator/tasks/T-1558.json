@@ -1,0 +1,184 @@
+{
+  "id": "T-1558",
+  "created_at": 1790940976.85452,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "B6 v2: empty-merge guard: a fix-round merge stamps an ancestor merged only when its commits are on the target (ancestry, then git cherry, then an existing merged_into for a cleaned branch); a fix round with no commit beyond the target is held, and the daemon's merge caller keeps that hold",
+  "spec": "Goal T-1403, wave 2, plan label B6-v2. Respec of B6 T-1551 (superseded; spec review request_changes 2026-10-02 12:05). Cuts from goal/T-1403; depends on E6v2 T-1548 (merged). This text is the whole contract. Evidence (U6 resolved 2026-10-01 from luna-inbox): fix round T-0560 (re-gate of T-0555, itself a fix round of T-0554) merged into goal/T-0551 with changed_files [] (its branch carried no commit beyond the target), and daemon.report_merge stamped T-0555 and T-0554 'merged_via fix round T-0560 ...' although T-0554's commits f933e6a and ba1f5c9 never reached goal/T-0551. Same class as the 2026-09-24 gotcha (T-0174/T-0191).\n\nFacts (goal/T-1403 after E6v2; line numbers from that daemon.py, locate by symbol):\n- report_merge(task_id, r) (daemon.py ~1505-1546): on status merged, walks constraints.fix_round_for from the fix task to the lineage root and sets status done, merged_into, merged_via on every ancestor without checking anything.\n- Three callers of report_merge(id, merge.merge(id)): (A) the gate path (~1496) `if n_reviews == 0: report_merge(...)` then complete(t['id'], 'gated_at'), no hold on a non-merged result; (B) the reviews path (~1627-1633): `result = report_merge(...)`, complete('merged_at'), and `if result.get('status') != 'merged': ... bus.update(t['id'], status='held', hold_reason=f\"merge {result.get('status')}\")`, which would overwrite a hold merge.merge wrote; (C) the review-children path (~1688) `if expected == 0: report_merge(tid, merge.merge(tid)); complete(tid, stage)`, no hold.\n- merge.merge() (merge.py ~28-122): rebases wt onto target, runs the gate, fast-forwards target to HEAD of the task branch, records changed_files = diff previous_sha..sha, returns {'status': 'merged', 'target', 'sha'}; early returns for rebase_conflict and tests_red write the task's hold/failed status themselves before returning.\n- daemon.already_merged(t) (~425-456) proves a task landed with `git merge-base --is-ancestor task/<id> target` (after excluding an unchanged target head and branches with no commits beyond trunk) and stamps merged_via 'ancestor'.\n- gitutil._git_in(worktree, *args) is subprocess.run(['git', *args], cwd=worktree, capture_output=True, text=True): no timeout, raises OSError when cwd is missing. daemon.py already imports gitutil (`from . import failures, gate as gate_runner, gitutil, ...`) and the repo root is importable as `from . import ROOT` (spawn.py does the same).\n- auto_fix_round (~148-225) skips holds 'gate_timeout', 'cancelled' and 'render_error...' (lines ~152-159) before filing a round; other fix_round_for chain readers: auto_fix_round's lineage walk (~169) and the chain check near ~933.\n- spawn.base_for cuts a fix round from task/<fix_round_for>, so normally the fix branch contains the ancestor commits; the walk is wrong only when the fix branch was cut elsewhere, the ancestor branch moved after the cut, or the fix round carried nothing.\n\nChange:\n1. daemon.landed(ancestor_id, target, *, git=None) -> bool. git defaults to gitutil._git_in and is called as git(ROOT, *args) with ROOT from `from . import ROOT` (the repo root, where task/* and goal/* refs live); every call is wrapped so OSError and subprocess.TimeoutExpired return False. Steps: (a) `git show-ref --verify --quiet refs/heads/task/<ancestor_id>`: returncode 1 means the branch is missing -> return True ONLY when bus.get(ancestor_id) already records merged_into (an earlier merge cleaned the branch); a missing ref without merged_into -> False; any other non-zero code -> False. (b) `git merge-base --is-ancestor task/<id> <target>` returncode 0 -> True. (c) `git cherry <target> task/<id>`: returncode 0 and every non-empty output line starts with '-' -> True (every commit has a patch-identical equivalent on the target, which covers rebased branches); any '+' line or a non-zero code -> False.\n2. report_merge: on status merged, FIRST compute verdicts = {ancestor_id: landed(ancestor_id, r['target'])} for the whole fix_round_for chain outside any lock (git I/O never runs under bus.locked()), then under bus.locked() apply: walking from the fix task upward, stamp an ancestor done/merged_into/merged_via exactly as today while verdicts[id] is True; at the first False stop the walk and write exactly these fields on that ancestor: status 'held', hold_reason 'unlanded_after_fix_round: <fix id>', resume_hint {'fix_round': fix id, 'target': r['target'], 'target_sha': r['sha'], 'prior_status': its status before, 'prior_hold_reason': its hold_reason before}; merged_into, merged_via and accepted_at of that ancestor and of everything above it are untouched (the lineage root's accepted_at stays unset). The fix task itself is done and merged as today (its own commits landed). Record pipeline.ancestor_stamps = {ancestor id: 'merged' | 'unlanded' | 'skipped'} on the fix task and notify '<fix id> merged but ancestor <id> commits are not on <target>; held'. auto_fix_round adds hold_reason prefix 'unlanded_after_fix_round' to its skip list next to cancelled/render_error/gate_timeout (a Planner re-lands it; no automatic round), and the chain check near ~933 treats such a held ancestor like any held task (state in a comment that a done fix child with a held ancestor is expected there).\n3. merge.merge(): directly after the rebase succeeds and BEFORE gate.run_gate and before the fast-forward, when the task is a fix round (constraints.fix_round_for) and `git rev-list --count <target>..HEAD` in the worktree is 0 (no commit beyond the target; this catches a branch that was behind the target and got fast-forwarded by the rebase, the T-0560 shape; the 'HEAD before == HEAD after' test is NOT used), write the hold the same way the rebase_conflict early return writes its status (same lock discipline, same early-return shape): bus.update(task_id, status='held', hold_reason='empty_merge: fix round added no commit') and return {'status': 'empty_merge', 'target': target, 'sha': <target head>} without running the gate or moving the target. A non-fix task with no commit beyond the target keeps today's behaviour.\n4. Callers: caller (B) keeps a hold merge.merge already wrote: it re-reads the task after report_merge and writes hold_reason f\"merge {status}\" only when the fresh status is not already 'held' (so 'empty_merge: fix round added no commit' survives); callers (A) and (C) do not hold and need no change beyond report_merge's own behaviour; a test drives caller (B) with merge.merge patched to return {'status': 'empty_merge', ...} after writing the hold and asserts the hold_reason survives.\n\nTests (SPEC RULE): the existing report_merge tests (tests/test_daemon.py ~2085 and ~2903) use fake targets like 'goal/G' with sha 'abc12345' and no real branches: patch daemon.landed to return True in those tests so they keep their old assertions; the acceptance tests use a real scratch_repo (tests/_harness.py scratch_repo) and inject git through landed's git= seam or patch daemon.ROOT to the scratch repo, stating which; tests/test_merge.py tests that merge an empty branch must not be fix rounds (grep 'fix_round_for'). Run tests/test_daemon.py and tests/test_merge.py.\n\nOut of scope: spawn.py (B7), bus.py, planner_runs.py, gitutil.py. Rollback: git revert of the merge; ancestors held 'unlanded_after_fix_round' or 'empty_merge' after a revert are cleared with `orchestrator retry <id>`.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_fix_round_merge_stamps_only_landed_ancestors: passes: in a real scratch repo, report_merge for a fix round whose fix_round_for ancestor branch is an ancestor of the target stamps it merged_via 'fix round ...'; when the ancestor branch holds a commit not reachable from the target and not patch-identical to anything on it, that ancestor gets status held, hold_reason 'unlanded_after_fix_round: <fix id>' and resume_hint with fix_round, target, target_sha, prior_status and prior_hold_reason, its merged_into stays unset, the walk stops below it, the fix task itself is done and merged, pipeline.ancestor_stamps records 'unlanded', a notify names both ids, no git call happens while bus.locked is held (asserted through a landed seam that checks bus._held.depth == 0), and auto_fix_round files no round for the held ancestor",
+    "tests/test_daemon.py::test_landed_uses_ancestry_cherry_then_merged_into: passes: daemon.landed is True for an ancestor branch, True for a branch whose commits were rebased onto the target (git cherry shows only '-' lines), False for a branch with an unlanded commit ('+' line), True for a missing branch only when the ancestor task records merged_into and False for a missing branch without it, and False when the injected git raises OSError or returns a non-zero code on the ancestry and cherry checks",
+    "tests/test_merge.py::test_fix_round_with_no_new_commit_is_empty_merge: passes: merge.merge on a fix-round task whose branch is strictly behind the target (the rebase fast-forwards it; HEAD moves) returns status 'empty_merge' without calling gate.run_gate (patched and asserted not called), leaves the target ref unchanged and holds the task 'empty_merge: fix round added no commit'; a non-fix task with the same branch still merges as today",
+    "tests/test_daemon.py::test_reviews_merge_caller_keeps_empty_merge_hold: passes: on the reviews path with merge.merge patched to hold the task 'empty_merge: fix round added no commit' and return status 'empty_merge', the task's hold_reason is still 'empty_merge: fix round added no commit' after the tick (not 'merge empty_merge'), while a result status 'rebase_conflict' from a merge that did not hold still ends with hold_reason 'merge rebase_conflict' as today",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [
+    "T-1548"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "full",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B6-v2",
+    "respec_for": "T-1551"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790941045.252199,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1559 (same B6 v2 text filed as a fix round of T-1551 so B9/B5 dependents stay valid; 2026-10-02 12:45)"
+    },
+    {
+      "ts": 1790941051.21056,
+      "pipeline": {
+        "first_ready_at": 1790941051.210496
+      }
+    },
+    {
+      "ts": 1790941051.730101,
+      "pipeline": {
+        "first_ready_at": 1790941051.210496,
+        "spec_review_at": 1790941051.730048,
+        "spec_review_at_lease": 1790941951.730048
+      }
+    },
+    {
+      "ts": 1790941051.739454,
+      "pipeline": {
+        "first_ready_at": 1790941051.210496,
+        "spec_review_at": 1790941051.730048,
+        "spec_review_at_lease": 1790941951.730048,
+        "spec_review_at_done": 1790941051.7393851
+      }
+    },
+    {
+      "ts": 1790941131.187702,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec says to get ROOT with `from . import ROOT` and to patch `daemon.ROOT` in tests. daemon.py has no ROOT name. It uses `spawn.ROOT` at ~628, ~857 and ~1515, and the neighbouring `report_merge` code does the same. A new module-level ROOT would not follow the `spawn.ROOT` patches that existing daemon tests use. Pick one source, preferably `spawn.ROOT` to match `report_merge`, and name that in the spec.",
+          "severity": "med",
+          "line": 1515
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "merge.merge holds a fix round with 'empty_merge: fix round added no commit' (status held, role execute), but only 'unlanded_after_fix_round' is added to auto_fix_round's skip list. auto_fix_round (~149-170) would then file a fix round for the empty fix round. That round would likely be empty too, giving an empty_merge loop up to the auto_fix_rounds cap. The spec adds no skip, no test and no acceptance criterion for this.",
+          "severity": "high",
+          "line": 151
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The held ancestor's resume_hint is overwritten with the new hint, and only prior_status and prior_hold_reason are kept. If the ancestor was held with its own resume_hint (for example gate output), that hint is lost. `orchestrator retry` clears the hold, so the loss cannot be undone.",
+          "severity": "low",
+          "line": 1537
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "landed() step (a) returns True for a missing branch whenever the ancestor records merged_into. That field is also set by the faulty fix-round stamping this change corrects. A T-0554 that was wrongly stamped before this fix still reads as landed, and merged_into is not checked against the target. Compare it to the target, or document the limitation.",
+          "severity": "med",
+          "line": 1538
+        },
+        {
+          "path": "orchestrator/merge.py",
+          "issue": "The spec places the empty-merge check 'directly after the rebase succeeds'. Two early returns sit between the rebase and the gate: the `diff_unavailable` failure and `rebase_changed_diff`. Insert after the `after_diff` and `rebase_changed_diff` checks, immediately before `gate.run_gate`. Say so explicitly, because the reviewed-diff hash compare could otherwise be bypassed or reordered.",
+          "severity": "low",
+          "line": 57
+        },
+        {
+          "path": "orchestrator/merge.py",
+          "issue": "The spec says to write the hold 'the same way the rebase_conflict early return writes its status'. That return actually sets status 'failed' with reason 'rebase_conflict', and returns {'status': 'conflict'}. Neither is 'held' or 'rebase_conflict'. The spec's wording on caller B ('rebase_conflict ... as today') does not match the real result status 'conflict'. The new return shape and the real 'conflict' status need to be stated precisely.",
+          "severity": "low",
+          "line": 48
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Callers A (~1496) and C (~1688) call complete(gated_at or stage) after report_merge even when the result is empty_merge. The task is held but its stage is marked complete. The spec says these callers 'need no change' without checking that a later tick does not re-gate or re-merge. report_merge also notifies 'merge failed: empty_merge' for this case, which is a poor message next to the new notify text.",
+          "severity": "med",
+          "line": 1496
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The acceptance test uses `bus._held.depth == 0` as a seam, but `bus._held` is a threading.local with a `depth` attribute that is unset until the lock is first taken. The test must use `getattr(bus._held, 'depth', 0)`. Verdicts for all ancestors are also computed even when the walk stops at the first False, which wastes git calls. Compute lazily, or say it is intentional.",
+          "severity": "low",
+          "line": 1526
+        }
+      ]
+    }
+  ],
+  "hold_reason": "superseded by T-1559 (same B6 v2 text filed as a fix round of T-1551 so B9/B5 dependents stay valid; 2026-10-02 12:45)",
+  "pipeline": {
+    "first_ready_at": 1790941051.210496,
+    "spec_review_at": 1790941051.730048,
+    "spec_review_at_lease": 1790941951.730048,
+    "spec_review_at_done": 1790941051.7393851
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec says to get ROOT with `from . import ROOT` and to patch `daemon.ROOT` in tests. daemon.py has no ROOT name. It uses `spawn.ROOT` at ~628, ~857 and ~1515, and the neighbouring `report_merge` code does the same. A new module-level ROOT would not follow the `spawn.ROOT` patches that existing daemon tests use. Pick one source, preferably `spawn.ROOT` to match `report_merge`, and name that in the spec.",
+      "severity": "med",
+      "line": 1515
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "merge.merge holds a fix round with 'empty_merge: fix round added no commit' (status held, role execute), but only 'unlanded_after_fix_round' is added to auto_fix_round's skip list. auto_fix_round (~149-170) would then file a fix round for the empty fix round. That round would likely be empty too, giving an empty_merge loop up to the auto_fix_rounds cap. The spec adds no skip, no test and no acceptance criterion for this.",
+      "severity": "high",
+      "line": 151
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The held ancestor's resume_hint is overwritten with the new hint, and only prior_status and prior_hold_reason are kept. If the ancestor was held with its own resume_hint (for example gate output), that hint is lost. `orchestrator retry` clears the hold, so the loss cannot be undone.",
+      "severity": "low",
+      "line": 1537
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "landed() step (a) returns True for a missing branch whenever the ancestor records merged_into. That field is also set by the faulty fix-round stamping this change corrects. A T-0554 that was wrongly stamped before this fix still reads as landed, and merged_into is not checked against the target. Compare it to the target, or document the limitation.",
+      "severity": "med",
+      "line": 1538
+    },
+    {
+      "path": "orchestrator/merge.py",
+      "issue": "The spec places the empty-merge check 'directly after the rebase succeeds'. Two early returns sit between the rebase and the gate: the `diff_unavailable` failure and `rebase_changed_diff`. Insert after the `after_diff` and `rebase_changed_diff` checks, immediately before `gate.run_gate`. Say so explicitly, because the reviewed-diff hash compare could otherwise be bypassed or reordered.",
+      "severity": "low",
+      "line": 57
+    },
+    {
+      "path": "orchestrator/merge.py",
+      "issue": "The spec says to write the hold 'the same way the rebase_conflict early return writes its status'. That return actually sets status 'failed' with reason 'rebase_conflict', and returns {'status': 'conflict'}. Neither is 'held' or 'rebase_conflict'. The spec's wording on caller B ('rebase_conflict ... as today') does not match the real result status 'conflict'. The new return shape and the real 'conflict' status need to be stated precisely.",
+      "severity": "low",
+      "line": 48
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Callers A (~1496) and C (~1688) call complete(gated_at or stage) after report_merge even when the result is empty_merge. The task is held but its stage is marked complete. The spec says these callers 'need no change' without checking that a later tick does not re-gate or re-merge. report_merge also notifies 'merge failed: empty_merge' for this case, which is a poor message next to the new notify text.",
+      "severity": "med",
+      "line": 1496
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The acceptance test uses `bus._held.depth == 0` as a seam, but `bus._held` is a threading.local with a `depth` attribute that is unset until the lock is first taken. The test must use `getattr(bus._held, 'depth', 0)`. Verdicts for all ancestors are also computed even when the walk stops at the first False, which wastes git calls. Compute lazily, or say it is intentional.",
+      "severity": "low",
+      "line": 1526
+    }
+  ]
+}

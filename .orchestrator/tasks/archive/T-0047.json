@@ -1,0 +1,85 @@
+{
+  "id": "T-0047",
+  "parent": "T-0043",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-A: split tests/test_orchestrator.py into per-module files with tests/_harness.py; remove order coupling",
+  "spec": "Why: every execute task edits the single 800-line test file, forcing strict serialization (goal T-0005 ran 7.5 h for 105 min of worker time). Scout T-0044 mapped the file.\n\nWhat (tests/** only, plus one README line; worktree off goal/T-0043):\n1. tests/_harness.py: the module-level setup from tests/test_orchestrator.py lines 1-22 (TMP via mkdtemp, ORCH_ROOT env set BEFORE any orchestrator import, copied pool.toml, symlinked prompts and .claude, sys.path.insert(REPO)); export REPO, TMP, HOOKS, hook(), FakeProc, codex_stream, and a git helper `g(*a, cwd=TMP, **k)`; plus `scratch_repo(path) -> Path` that inits a git repo with an initial commit for tests that need one. Keep REPO = Path(__file__).resolve().parents[1] (file stays directly under tests/). Do NOT add tests/__init__.py; test files import with `from _harness import ...` (bare), which is how unittest discover with a package-less start dir resolves.\n2. Files and classes (from the scout): test_bus.py: Bus \u00b7 test_pool.py: PoolSel, Executors \u00b7 test_executor.py: Executor \u00b7 test_scorecard.py: Scorecard, Bench \u00b7 test_spawn.py: ReviewVerdict, Render, SpawnBase \u00b7 test_merge.py: MergeQueue \u00b7 test_hooks.py: Hooks, Guardrails, PlannerMode \u00b7 test_cli.py: Cli \u00b7 test_memory_skill.py: MemorySkill. Delete tests/test_orchestrator.py.\n3. Remove order coupling: (a) Bus.test_lifecycle_and_rules must not assert bus.next_id()==\"T-0002\"; assert the id sequence relative to bus.next_id() read before creating (e.g. n0 = next_id(); after create, next_id() == n0+1); (b) SpawnBase must not rely on MergeQueue having turned TMP into a git repo: give it setUpClass that builds its own scratch repo (harness scratch_repo) with the goal branch it needs; (c) any other class that asserts on ids or files produced by another class: make it self-contained. Each file must pass when run alone: `uv run python -m unittest tests/test_<x>.py` for every file, in any order.\n4. Verify the two runners: `uv run python -m unittest discover -q tests` and `.claude/hooks/tests-green.sh .` (from the worktree; it now uses uv run --project .) both green; test count \u2265 67.\n5. README: in the Phase 0 block replace `uv run python -m unittest -v` with `uv run python -m unittest discover -q tests` and say tests are per module under tests/ with tests/_harness.py shared.\n\nCommit: \"tests: per-module files with a shared harness; no order coupling\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_orchestrator.py is gone; tests/_harness.py and the nine test files exist",
+    "uv run python -m unittest discover -q tests exits 0 with at least 67 tests",
+    "each test file passes when run alone via uv run python -m unittest tests/test_<x>.py, verified for all nine",
+    ".claude/hooks/tests-green.sh . exits 0 inside the worktree",
+    "no tests/__init__.py; git diff --stat limited to tests/** and README.md"
+  ],
+  "scope": [
+    "tests/**",
+    "README.md"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0047",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nSplit `tests/test_orchestrator.py` (800 lines, 16 classes) into `tests/_harness.py` plus nine per-module test files, removing the file-level lock that forced strict serialization on every execute task.\n\n**Files changed:**\n- `tests/_harness.py` (new) \u2014 `REPO`, `TMP`, `ORCH_ROOT` setup, `hook()`, `FakeProc`, `codex_stream()`, `g()`, `scratch_repo()`\n- `tests/test_bus.py`, `test_pool.py`, `test_executor.py`, `test_scorecard.py`, `test_spawn.py`, `test_merge.py`, `test_hooks.py`, `test_cli.py`, `test_memory_skill.py` (new)\n- `tests/test_orchestrator.py` (deleted)\n- `README.md` \u2014 Phase 0 command updated to `uv run python -m unittest discover -q tests`\n\n**Order-coupling fixes found while splitting:**\n- `Bus.test_lifecycle_and_rules` no longer hardcodes `next_id() == \"T-0002\"`; it reads `next_id()` before creating and checks the relative sequence.\n- `MergeQueue` no longer asserts `tasks/T-0001.json` in the state tree (only true because `Bus` happened to run first alphabetically); it now checks its own task's id.\n- `SpawnBase` builds its own scratch git repo + `goal/G` branch via `scratch_repo()` in `setUpClass`, instead of depending on `MergeQueue` having turned `TMP` into a repo first.\n- Also had to add a small `sys.path` bootstrap at the top of each file \u2014 `python -m unittest tests/test_x.py` imports the module as `tests.test_x` and does not add `tests/` to `sys.path` itself (only `unittest discover` does), so the bare `from _harness import ...` needed that shim to work under direct single-file invocation.\n\n**Verification (failures-only, there were none):**\n- Each of the 9 files passes alone: `uv run python -m unittest tests/test_<x>.py` \u2014 all green.\n- `uv run python -m unittest discover -q tests` \u2192 67 tests, OK.\n- Reversed order check (`test_spawn` before `test_merge`) \u2192 still green, confirming no coupling.\n- `.claude/hooks/tests-green.sh .` \u2192 exit 0.\n- `git diff --stat --cached` limited to `tests/**` and `README.md`; no `tests/__init__.py`.\n\nCommitted on `task/T-0047` as `104fce1`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789671746.135817,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789671746.13929,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0047",
+      "claimed_at": 1789671746.139224
+    },
+    {
+      "ts": 1789671746.1462662,
+      "pid": 48916,
+      "account": "A"
+    },
+    {
+      "ts": 1789672528.008561,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nSplit `tests/test_orchestrator.py` (800 lines, 16 classes) into `tests/_harness.py` plus nine per-module test files, removing the file-level lock that forced strict serialization on every execute task.\n\n**Files changed:**\n- `tests/_harness.py` (new) \u2014 `REPO`, `TMP`, `ORCH_ROOT` setup, `hook()`, `FakeProc`, `codex_stream()`, `g()`, `scratch_repo()`\n- `tests/test_bus.py`, `test_pool.py`, `test_executor.py`, `test_scorecard.py`, `test_spawn.py`, `test_merge.py`, `test_hooks.py`, `test_cli.py`, `test_memory_skill.py` (new)\n- `tests/test_orchestrator.py` (deleted)\n- `README.md` \u2014 Phase 0 command updated to `uv run python -m unittest discover -q tests`\n\n**Order-coupling fixes found while splitting:**\n- `Bus.test_lifecycle_and_rules` no longer hardcodes `next_id() == \"T-0002\"`; it reads `next_id()` before creating and checks the relative sequence.\n- `MergeQueue` no longer asserts `tasks/T-0001.json` in the state tree (only true because `Bus` happened to run first alphabetically); it now checks its own task's id.\n- `SpawnBase` builds its own scratch git repo + `goal/G` branch via `scratch_repo()` in `setUpClass`, instead of depending on `MergeQueue` having turned `TMP` into a repo first.\n- Also had to add a small `sys.path` bootstrap at the top of each file \u2014 `python -m unittest tests/test_x.py` imports the module as `tests.test_x` and does not add `tests/` to `sys.path` itself (only `unittest discover` does), so the bare `from _harness import ...` needed that shim to work under direct single-file invocation.\n\n**Verification (failures-only, there were none):**\n- Each of the 9 files passes alone: `uv run python -m unittest tests/test_<x>.py` \u2014 all green.\n- `uv run python -m unittest discover -q tests` \u2192 67 tests, OK.\n- Reversed order check (`test_spawn` before `test_merge`) \u2192 still green, confirming no coupling.\n- `.claude/hooks/tests-green.sh .` \u2192 exit 0.\n- `git diff --stat --cached` limited to `tests/**` and `README.md`; no `tests/__init__.py`.\n\nCommitted on `task/T-0047` as `104fce1`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789672817.37243,
+      "status": "done",
+      "merged_into": "goal/T-0043",
+      "sha": "0c4b3b30859c0ad52169b699193b942d1f84b7c9"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789671746.139224,
+  "pid": 48916,
+  "account": "A",
+  "merged_into": "goal/T-0043",
+  "sha": "0c4b3b30859c0ad52169b699193b942d1f84b7c9"
+}

@@ -1,0 +1,135 @@
+{
+  "id": "T-0217",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "E8: Jev shadow triage of decision points \u2014 log what Jev would decide before any Planner launch, no behaviour change",
+  "spec": "Every decision-point Planner launch (planner_runs.py, D3) is a full headless Fable session. Before spending one, record what a typed Jev decision would have been, so we can measure agreement over a week and later let the daemon skip launches Jev is confident about. Build on E2 (T-0214) and P5 (T-0206). Shadow mode only: nothing in the launch path changes.\n1. orchestrator/planner_runs.py run(): right after the claim and before launch_planner, call jev_triage(kind, task) (fail-open, 3 s cap) and store its result on the ledger row as jev = {choice, probabilities, confidence, latency_ms} or None.\n2. jev_triage(kind, task): state = {kind, task title, spec first 1500 chars, hold_reason, latest review comments (path:line + severity + first 200 chars of issue, max 10), depends_on statuses, attempts}; question 'next_action' of type choice with options fix_round ('write a fix-round task from the review comments'), respec ('the spec itself is wrong; recreate the task'), escalate ('a human must decide: auth, billing, data deletion, or three failed rounds'), noop ('the hold is stale or already superseded; nothing to do'). For kind scouts_done: options synthesize_now / wait_for_more / drop_low_confidence.\n3. reconcile()/records: when the launched Planner finishes, compare its observable outcome (a fix-round task created -> fix_round; task superseded -> respec; status blocked or escalation note -> escalate; nothing -> noop) and store agreement = true|false|None on the row.\n4. `orchestrator scorecard --by goal` is out of scope here; instead planner_runs.py gains summary() returning {decisions, jev_scored, agreement_rate, mean_confidence} printed by `orchestrator planner-runs --summary` (cli.py).\nTests in tests/test_planner_runs.py with jev.ask monkeypatched: ledger row carries jev; None keeps the row valid; agreement computed for each outcome mapping; summary numbers.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_runs.py::test_run_records_jev_shadow_choice, ::test_jev_none_keeps_launch_path, ::test_agreement_mapping, ::test_planner_runs_summary pass",
+    "`uv run orchestrator planner-runs --summary` prints decisions, jev_scored and agreement_rate on an empty ledger without error",
+    "No test asserting launch behaviour changes; launch_planner call count unchanged in existing tests",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_runs.py",
+    "tests/test_cli.py"
+  ],
+  "depends_on": [
+    "T-0214",
+    "T-0206",
+    "T-0202"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0217",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0217`. Rollback: `git revert 14f999f`.\n\n## Summary\n\nImplemented shadow-mode Jev triage for decision-point Planner launches (D3, T-0217), building on `jev.py` (E2/T-0214).\n\n**`orchestrator/planner_runs.py`**\n- `jev_triage(kind, task, attempts)` builds a state dict (kind, title, spec[:1500], hold_reason, up to 10 review comments as `path:line severity issue[:200]`, depends_on statuses, attempts) and asks Jev a `next_action` choice question with a 3s cap; returns `{choice, probabilities, confidence, latency_ms}` or `None`.\n- `_safe_jev_triage` wraps it defensively; `run()` calls it right after the claim, before `launch_planner`, and stores the result as `jev` on the ledger row via `_record_running` \u2014 launch behavior is untouched.\n- `_observed_outcome()` in `reconcile()` maps a finished held/closable decision's actual outcome (a dependent fix-round task, a `constraints.respec_for` task, the task ending up `failed`, or just a bus event) back to `fix_round`/`respec`/`escalate`/`noop`, and reconcile scores `agreement = true|false|None` against the row's own `jev.choice`, computed once at the running\u2192terminal transition.\n- `summary()` returns `{decisions, jev_scored, agreement_rate, mean_confidence}` over the ledger.\n\n**`orchestrator/cli.py`**: new `planner-runs --summary` subcommand printing those four numbers.\n\n**Tests**: added `JevShadowTriage`, `JevAgreementScoring`, `Summary` classes to `tests/test_planner_runs.py` (shadow choice recorded, `None` fail-open, exception fail-open, full outcome-mapping matrix, summary math) and a CLI test for `planner-runs --summary` on an empty ledger.\n\nFull suite: `uv run --project . python -m unittest discover -q tests` \u2192 **346 tests, all green**. No failures.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789817003.928169,
+      "pipeline": {
+        "dispatched_at": 1789817003.928121
+      }
+    },
+    {
+      "ts": 1789817003.989253,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789817003.9967349,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789817005.158388,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0217",
+      "claimed_at": 1789817005.1521049
+    },
+    {
+      "ts": 1789817005.1677618,
+      "account": "B"
+    },
+    {
+      "ts": 1789817005.17491,
+      "pid": 52245,
+      "account": "B"
+    },
+    {
+      "ts": 1789817636.264517,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0217`. Rollback: `git revert 14f999f`.\n\n## Summary\n\nImplemented shadow-mode Jev triage for decision-point Planner launches (D3, T-0217), building on `jev.py` (E2/T-0214).\n\n**`orchestrator/planner_runs.py`**\n- `jev_triage(kind, task, attempts)` builds a state dict (kind, title, spec[:1500], hold_reason, up to 10 review comments as `path:line severity issue[:200]`, depends_on statuses, attempts) and asks Jev a `next_action` choice question with a 3s cap; returns `{choice, probabilities, confidence, latency_ms}` or `None`.\n- `_safe_jev_triage` wraps it defensively; `run()` calls it right after the claim, before `launch_planner`, and stores the result as `jev` on the ledger row via `_record_running` \u2014 launch behavior is untouched.\n- `_observed_outcome()` in `reconcile()` maps a finished held/closable decision's actual outcome (a dependent fix-round task, a `constraints.respec_for` task, the task ending up `failed`, or just a bus event) back to `fix_round`/`respec`/`escalate`/`noop`, and reconcile scores `agreement = true|false|None` against the row's own `jev.choice`, computed once at the running\u2192terminal transition.\n- `summary()` returns `{decisions, jev_scored, agreement_rate, mean_confidence}` over the ledger.\n\n**`orchestrator/cli.py`**: new `planner-runs --summary` subcommand printing those four numbers.\n\n**Tests**: added `JevShadowTriage`, `JevAgreementScoring`, `Summary` classes to `tests/test_planner_runs.py` (shadow choice recorded, `None` fail-open, exception fail-open, full outcome-mapping matrix, summary math) and a CLI test for `planner-runs --summary` on an empty ledger.\n\nFull suite: `uv run --project . python -m unittest discover -q tests` \u2192 **346 tests, all green**. No failures.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789817685.58321,
+      "pipeline": {
+        "dispatched_at": 1789817003.928121,
+        "gated_at": 1789817685.5830941
+      }
+    },
+    {
+      "ts": 1789817779.236811,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789817807.313571,
+      "pipeline": {
+        "dispatched_at": 1789817003.928121,
+        "gated_at": 1789817685.5830941,
+        "review_held_at": 1789817807.313462
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789829190.73706,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "E8 chain landed via T-0234 merge (27247d9)"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789817003.928121,
+    "gated_at": 1789817685.5830941,
+    "review_held_at": 1789817807.313462
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789817005.1521049,
+  "account": "B",
+  "pid": 52245,
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0201",
+  "reason": "E8 chain landed via T-0234 merge (27247d9)"
+}

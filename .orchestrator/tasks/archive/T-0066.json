@@ -1,0 +1,269 @@
+{
+  "id": "T-0066",
+  "parent": "T-0065",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout S1: kgpt projects data model, project tools and routes \u2014 where a repo binding and per-file provenance would live",
+  "spec": "Read-only scout over /Users/k3ntaw/code/kgpt. Read kernel/kgpt_kernel/projects.py, folders.py, workingset.py, tools/builtin.py (project/working-set/file tools around line 900), gateway/kgpt_gateway/routes/projects.py, kernel/migrations/versions/0016_projects.py, 0017_project_folders.py, 0018_github_connections.py, and documents/store.py for how an attachment records filename, folder, project_id, content hash and how a newer version supersedes an older one (ADR 0014 staleness). Report: (1) tables and columns for projects, folders, working_set, attachments; (2) every project-related tool name with tier and what it returns; (3) every /projects and /folders route; (4) where per-project repo binding (installation_id, owner, repo, base branch, base sha) and per-attachment repo provenance (repo path, blob sha) fit with least churn, naming the migration number to use next (latest is 0025) and the row-level-security pattern new tables must follow (ADR 0014 OWNED_AFTER_0012 note); (5) how \"changed since import\" can be computed from what is stored. Cite path:line for every claim, one confidence per finding. Do not read web client or modules/github (other scouts).",
+  "inputs": [],
+  "acceptance": [
+    "Result lists tables/columns, tools with tiers, and routes with path:line citations",
+    "Result names the next migration number and the RLS pattern a new table must follow, with the file that proves it",
+    "Result proposes where repo binding and per-file provenance go, with an estimate of files touched"
+  ],
+  "scope": [
+    "/Users/k3ntaw/code/kgpt/kernel/**",
+    "/Users/k3ntaw/code/kgpt/gateway/**",
+    "/Users/k3ntaw/code/kgpt/docs/**"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0066",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "kernel.projects table: id uuid PK default gen_random_uuid(); name text NOT NULL; instructions text; archived boolean NOT NULL DEFAULT false; created_at timestamptz NOT NULL DEFAULT now(); user_id uuid NOT NULL DEFAULT CURRENT_USER_DEFAULT REFERENCES kernel.users(id).",
+        "evidence": [
+          "kernel/migrations/versions/0016_projects.py:37-50"
+        ],
+        "confidence": 0.98,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "kernel.project_folders table: id uuid PK; project_id uuid NOT NULL FK kernel.projects(id) ON DELETE CASCADE; parent_id uuid FK kernel.project_folders(id) ON DELETE CASCADE, nullable (NULL = project root); name text NOT NULL; created_at timestamptz; user_id uuid NOT NULL DEFAULT. Unique index on (project_id, parent_id, lower(name)) NULLS NOT DISTINCT.",
+        "evidence": [
+          "kernel/migrations/versions/0017_project_folders.py:39-63"
+        ],
+        "confidence": 0.98,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "kernel.working_set table: conversation_id uuid NOT NULL FK kernel.conversations(id) ON DELETE CASCADE; attachment_id uuid NOT NULL FK kernel.attachments(id) ON DELETE CASCADE; added_at timestamptz DEFAULT now(); user_id uuid NOT NULL DEFAULT; PRIMARY KEY (conversation_id, attachment_id).",
+        "evidence": [
+          "kernel/migrations/versions/0016_projects.py:79-89"
+        ],
+        "confidence": 0.98,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "kernel.attachments table accumulates columns across migrations: id uuid PK, conversation_id uuid FK conversations ON DELETE CASCADE nullable, filename text NOT NULL, media_type text NOT NULL, size_bytes bigint NOT NULL, sha256 text NOT NULL, direction text NOT NULL DEFAULT 'upload' (check upload|generated), created_at timestamptz (0007); attribution text nullable (0008); project_id uuid FK kernel.projects(id) ON DELETE SET NULL, nullable (0016); folder_id uuid FK kernel.project_folders(id) ON DELETE SET NULL, nullable (0017). attachments is also in the frozen OWNED_TABLES list, so it carries a user_id ownership column from the 0010-0012 ownership migrations.",
+        "evidence": [
+          "kernel/migrations/versions/0007_attachments.py:31-61",
+          "kernel/migrations/versions/0008_attachment_attribution.py:1-20",
+          "kernel/migrations/versions/0016_projects.py:57-68",
+          "kernel/migrations/versions/0017_project_folders.py:65-78",
+          "kernel/kgpt_kernel/ownership.py:31-48"
+        ],
+        "confidence": 0.92,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "kernel.github_connections table: id uuid PK; installation_id bigint NOT NULL (GitHub's own id); account text NOT NULL (display name); connected_at timestamptz DEFAULT now(); user_id uuid NOT NULL DEFAULT. Unique index on (user_id, installation_id) \u2014 one row per person per installation, not per project.",
+        "evidence": [
+          "kernel/migrations/versions/0018_github_connections.py:29-49"
+        ],
+        "confidence": 0.97,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Nine project-related tools exist, all defined via registry.tool in tools/builtin.py: list_projects (READ, projects.py:900) returns {projects, none_yet}; create_project (WRITE_LOCAL, 929) returns {project, created}; set_project_instructions (WRITE_LOCAL, 964) returns {project, cost_is_per_turn}; list_project_files (READ, 996) returns {files, none_yet}; put_file_in_play (WRITE_LOCAL, 1022) returns {in_play}; take_file_out_of_play (WRITE_LOCAL, 1051) returns {removed, was_not_in_play}; refresh_working_set (WRITE_LOCAL, 1076) returns {moved_to_newer_version, nothing_was_stale}; put_conversation_in_project (WRITE_LOCAL, 1099) returns {in_project, taken_out, files_did_not_move}; put_file_in_project (WRITE_LOCAL, 1143) returns {filed, filename, attachment_id, in_project}.",
+        "evidence": [
+          "kernel/kgpt_kernel/tools/builtin.py:899-1193"
+        ],
+        "confidence": 0.97,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "17 project/folder routes in gateway/kgpt_gateway/routes/projects.py: GET /projects:73, POST /projects:78, GET /projects/{project_id}:87, PATCH /projects/{project_id}/name:95, PUT /projects/{project_id}/instructions:105, PATCH /projects/{project_id}/archived:120, GET /projects/{project_id}/files:130, PUT /files/{attachment_id}/project:139, PUT /conversations/{conversation_id}/project:150, GET /conversations/{conversation_id}/working-set:167, GET /projects/{project_id}/tree:205, POST /projects/{project_id}/folders:217, PATCH /folders/{folder_id}/name:228, DELETE /folders/{folder_id}:238, PUT /files/{attachment_id}/folder:254, GET /projects/{project_id}/zip:265, GET /folders/{folder_id}/zip:273.",
+        "evidence": [
+          "gateway/kgpt_gateway/routes/projects.py:73,78,87,95,105,120,130,139,150,167,205,217,228,238,254,265,273"
+        ],
+        "confidence": 0.97,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "The latest applied migration is 0025_live_activity_tokens.py, so the next migration number to use is 0026.",
+        "evidence": [
+          "kernel/migrations/versions/ (directory listing: highest file is 0025_live_activity_tokens.py)"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Is a project-repo binding meant to be 1:1 (one repo per project) or should a project support multiple repo bindings? This changes whether columns-on-projects or a join table is the right least-churn call.",
+      "Should attachment repo provenance be recorded only for files imported from a repo (import flow, not yet seen \u2014 likely in modules/github, excluded from this scout), or retrofitted onto the generic upload path in documents/store.py:save()?"
+    ],
+    "suggested_next": [
+      "Have the scout covering modules/github report the shape of any existing GitHub file-fetch/import code path, since that is where repo_path/blob_sha would need to be threaded into store.save() calls.",
+      "Confirm whether the Planner wants a single 0026 migration covering both the project-binding columns and the attachment-provenance columns, or two atomic migrations (0026, 0027) per the orchestrator's ATOMIC-spec convention."
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 10585,
+      "trimmed": {
+        "findings": 7
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789729672.7309089,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0066",
+      "claimed_at": 1789729672.7304351
+    },
+    {
+      "ts": 1789729672.762728,
+      "pid": 35887,
+      "account": "A"
+    },
+    {
+      "ts": 1789729783.978521,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "kernel.projects table: id uuid PK default gen_random_uuid(); name text NOT NULL; instructions text; archived boolean NOT NULL DEFAULT false; created_at timestamptz NOT NULL DEFAULT now(); user_id uuid NOT NULL DEFAULT CURRENT_USER_DEFAULT REFERENCES kernel.users(id).",
+            "evidence": [
+              "kernel/migrations/versions/0016_projects.py:37-50"
+            ],
+            "confidence": 0.98,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "kernel.project_folders table: id uuid PK; project_id uuid NOT NULL FK kernel.projects(id) ON DELETE CASCADE; parent_id uuid FK kernel.project_folders(id) ON DELETE CASCADE, nullable (NULL = project root); name text NOT NULL; created_at timestamptz; user_id uuid NOT NULL DEFAULT. Unique index on (project_id, parent_id, lower(name)) NULLS NOT DISTINCT.",
+            "evidence": [
+              "kernel/migrations/versions/0017_project_folders.py:39-63"
+            ],
+            "confidence": 0.98,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "kernel.working_set table: conversation_id uuid NOT NULL FK kernel.conversations(id) ON DELETE CASCADE; attachment_id uuid NOT NULL FK kernel.attachments(id) ON DELETE CASCADE; added_at timestamptz DEFAULT now(); user_id uuid NOT NULL DEFAULT; PRIMARY KEY (conversation_id, attachment_id).",
+            "evidence": [
+              "kernel/migrations/versions/0016_projects.py:79-89"
+            ],
+            "confidence": 0.98,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "kernel.attachments table accumulates columns across migrations: id uuid PK, conversation_id uuid FK conversations ON DELETE CASCADE nullable, filename text NOT NULL, media_type text NOT NULL, size_bytes bigint NOT NULL, sha256 text NOT NULL, direction text NOT NULL DEFAULT 'upload' (check upload|generated), created_at timestamptz (0007); attribution text nullable (0008); project_id uuid FK kernel.projects(id) ON DELETE SET NULL, nullable (0016); folder_id uuid FK kernel.project_folders(id) ON DELETE SET NULL, nullable (0017). attachments is also in the frozen OWNED_TABLES list, so it carries a user_id ownership column from the 0010-0012 ownership migrations.",
+            "evidence": [
+              "kernel/migrations/versions/0007_attachments.py:31-61",
+              "kernel/migrations/versions/0008_attachment_attribution.py:1-20",
+              "kernel/migrations/versions/0016_projects.py:57-68",
+              "kernel/migrations/versions/0017_project_folders.py:65-78",
+              "kernel/kgpt_kernel/ownership.py:31-48"
+            ],
+            "confidence": 0.92,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "kernel.github_connections table: id uuid PK; installation_id bigint NOT NULL (GitHub's own id); account text NOT NULL (display name); connected_at timestamptz DEFAULT now(); user_id uuid NOT NULL DEFAULT. Unique index on (user_id, installation_id) \u2014 one row per person per installation, not per project.",
+            "evidence": [
+              "kernel/migrations/versions/0018_github_connections.py:29-49"
+            ],
+            "confidence": 0.97,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Nine project-related tools exist, all defined via registry.tool in tools/builtin.py: list_projects (READ, projects.py:900) returns {projects, none_yet}; create_project (WRITE_LOCAL, 929) returns {project, created}; set_project_instructions (WRITE_LOCAL, 964) returns {project, cost_is_per_turn}; list_project_files (READ, 996) returns {files, none_yet}; put_file_in_play (WRITE_LOCAL, 1022) returns {in_play}; take_file_out_of_play (WRITE_LOCAL, 1051) returns {removed, was_not_in_play}; refresh_working_set (WRITE_LOCAL, 1076) returns {moved_to_newer_version, nothing_was_stale}; put_conversation_in_project (WRITE_LOCAL, 1099) returns {in_project, taken_out, files_did_not_move}; put_file_in_project (WRITE_LOCAL, 1143) returns {filed, filename, attachment_id, in_project}.",
+            "evidence": [
+              "kernel/kgpt_kernel/tools/builtin.py:899-1193"
+            ],
+            "confidence": 0.97,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "17 project/folder routes in gateway/kgpt_gateway/routes/projects.py: GET /projects:73, POST /projects:78, GET /projects/{project_id}:87, PATCH /projects/{project_id}/name:95, PUT /projects/{project_id}/instructions:105, PATCH /projects/{project_id}/archived:120, GET /projects/{project_id}/files:130, PUT /files/{attachment_id}/project:139, PUT /conversations/{conversation_id}/project:150, GET /conversations/{conversation_id}/working-set:167, GET /projects/{project_id}/tree:205, POST /projects/{project_id}/folders:217, PATCH /folders/{folder_id}/name:228, DELETE /folders/{folder_id}:238, PUT /files/{attachment_id}/folder:254, GET /projects/{project_id}/zip:265, GET /folders/{folder_id}/zip:273.",
+            "evidence": [
+              "gateway/kgpt_gateway/routes/projects.py:73,78,87,95,105,120,130,139,150,167,205,217,228,238,254,265,273"
+            ],
+            "confidence": 0.97,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "The latest applied migration is 0025_live_activity_tokens.py, so the next migration number to use is 0026.",
+            "evidence": [
+              "kernel/migrations/versions/ (directory listing: highest file is 0025_live_activity_tokens.py)"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Is a project-repo binding meant to be 1:1 (one repo per project) or should a project support multiple repo bindings? This changes whether columns-on-projects or a join table is the right least-churn call.",
+          "Should attachment repo provenance be recorded only for files imported from a repo (import flow, not yet seen \u2014 likely in modules/github, excluded from this scout), or retrofitted onto the generic upload path in documents/store.py:save()?"
+        ],
+        "suggested_next": [
+          "Have the scout covering modules/github report the shape of any existing GitHub file-fetch/import code path, since that is where repo_path/blob_sha would need to be threaded into store.save() calls.",
+          "Confirm whether the Planner wants a single 0026 migration covering both the project-binding columns and the attachment-provenance columns, or two atomic migrations (0026, 0027) per the orchestrator's ATOMIC-spec convention."
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 10585,
+          "trimmed": {
+            "findings": 7
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789729672.7304351,
+  "pid": 35887,
+  "account": "A"
+}

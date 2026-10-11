@@ -1,0 +1,573 @@
+{
+  "id": "T-1007",
+  "created_at": 1790154021.639303,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S1d context_scanner: deterministic hostile-content scanner (safe/suspicious/blocked with evidence) and trust classes with a fixed authority order on evidence objects (P19, P20)",
+  "spec": "Create orchestrator/context_scanner.py. scan(text, *, source_kind) -> {\"verdict\": \"safe\"|\"suspicious\"|\"blocked\", \"findings\": [{\"pattern\": name, \"line\": n, \"excerpt\": max 120 chars}], \"score\": int}. Pattern families (regex, case-insensitive, each with a weight): override_instructions (ignore/disregard previous or prior instructions, you are now, new system prompt), authority_claim (claims to be the system, the operator, the developer, or to have higher authority), credential_read (read/print/cat of dotenv files, the user's ssh or cloud-provider credential directories, tokens, api keys, passwords), exfiltration (curl/wget/nc/fetch of a URL with a variable, token or file attached; base64 pipe to network), permission_change (world-writable chmod, sudoers edits, disable safeguards, hooks, guardrails, permissions bypass), hidden_execution (shell execution hidden in HTML comments, markdown links or images with javascript: or data: schemes), invisible_unicode (zero-width space/joiner, bidi overrides, tag characters), hidden_html (html comments or display:none blocks containing instruction verbs). Scoring: blocked when any pattern of weight 3 hits (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode inside instruction text) or score >= 6; suspicious for score 2..5; safe below. Document text that merely describes these attacks (security docs, this scanner's own tests, review checklists) must scan safe or suspicious, never blocked, when the matches sit inside fenced code blocks or lines starting with a list marker followed by a pattern name or a quote; implement that as a context rule (code fences and quoted lines carry weight 0 for override_instructions and authority_claim). source_kind in (\"skill\", \"agents_md\", \"claude_md\", \"readme\", \"prompt\", \"mcp_description\", \"evidence\", \"other\") only tunes thresholds (skill and mcp_description: blocked threshold 4). Pure function, no I/O, no network, no LLM.\nTrust classes: TRUST_CLASSES = (\"SYSTEM\",\"TRUSTED_REPO\",\"LOCAL_USER\",\"EXTERNAL\",\"UNTRUSTED\") and authority(cls) -> int (SYSTEM 4 ... UNTRUSTED 0); may_override(lower, higher) -> False whenever authority(lower) < authority(higher). Jev is never consulted here.\norchestrator/evidence.py: add field trust_class to the evidence dataclass, set in make() from provenance (repo -> TRUSTED_REPO, memory -> LOCAL_USER, anything else -> EXTERNAL) and demoted to UNTRUSTED when scan(content, source_kind=\"evidence\")[\"verdict\"] == \"blocked\"; the scan result (verdict, pattern names only) is stored as field scan on the object and persisted; keep the existing trust field values as they are for compatibility. Existing evidence JSONL rows without the new fields must still load (default trust_class from provenance, scan None).\norchestrator/skill_discovery.py inspect(): run scan over every text file of the quarantined skill (SKILL.md first) with source_kind skill and add scan results to the inspection report (verdict per file, overall = worst); a blocked overall verdict is recorded in the report and the skill stays quarantined (no state change here; stage 2 hardening gates on it). CLI: `orchestrator scan <path> [--kind k] [--json]` prints the verdict and findings for a file (read-only). Docs: docs/hermes-hardening/04-context-scanner.md (pattern families, weights, thresholds, trust classes and the authority rule, known limitations: heuristic, not semantic). Test fixtures must be synthetic and must never contain credential-shaped strings (no key-like tokens); describe the attack in words.\nSpec review T-1001 folded in: (1) orchestrator/evidence.py: Evidence is a frozen dataclass without defaults; add trust_class: str = '' and scan: dict | None = None as the LAST fields with defaults so positional construction in make() keeps working; make() fills them; EvidencePool.__init__ backfills missing keys on each persisted row dict (trust_class from provenance via the same mapping, scan None) BEFORE calling Evidence(**row), and ignores unknown keys defensively. (2) orchestrator/skill_discovery.py: one detector, not two. The existing hidden-instructions CHECK in the CHECKS tuple delegates to context_scanner.scan (drop its private regexes) and maps the verdict into the existing severity vocabulary (blocked -> block, suspicious -> warn, safe -> info) and the existing findings schema (id, severity, check, line, excerpt) using the scanner's pattern name as the check field; the per-file scanner verdict is additionally stored under a scan key of the report so callers can read the verdict directly. The acceptance test asserts both the mapped severity and the scan key, and that no finding is reported twice for the same line.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-1005"
+  ],
+  "acceptance": [
+    "tests/test_context_scanner.py::test_blocks_override_and_exfiltration_patterns (malicious AGENTS.md, fake authority escalation, secret exfiltration instruction all blocked with findings naming the pattern and line)",
+    "tests/test_context_scanner.py::test_harmless_security_documentation_not_blocked (a review checklist and a docs page describing the attacks inside fences and quoted lines scan safe or suspicious)",
+    "tests/test_context_scanner.py::test_invisible_unicode_detected (zero-width and bidi characters inside instruction text block; inside a code fence only suspicious)",
+    "tests/test_context_scanner.py::test_authority_order_is_deterministic (may_override false for every lower class against every higher one)",
+    "tests/test_evidence.py::test_make_sets_trust_class_and_scan (repo, memory and external provenance mapping; blocked content demoted to UNTRUSTED; old rows load)",
+    "tests/test_skill_discovery.py::test_inspect_reports_scan_verdicts (a quarantined skill with an injection line reports blocked and stays quarantined)",
+    "tests/test_skill_discovery.py::test_inspect_uses_single_scanner_with_mapped_severity (blocked maps to severity block, suspicious to warn; no duplicate findings per line; report scan key present)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/context_scanner.py",
+    "orchestrator/evidence.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/cli.py",
+    "tests/test_context_scanner.py",
+    "tests/test_evidence.py",
+    "tests/test_skill_discovery.py",
+    "docs/hermes-hardening/04-context-scanner.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1007",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/context_scanner.py",
+        "issue": "The fence/quoted-line weight-zero context rule is scoped to only override_instructions and authority_claim, but test_harmless_security_documentation_not_blocked requires a docs page 'describing these attacks' (all families, including hidden_execution's HTML-comment/javascript: examples and hidden_html's display:none examples) inside fences/quotes to scan safe or suspicious. hidden_execution is explicitly listed as a standalone weight-3 blocking pattern with no fence exemption, so a documentation example demonstrating it inside a code fence would still hit 'blocked', contradicting the acceptance test as written.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/skill_discovery.py",
+        "issue": "CHECKS (lines 267-275) is a flat tuple of (name, severity, per-line regex) consumed by a single shared per-line loop (lines 296-306: `for check, severity, pattern in CHECKS: re.search(pattern, line, ...)`). context_scanner.scan operates on whole-file text and returns its own line numbers and pattern names, so it cannot be inserted as a 'delegating' row inside that tuple without restructuring the loop. The spec never specifies the restructuring (e.g. drop hidden-instructions from CHECKS, run scan() once per file after the per-line loop, merge by file:line), leaving the no-duplicate-per-line acceptance criterion unverifiable and inviting an ad hoc implementation.",
+        "severity": "high",
+        "line": 267
+      },
+      {
+        "path": "tests/test_skill_discovery.py",
+        "issue": "test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions asserts the literal check name 'hidden-instructions' is present in findings (line 118). Once hidden-instructions is replaced by context_scanner's pattern names (override_instructions, hidden_html, etc.) per spec, this pre-existing test breaks, but it is not listed in the acceptance criteria as needing an update, so 'tests-green.sh must stay green' is at odds with the rename instruction unless this test is explicitly edited.",
+        "severity": "med",
+        "line": 118
+      },
+      {
+        "path": "orchestrator/context_scanner.py",
+        "issue": "Scoring section names weight-3 blocking conditions (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode-in-instruction-text) and a score>=6 fallback, but never gives numeric weights for authority_claim, permission_change, hidden_html, or the individual (non-joint) weights of credential_read/exfiltration alone, nor the locality rule for 'together' (same line vs. same document). Two conforming implementations could produce different `score` ints for the same input even though verdict happens to match on the listed acceptance tests.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "issue": "The spec requires `orchestrator scan <path> [--kind k] [--json]` in scope, but no acceptance test id covers it (tests/test_cli.py is not referenced in the acceptance list), so this scoped deliverable has no verifiable gate.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Broaden (or explicitly justify not broadening) the fence/quoted-line zero-weight context rule to cover hidden_execution and hidden_html, or narrow test_harmless_security_documentation_not_blocked's fixture so it only exercises override_instructions/authority_claim examples inside fences.",
+      "Specify the exact restructuring of skill_discovery.inspect(): remove hidden-instructions from CHECKS, call context_scanner.scan once per file over the full decoded text after the per-line loop, and define the dedup key (e.g. file+line+pattern) used to guarantee no duplicate finding per line.",
+      "Add tests/test_skill_discovery.py::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions to the spec's touched-test list and state its new expected check names.",
+      "Provide a complete numeric weight table for every pattern family and define locality for the credential_read+exfiltration joint condition.",
+      "Either add an acceptance test id for the `orchestrator scan` CLI command or mark it explicitly non-gating in the spec."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790154023.653204,
+      "packet_meta": {
+        "chars": 7584,
+        "est_tokens": 1896,
+        "presented_tokens": 1896,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "d309f3659f535bb533a22cda2df1c66b7a1fd59a7cca5ea428832227485ccd3c"
+          },
+          "spec": {
+            "chars": 5323,
+            "est_tokens": 1330,
+            "sha256": "cf4ee85d5693adbbdfe0439364711c730846037374d884b54b029c577180c5d5"
+          },
+          "acceptance": {
+            "chars": 1280,
+            "est_tokens": 320,
+            "sha256": "2c15c20590752979fa0fd96d50c6aab9f8af54279711b1ff165c378cb2f27ae9"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 598,
+            "est_tokens": 149,
+            "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "96a5f04342f9",
+        "version": "96a5f04342f9",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-1005 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790154027.84028,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1007",
+      "claimed_at": 1790154025.8746061
+    },
+    {
+      "ts": 1790154027.8477209,
+      "account": "B"
+    },
+    {
+      "ts": 1790154030.533319,
+      "pid": 10941,
+      "account": "B"
+    },
+    {
+      "ts": 1790154201.85974,
+      "packet_meta": {
+        "chars": 7584,
+        "est_tokens": 1896,
+        "presented_tokens": 1896,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "d309f3659f535bb533a22cda2df1c66b7a1fd59a7cca5ea428832227485ccd3c"
+          },
+          "spec": {
+            "chars": 5323,
+            "est_tokens": 1330,
+            "sha256": "cf4ee85d5693adbbdfe0439364711c730846037374d884b54b029c577180c5d5"
+          },
+          "acceptance": {
+            "chars": 1280,
+            "est_tokens": 320,
+            "sha256": "2c15c20590752979fa0fd96d50c6aab9f8af54279711b1ff165c378cb2f27ae9"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 598,
+            "est_tokens": 149,
+            "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "96a5f04342f9",
+        "version": "96a5f04342f9",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-1005 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "b48a0fee-519a-4426-a62e-dfeb4f536b22"
+      }
+    },
+    {
+      "ts": 1790154201.879563,
+      "packet_meta": {
+        "chars": 7584,
+        "est_tokens": 1896,
+        "presented_tokens": 1896,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "d309f3659f535bb533a22cda2df1c66b7a1fd59a7cca5ea428832227485ccd3c"
+          },
+          "spec": {
+            "chars": 5323,
+            "est_tokens": 1330,
+            "sha256": "cf4ee85d5693adbbdfe0439364711c730846037374d884b54b029c577180c5d5"
+          },
+          "acceptance": {
+            "chars": 1280,
+            "est_tokens": 320,
+            "sha256": "2c15c20590752979fa0fd96d50c6aab9f8af54279711b1ff165c378cb2f27ae9"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 598,
+            "est_tokens": 149,
+            "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "96a5f04342f9",
+        "version": "96a5f04342f9",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-1005 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "b48a0fee-519a-4426-a62e-dfeb4f536b22",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790154201.884137,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/context_scanner.py",
+            "issue": "The fence/quoted-line weight-zero context rule is scoped to only override_instructions and authority_claim, but test_harmless_security_documentation_not_blocked requires a docs page 'describing these attacks' (all families, including hidden_execution's HTML-comment/javascript: examples and hidden_html's display:none examples) inside fences/quotes to scan safe or suspicious. hidden_execution is explicitly listed as a standalone weight-3 blocking pattern with no fence exemption, so a documentation example demonstrating it inside a code fence would still hit 'blocked', contradicting the acceptance test as written.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/skill_discovery.py",
+            "issue": "CHECKS (lines 267-275) is a flat tuple of (name, severity, per-line regex) consumed by a single shared per-line loop (lines 296-306: `for check, severity, pattern in CHECKS: re.search(pattern, line, ...)`). context_scanner.scan operates on whole-file text and returns its own line numbers and pattern names, so it cannot be inserted as a 'delegating' row inside that tuple without restructuring the loop. The spec never specifies the restructuring (e.g. drop hidden-instructions from CHECKS, run scan() once per file after the per-line loop, merge by file:line), leaving the no-duplicate-per-line acceptance criterion unverifiable and inviting an ad hoc implementation.",
+            "severity": "high",
+            "line": 267
+          },
+          {
+            "path": "tests/test_skill_discovery.py",
+            "issue": "test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions asserts the literal check name 'hidden-instructions' is present in findings (line 118). Once hidden-instructions is replaced by context_scanner's pattern names (override_instructions, hidden_html, etc.) per spec, this pre-existing test breaks, but it is not listed in the acceptance criteria as needing an update, so 'tests-green.sh must stay green' is at odds with the rename instruction unless this test is explicitly edited.",
+            "severity": "med",
+            "line": 118
+          },
+          {
+            "path": "orchestrator/context_scanner.py",
+            "issue": "Scoring section names weight-3 blocking conditions (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode-in-instruction-text) and a score>=6 fallback, but never gives numeric weights for authority_claim, permission_change, hidden_html, or the individual (non-joint) weights of credential_read/exfiltration alone, nor the locality rule for 'together' (same line vs. same document). Two conforming implementations could produce different `score` ints for the same input even though verdict happens to match on the listed acceptance tests.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "issue": "The spec requires `orchestrator scan <path> [--kind k] [--json]` in scope, but no acceptance test id covers it (tests/test_cli.py is not referenced in the acceptance list), so this scoped deliverable has no verifiable gate.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Broaden (or explicitly justify not broadening) the fence/quoted-line zero-weight context rule to cover hidden_execution and hidden_html, or narrow test_harmless_security_documentation_not_blocked's fixture so it only exercises override_instructions/authority_claim examples inside fences.",
+          "Specify the exact restructuring of skill_discovery.inspect(): remove hidden-instructions from CHECKS, call context_scanner.scan once per file over the full decoded text after the per-line loop, and define the dedup key (e.g. file+line+pattern) used to guarantee no duplicate finding per line.",
+          "Add tests/test_skill_discovery.py::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions to the spec's touched-test list and state its new expected check names.",
+          "Provide a complete numeric weight table for every pattern family and define locality for the credential_read+exfiltration joint condition.",
+          "Either add an acceptance test id for the `orchestrator scan` CLI command or mark it explicitly non-gating in the spec."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790154201.885204,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/context_scanner.py",
+          "issue": "The fence/quoted-line weight-zero context rule is scoped to only override_instructions and authority_claim, but test_harmless_security_documentation_not_blocked requires a docs page 'describing these attacks' (all families, including hidden_execution's HTML-comment/javascript: examples and hidden_html's display:none examples) inside fences/quotes to scan safe or suspicious. hidden_execution is explicitly listed as a standalone weight-3 blocking pattern with no fence exemption, so a documentation example demonstrating it inside a code fence would still hit 'blocked', contradicting the acceptance test as written.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/skill_discovery.py",
+          "issue": "CHECKS (lines 267-275) is a flat tuple of (name, severity, per-line regex) consumed by a single shared per-line loop (lines 296-306: `for check, severity, pattern in CHECKS: re.search(pattern, line, ...)`). context_scanner.scan operates on whole-file text and returns its own line numbers and pattern names, so it cannot be inserted as a 'delegating' row inside that tuple without restructuring the loop. The spec never specifies the restructuring (e.g. drop hidden-instructions from CHECKS, run scan() once per file after the per-line loop, merge by file:line), leaving the no-duplicate-per-line acceptance criterion unverifiable and inviting an ad hoc implementation.",
+          "severity": "high",
+          "line": 267
+        },
+        {
+          "path": "tests/test_skill_discovery.py",
+          "issue": "test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions asserts the literal check name 'hidden-instructions' is present in findings (line 118). Once hidden-instructions is replaced by context_scanner's pattern names (override_instructions, hidden_html, etc.) per spec, this pre-existing test breaks, but it is not listed in the acceptance criteria as needing an update, so 'tests-green.sh must stay green' is at odds with the rename instruction unless this test is explicitly edited.",
+          "severity": "med",
+          "line": 118
+        },
+        {
+          "path": "orchestrator/context_scanner.py",
+          "issue": "Scoring section names weight-3 blocking conditions (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode-in-instruction-text) and a score>=6 fallback, but never gives numeric weights for authority_claim, permission_change, hidden_html, or the individual (non-joint) weights of credential_read/exfiltration alone, nor the locality rule for 'together' (same line vs. same document). Two conforming implementations could produce different `score` ints for the same input even though verdict happens to match on the listed acceptance tests.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "The spec requires `orchestrator scan <path> [--kind k] [--json]` in scope, but no acceptance test id covers it (tests/test_cli.py is not referenced in the acceptance list), so this scoped deliverable has no verifiable gate.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 7584,
+    "est_tokens": 1896,
+    "presented_tokens": 1896,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "d309f3659f535bb533a22cda2df1c66b7a1fd59a7cca5ea428832227485ccd3c"
+      },
+      "spec": {
+        "chars": 5323,
+        "est_tokens": 1330,
+        "sha256": "cf4ee85d5693adbbdfe0439364711c730846037374d884b54b029c577180c5d5"
+      },
+      "acceptance": {
+        "chars": 1280,
+        "est_tokens": 320,
+        "sha256": "2c15c20590752979fa0fd96d50c6aab9f8af54279711b1ff165c378cb2f27ae9"
+      },
+      "scope": {
+        "chars": 261,
+        "est_tokens": 65,
+        "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 598,
+        "est_tokens": 149,
+        "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "96a5f04342f9",
+    "version": "96a5f04342f9",
+    "candidate_known": false,
+    "base": "6b7a41246767",
+    "sources": "task@T-1005 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "b48a0fee-519a-4426-a62e-dfeb4f536b22",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790154025.8746061,
+  "account": "B",
+  "pid": 10941,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/context_scanner.py",
+      "issue": "The fence/quoted-line weight-zero context rule is scoped to only override_instructions and authority_claim, but test_harmless_security_documentation_not_blocked requires a docs page 'describing these attacks' (all families, including hidden_execution's HTML-comment/javascript: examples and hidden_html's display:none examples) inside fences/quotes to scan safe or suspicious. hidden_execution is explicitly listed as a standalone weight-3 blocking pattern with no fence exemption, so a documentation example demonstrating it inside a code fence would still hit 'blocked', contradicting the acceptance test as written.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/skill_discovery.py",
+      "issue": "CHECKS (lines 267-275) is a flat tuple of (name, severity, per-line regex) consumed by a single shared per-line loop (lines 296-306: `for check, severity, pattern in CHECKS: re.search(pattern, line, ...)`). context_scanner.scan operates on whole-file text and returns its own line numbers and pattern names, so it cannot be inserted as a 'delegating' row inside that tuple without restructuring the loop. The spec never specifies the restructuring (e.g. drop hidden-instructions from CHECKS, run scan() once per file after the per-line loop, merge by file:line), leaving the no-duplicate-per-line acceptance criterion unverifiable and inviting an ad hoc implementation.",
+      "severity": "high",
+      "line": 267
+    },
+    {
+      "path": "tests/test_skill_discovery.py",
+      "issue": "test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions asserts the literal check name 'hidden-instructions' is present in findings (line 118). Once hidden-instructions is replaced by context_scanner's pattern names (override_instructions, hidden_html, etc.) per spec, this pre-existing test breaks, but it is not listed in the acceptance criteria as needing an update, so 'tests-green.sh must stay green' is at odds with the rename instruction unless this test is explicitly edited.",
+      "severity": "med",
+      "line": 118
+    },
+    {
+      "path": "orchestrator/context_scanner.py",
+      "issue": "Scoring section names weight-3 blocking conditions (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode-in-instruction-text) and a score>=6 fallback, but never gives numeric weights for authority_claim, permission_change, hidden_html, or the individual (non-joint) weights of credential_read/exfiltration alone, nor the locality rule for 'together' (same line vs. same document). Two conforming implementations could produce different `score` ints for the same input even though verdict happens to match on the listed acceptance tests.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "The spec requires `orchestrator scan <path> [--kind k] [--json]` in scope, but no acceptance test id covers it (tests/test_cli.py is not referenced in the acceptance list), so this scoped deliverable has no verifiable gate.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

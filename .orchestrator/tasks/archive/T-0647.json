@@ -1,0 +1,221 @@
+{
+  "id": "T-0647",
+  "created_at": 1789980320.5837529,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "R15b: gate/merge/executor integration \u2014 stale.py evidence in the gate, merged_at and changed_files stamped by merge(), gate stamps cleared on fix-round replies, allocation and active Jev routing hooks in executor.start, scout reuse check in spawn_scout",
+  "spec": "Why: merged pure modules need their call sites: daemon.stale_check/_record_stale_check (orchestrator/daemon.py:1050-1097) only knows path signals; merge.merge (orchestrator/merge.py:25-99) stamps no merged_at (merge wait undefined for Planner merges, AP P0 gap) and no changed_files (stale.overlapping_merge floor); executor.post_tool_result with replace_result=True (executor.py:215-247) leaves pipeline.gated_at set so gate() skips a task fixed by codex_reply (Planner had to clear it by hand on T-0570/T-0574 today); executor.start (executor.py:249-300) picks executors without allocation or active Jev adjustment; mcp.spawn_scout (mcp.py:75-77) launches without the scout_evidence reuse check.\nWhat. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in the named file; no pytest fixtures; use the daemon test harness in tests/_harness.py.\n1. Stale: daemon.stale_check(task) delegates to stale.evidence(task, graph_links=stale.load_links(), graph=interference.load_graph(), tasks=bus.read(role='execute')) and returns its dict (today's keys base, goal_head, moved_count, stale_paths, risk remain; signals/risk_reasons/graph added); _record_stale_check writes stale.row(...) with action recorded; _stale_rebase writes rows with action rebased/rebase_conflict; risk 'medium' is treated like 'low' for the stale_rebase decision (only high rebases).\n2. merge.merge: on status merged, bus.update also sets merged_at=time.time() (top-level, mirrored into pipeline.merged_at when absent) and changed_files = git diff --name-only previous_sha..sha (bounded to 500 paths). scorecard.parallelism merge_wait_s must read either location (read stamp helper accepts pipeline or top-level; already does per _stamp \u2014 verify with a test).\n3. executor.post_tool_result(replace_result=True): pop pipeline keys gated_at, gated_at_lease, gated_at_done and hold_reason/resume_hint gate residue, so gate() re-runs on the new head; record pipeline.regated_by='codex_reply'.\n4. executor.start: after scores = scorecard.scores(...), if [jev.routing].mode == active: routing = jev_route.shadow_context(t, pool) and scores = jev_route.active_scores(t, pool, routing['eligible'], routing['classification'], routing['evidence'], scores); then if [allocation].mode != off: ev = allocation.evidence_for([e.id for e in eligible], scorecard.task_class(t)); choice = allocation.choose(t, eligible ids, baseline=pool.pick_executor(...).id, priority=critical_path.explain(t id, tasks), ready_priorities=..., evidence=ev); allocation.record(t id, choice); in active mode ex = pool.executors[choice['executor']]; shadow leaves the baseline. Any exception in these hooks -> baseline pick, error logged in the run row.\n5. mcp.spawn_scout(task_id): before _bg, check = scout_evidence.reuse_check(task spec, objective=constraints.objective, head_sha=HEAD); scout_evidence.record_decision(...); when check['sufficient'] and constraints.force is not true, return {'task': id, 'status': 'skipped: reusable evidence', 'hits': check['hits']} and post the task result as done with the hits as findings (provenance repo, summary naming the reused ids); otherwise spawn as today.\nSafety: security review path and reviews_expected untouched; allocation never returns an ineligible executor; all hooks fail open to today's behaviour.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_returns_extended_evidence_and_only_high_rebases \u2014 stale_check output has signals and risk_reasons; a medium risk never triggers _stale_rebase",
+    "tests/test_merge.py::test_merge_stamps_merged_at_and_changed_files \u2014 a successful merge leaves merged_at and a changed_files list on the task",
+    "tests/test_executor.py::test_reply_result_clears_gate_stamps_for_regating \u2014 post_tool_result with replace_result removes gated_at keys and sets regated_by",
+    "tests/test_executor.py::test_start_uses_allocation_only_in_active_mode_and_fails_open \u2014 shadow mode keeps the baseline executor and writes an allocation decision row; active mode uses the chosen eligible executor; a raising allocation.choose falls back to baseline",
+    "tests/test_executor.py::test_start_applies_active_jev_scores_only_when_mode_active \u2014 with [jev.routing].mode active the scores passed to pick_executor are the adjusted ones; in shadow they are unchanged",
+    "tests/test_mcp.py::test_spawn_scout_skips_when_reusable_evidence_is_sufficient \u2014 sufficient fresh evidence returns skipped with hits and posts the scout result; force true spawns anyway"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py",
+    "tests/test_executor.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [
+    "T-0570",
+    "T-0572",
+    "T-0574",
+    "T-0600",
+    "T-0606",
+    "T-0634"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/merge.py",
+      "orchestrator/executor.py",
+      "orchestrator/mcp.py",
+      "orchestrator/stale.py",
+      "orchestrator/allocation.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/scout_evidence.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/critical_path.py",
+      "orchestrator/pool.py",
+      "tests/_harness.py",
+      "tests/test_daemon.py",
+      "tests/test_executor.py",
+      "tests/test_merge.py",
+      "tests/test_mcp.py"
+    ],
+    "interface_contract": "stale_check(task) keeps today's keys and adds signals, risk_reasons, graph; merge() stamps merged_at and changed_files; post_tool_result(replace_result=True) clears gated_at*; executor.start hooks read [allocation].mode and [jev.routing].mode; spawn_scout returns status 'skipped: reusable evidence' when sufficient"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R15b v2 after spec review T-0655 (executor.start builds the ready set and critical-path priorities itself from the bus; two-task allocation test)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789980336.136526,
+      "status": "held",
+      "hold_reason": "planner: serialized behind T-0646 (both edit daemon.py); release when R15a merges"
+    },
+    {
+      "ts": 1789980343.252222,
+      "pipeline": {
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789980343.304366,
+      "pipeline": {
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980336.136526": true
+        }
+      }
+    },
+    {
+      "ts": 1789982145.528095,
+      "status": "queued",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789982156.4543061,
+      "pipeline": {
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980336.136526": true
+        },
+        "first_ready_at": 1789982156.454239
+      }
+    },
+    {
+      "ts": 1789982156.509106,
+      "pipeline": {
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980336.136526": true
+        },
+        "first_ready_at": 1789982156.454239,
+        "spec_review_at": 1789982156.509032,
+        "spec_review_at_lease": 1789983056.509032
+      }
+    },
+    {
+      "ts": 1789982156.517188,
+      "pipeline": {
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980336.136526": true
+        },
+        "first_ready_at": 1789982156.454239,
+        "spec_review_at": 1789982156.509032,
+        "spec_review_at_lease": 1789983056.509032,
+        "spec_review_at_done": 1789982156.516882
+      }
+    },
+    {
+      "ts": 1789982378.8890529,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The allocation hook in executor.start needs `priority=critical_path.explain(task_id, tasks)` and `ready_priorities` (other ready tasks' critical-path priorities) to pick the critical vs non-critical factor in allocation.choose. But executor.start (called from mcp.codex/codex_reply and from daemon._dispatch_worker) only ever has the single task_id in scope \u2014 the `tasks` dependency-graph dict and per-tick `ready_priorities` are built in daemon.dispatch() (via _wave_tasks/candidate_ids, daemon.py:701-743) and never threaded through spawn_async(_dispatch_worker,...) or into executor.start's signature. The spec's '...' for ready_priorities leaves this undefined, so an implementer can satisfy the acceptance test with a degenerate single-task ready_priorities list (e.g. just [priority['critical_path_s']]), which makes `current_path >= max(ready_priorities)` trivially true and always selects settings['critical_factor'] \u2014 silently defeating T-0634's non-critical discount without failing any test.",
+          "severity": "high",
+          "line": 66
+        },
+        {
+          "path": "tests/test_executor.py",
+          "issue": "test_start_uses_allocation_only_in_active_mode_and_fails_open, as scoped, does not require ready_priorities to reflect any task besides the one under dispatch, so it cannot catch the degenerate single-task implementation described above.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789982406.9911401,
+      "pipeline": {
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980336.136526": true
+        },
+        "first_ready_at": 1789982156.454239,
+        "spec_review_at": 1789982156.509032,
+        "spec_review_at_lease": 1789983056.509032,
+        "spec_review_at_done": 1789982156.516882,
+        "spec_review_held_at": 1789982406.991061
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789982407.6599722,
+      "pipeline": {
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980336.136526": true,
+          "1789982406.9911401": true
+        },
+        "first_ready_at": 1789982156.454239,
+        "spec_review_at": 1789982156.509032,
+        "spec_review_at_lease": 1789983056.509032,
+        "spec_review_at_done": 1789982156.516882,
+        "spec_review_held_at": 1789982406.991061
+      }
+    },
+    {
+      "ts": 1789982471.034909,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R15b v2 after spec review T-0655 (executor.start builds the ready set and critical-path priorities itself from the bus; two-task allocation test)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "pipeline": {
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789980336.136526": true,
+      "1789982406.9911401": true
+    },
+    "first_ready_at": 1789982156.454239,
+    "spec_review_at": 1789982156.509032,
+    "spec_review_at_lease": 1789983056.509032,
+    "spec_review_at_done": 1789982156.516882,
+    "spec_review_held_at": 1789982406.991061
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The allocation hook in executor.start needs `priority=critical_path.explain(task_id, tasks)` and `ready_priorities` (other ready tasks' critical-path priorities) to pick the critical vs non-critical factor in allocation.choose. But executor.start (called from mcp.codex/codex_reply and from daemon._dispatch_worker) only ever has the single task_id in scope \u2014 the `tasks` dependency-graph dict and per-tick `ready_priorities` are built in daemon.dispatch() (via _wave_tasks/candidate_ids, daemon.py:701-743) and never threaded through spawn_async(_dispatch_worker,...) or into executor.start's signature. The spec's '...' for ready_priorities leaves this undefined, so an implementer can satisfy the acceptance test with a degenerate single-task ready_priorities list (e.g. just [priority['critical_path_s']]), which makes `current_path >= max(ready_priorities)` trivially true and always selects settings['critical_factor'] \u2014 silently defeating T-0634's non-critical discount without failing any test.",
+      "severity": "high",
+      "line": 66
+    },
+    {
+      "path": "tests/test_executor.py",
+      "issue": "test_start_uses_allocation_only_in_active_mode_and_fails_open, as scoped, does not require ready_priorities to reflect any task besides the one under dispatch, so it cannot catch the degenerate single-task implementation described above.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

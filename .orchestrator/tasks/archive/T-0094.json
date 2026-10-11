@@ -1,0 +1,84 @@
+{
+  "id": "T-0094",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "review: C-O6: daemon fixes from Phase A \u2014 count Claude fallback capacity in free_slots, and pick the review tier from the executor that wrote the code",
+  "spec": "Why (gotchas.md 2026-09-18): (1) daemon.py:84 free_slots() sums idle parallelism over enabled, non-cooling Codex executors only; with every Codex row cooling it is 0 and dispatch() breaks before executor.start, so the on_exhausted=fallback_claude policy (executor.py:110) never fires from the daemon; T-0070 had to be dispatched by hand. Fix: when pool.cfg codex.on_exhausted == \"fallback_claude\" and the Codex sum is 0, return pool.cfg limits.max_parallel_claude_workers minus the number of running execute tasks with executor starting with \"claude:\" (bus.read(status=\"running\", role=\"execute\")). (2) daemon.py:168-171 gate() creates the review task without a tier, so it defaults to sonnet and a sonnet-executed fallback task is reviewed by sonnet (T-0071), against the never-review-own-output rule. Fix: read t.get(\"executor\"); if it starts with \"claude:sonnet\" use tier \"opus\", if \"claude:opus\" use \"sonnet\", otherwise (Codex) keep the default; pass tier= to bus.create_task. Tests in tests/test_daemon.py: free_slots returns Claude capacity when all Codex rows cool under fallback policy and 0 under the hold policy; free_slots subtracts running claude executes; gate picks opus for a sonnet executor, sonnet for opus, default for codex (use the harness fixtures already used by the daemon tests; patch merge.TESTS_GREEN with a script that exits 0).",
+  "inputs": [
+    "T-0083"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py gains: free_slots_uses_claude_capacity_under_fallback, free_slots_zero_under_hold_policy, free_slots_subtracts_running_claude_executes, gate_review_tier_opus_for_sonnet_executor, gate_review_tier_sonnet_for_opus_executor, gate_review_tier_default_for_codex; all green",
+    "With pool.toml as committed (fallback_claude, max_parallel_claude_workers = 4) and every Codex executor cooling, `daemon --once` dispatches a queued complexity-3 execute task (observable: pipeline.dispatched_at stamped) in a test",
+    "Existing daemon tests unchanged and green; `uv run python -m unittest discover -q tests` green"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0094",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789733923.004042,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0094",
+      "claimed_at": 1789733923.00369
+    },
+    {
+      "ts": 1789733923.0425978,
+      "pid": 41094,
+      "account": "A"
+    },
+    {
+      "ts": 1789734071.942482,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789734071.9454982,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789734073.498786,
+      "pipeline": {
+        "merged_at": 1789734073.498708
+      }
+    }
+  ],
+  "claimed_at": 1789733923.00369,
+  "pid": 41094,
+  "account": "A",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789734073.498708
+  }
+}

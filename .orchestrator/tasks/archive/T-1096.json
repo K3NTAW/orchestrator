@@ -1,0 +1,1471 @@
+{
+  "id": "T-1096",
+  "created_at": 1790164594.635784,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S2i harness_depth and small-task fast path in shadow: deterministic depth level 0-4 from existing task fields, fast path skips Jev, skill routing, strategy lookup and scouts for level 0-1, promotion feature fast_path (P24, P25, P26)",
+  "spec": "Create orchestrator/harness_depth.py. level(task, *, tasks, cfg, history) -> {\"level\": 0..4, \"reasons\": [...], \"eligible_fast_path\": bool}. Deterministic rules in order: 4 when constraints.architectural, any scope path matches [review] security_paths or migrations area globs, complexity >= 8, or the task is a goal container; 3 when complexity 6-7, unresolved depends_on, or constraints.route is spec_review; 2 when complexity 4-5; 1 when complexity <= 3, scope <= 3 files, no security path, no dependency unresolved; 0 additionally when every acceptance line except the gate line is a test id (tests/test_x.py::test_y) and history first-pass rate for the task_class is >= 0.8 over at least 5 samples (history from scorecard rows; missing history means level 1, never 0). Fast path = level 0 or 1: in daemon dispatch and spawn packet building skip jev_route, skill routing (skills=None path), strategy lookup, context-router Jev calls and scout suggestions; keep hooks, tests-green, security review by path and human PR untouched. [harness].depth_mode = \"shadow\" (dated comment; off|shadow|active): shadow records a decision_log row kind harness_depth (add to KINDS) per dispatch with candidates 0..4, selected, reasons, would_skip list, and changes nothing; active applies the skips and stamps pipeline.harness_level. promotion FEATURES entry fast_path with criteria: at least 20 shadow rows at level 0-1, and once active first-pass rate of fast-path tasks not below the shadow baseline and lower tokens per accepted task; demotion on a fast-path task that needed two fix rounds. Docs: docs/hermes-hardening/15-harness-depth.md with the distribution of levels over the real bus tasks of this repository (run level over all merged execute tasks and tabulate).\nSpec review T-1070 folded in: (a) The fast-path skip list names only behaviours that exist: jev_route in daemon dispatch, skill routing where it really runs (spawn._prepare_skills in run_worker for the Claude fallback executor, scout, review, challenge and spec_review roles), context-router Jev calls, and spec review; drop 'strategy lookup' and 'scout suggestions' from the list and from would_skip (strategy.py is reporting-only and no scout suggestion exists). The active test verifies jev_route and _prepare_skills are not called for a level 0-1 task and the security review still fires. (b) 'architectural' is not a persisted constraint: level 4 uses constraints.architectural when present (Planner-set) OR the planner_taxonomy classification of the task computed at dispatch (planner_taxonomy.classify), whichever says architectural; document that real tasks today carry it only through the classifier. (c) History: first-pass rate per task_class uses first_pass_defined_count as the sample count (rows where first_pass is known), threshold 5; compute the history table ONCE per daemon tick (cache on the pool or a module-level cache keyed by the runs directory mtime) and reuse it for every candidate task in that tick.\nSpec review T-1094 folded in: (a) constraints.route == \"spec_review\" IS persisted: the Planner sets it when filing every complexity >= 6 task of this goal (look at any queued task JSON under the main checkout's .orchestrator/tasks; a worktree carries none), so the level-3 rule keeps it; drop the 'unresolved depends_on' clause because level() runs only for tasks bus.ready() already admitted (note that in the docs). (b) The migrations glob lives at [review.areas.migrations].paths in pool.toml (nested under areas next to auth, interfaces, data_deletion); read it from there. (c) Self-refusal in active mode mirrors skill routing's existing pattern (the daemon notify line 'active skill routing refused; using shadow'): before applying skips, call promotion.evaluate(\"fast_path\", ...) and, when the criteria are unmet, run as shadow and notify once per tick; add tests/test_harness_depth.py::test_active_refuses_to_shadow_when_promotion_criteria_unmet. (d) Cross-feature sample: a fast-path task still records one skill_selection decision_log row with selected empty and reason fast_path (and the jev_route row with reason fast_path) so the skill_routing and jev_routing promotion samples are not silently skewed; document this interaction in 15-harness-depth.md.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_harness_depth.py::test_levels_from_rules (security path task 4, complexity 6 task 3, complexity 5 task 2, small localized task 1, small task with test-id acceptance and good history 0)",
+    "tests/test_harness_depth.py::test_missing_history_never_yields_level_zero",
+    "tests/test_daemon.py::test_dispatch_records_harness_depth_row_in_shadow_and_changes_nothing",
+    "tests/test_daemon.py::test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review",
+    "tests/test_promotion.py::test_fast_path_feature_registered",
+    "tests/test_harness_depth.py::test_history_uses_defined_first_pass_count_and_is_computed_once_per_tick",
+    "tests/test_harness_depth.py::test_active_refuses_to_shadow_when_promotion_criteria_unmet",
+    "tests/test_harness_depth.py::test_fast_path_records_empty_skill_selection_row",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/harness_depth.py",
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_harness_depth.py",
+    "tests/test_daemon.py",
+    "tests/test_promotion.py",
+    "docs/hermes-hardening/15-harness-depth.md",
+    "orchestrator/planner_taxonomy.py"
+  ],
+  "depends_on": [
+    "T-0996"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1096",
+  "codex_thread": "01a0ce21-0f3d-7b32-9e40-3faa22e6d98f",
+  "result": {
+    "summary": "Implemented shadow harness depth, guarded fast-path skips, promotion checks, and distribution docs.\nGate: exit 0; 1,301 tests passed. Commit: `2165668`. Working tree clean.\nFailures-only test output: empty.\n\n```text\n.orchestrator/pool.toml                    |   4 +\ndocs/hermes-hardening/15-harness-depth.md  | 105 +\norchestrator/daemon.py                     |  28 +-\norchestrator/decision_log.py               |   1 +\norchestrator/harness_depth.py              | 150 +\norchestrator/promotion.py                  |  21 +\norchestrator/spawn.py                      |  10 +-\ntests/test_daemon.py                       |  49 +\ntests/test_harness_depth.py                |  99 +\ntests/test_promotion.py                    |  13 +\n10 files changed, 474 insertions(+), 6 deletions(-)\n```",
+    "executed_by": "codex:astra",
+    "thread": "01a0ce21-0f3d-7b32-9e40-3faa22e6d98f",
+    "usage": {
+      "input_tokens": 2748864,
+      "cached_input_tokens": 2646656,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 13827,
+      "reasoning_output_tokens": 2670,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790164594.637408,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 18:10: spec reviews T-1070 and T-1094 folded in; two rounds reviewed, Planner approves (waiver)"
+    },
+    {
+      "ts": 1790164619.478127,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074
+      }
+    },
+    {
+      "ts": 1790164619.4791648,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112
+      }
+    },
+    {
+      "ts": 1790164625.17627,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448
+      }
+    },
+    {
+      "ts": 1790164665.9612002,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        }
+      }
+    },
+    {
+      "ts": 1790164667.971781,
+      "packet_meta": {
+        "chars": 7217,
+        "est_tokens": 1804,
+        "presented_tokens": 1804,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "c25c50e5d9ab384053cb7e7c442a91be277f49b8a86916fe7e8346230671eb0e"
+          },
+          "objective": {
+            "chars": 5448,
+            "est_tokens": 1362,
+            "sha256": "ad517b45c74102978c588797c2e831e3f13a17db4997b5801281e270fdfd3563"
+          },
+          "acceptance": {
+            "chars": 857,
+            "est_tokens": 214,
+            "sha256": "c53569bedf0b14862a5913da803783eb0a34ca2374028b3d17a18ea0e32887f7"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 339,
+            "est_tokens": 84,
+            "sha256": "4eda162935d16f72cf5d56dc300738fd225c18086e429b2de03bd4e68a66ec33"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "7c8aa23e89ba",
+        "version": "7c8aa23e89ba",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5a6f02b2b0f6 gotchas@76acbe817c94 memory@notes over cap by 2417 chars: acceptance kept whole routed=active",
+        "policy_version": "5a6f02b2b0f6",
+        "gotchas": "76acbe817c94",
+        "candidate_tokens": 3320,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 23483,
+        "routed_reduction_ratio": 0.925292564718862,
+        "routed_hidden": 5,
+        "routed_ambiguous": 26,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "2f61d0dc4fbf",
+          "74ee914d8ecc",
+          "a5eb07f61c8c",
+          "06a546e4b731",
+          "7ab6ab7022e5",
+          "c93db0f50e84",
+          "3725580aedbd",
+          "4b0ab6f61cdb",
+          "b30685cceddc",
+          "4e63243c944e",
+          "17210891e218",
+          "f691f21d34c7",
+          "5f0cea5b19ed",
+          "7844bc2591a4",
+          "5e7f6bd912ad",
+          "80648deefba0",
+          "c7db5c48f348",
+          "f08ab434a5ed",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "e9055faad49b",
+          "504365aa02ad",
+          "ec115d834a13",
+          "974fe894e53e",
+          "98eb9ee9f118",
+          "42e1bab77e32",
+          "ec014143f9fd",
+          "5c564d1a3a80",
+          "613e97c8cc9f",
+          "23425dd6c779",
+          "25a9bd486ca9",
+          "efc71947ee6d",
+          "c98b09a3ae06",
+          "7ae5bda0e65c",
+          "d2f0daabff81",
+          "fcb57ea8ab5e",
+          "5d7923cfd0d4",
+          "427a20ad098a",
+          "59f6c147ddd0",
+          "d9f57f3d6a40",
+          "bd655ababb4a",
+          "6af6ad0a12f6",
+          "ec9cf2ea1380",
+          "e146114ba8ec",
+          "cd2ca5b8db6f",
+          "e4c630cc87b3",
+          "89e16c7c78ed",
+          "51bdd6be6a0d",
+          "d02e6bc9902a",
+          "66ab1306ccfc",
+          "18558590f472",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "1507347f3a7c",
+          "584f4a33bddf",
+          "967e86dc8567",
+          "f5e9df567728",
+          "917be66a27c5"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790164667.972994,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1096",
+      "claimed_at": 1790164667.9728482
+    },
+    {
+      "ts": 1790164667.9739468,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790165267.076925,
+      "codex_thread": "01a0ce21-0f3d-7b32-9e40-3faa22e6d98f",
+      "codex_thread_head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+    },
+    {
+      "ts": 1790165267.0791092,
+      "packet_meta": {
+        "chars": 7217,
+        "est_tokens": 1804,
+        "presented_tokens": 1804,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "c25c50e5d9ab384053cb7e7c442a91be277f49b8a86916fe7e8346230671eb0e"
+          },
+          "objective": {
+            "chars": 5448,
+            "est_tokens": 1362,
+            "sha256": "ad517b45c74102978c588797c2e831e3f13a17db4997b5801281e270fdfd3563"
+          },
+          "acceptance": {
+            "chars": 857,
+            "est_tokens": 214,
+            "sha256": "c53569bedf0b14862a5913da803783eb0a34ca2374028b3d17a18ea0e32887f7"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 339,
+            "est_tokens": 84,
+            "sha256": "4eda162935d16f72cf5d56dc300738fd225c18086e429b2de03bd4e68a66ec33"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "7c8aa23e89ba",
+        "version": "7c8aa23e89ba",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5a6f02b2b0f6 gotchas@76acbe817c94 memory@notes over cap by 2417 chars: acceptance kept whole routed=active",
+        "policy_version": "5a6f02b2b0f6",
+        "gotchas": "76acbe817c94",
+        "candidate_tokens": 3320,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 23483,
+        "routed_reduction_ratio": 0.925292564718862,
+        "routed_hidden": 5,
+        "routed_ambiguous": 26,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "2f61d0dc4fbf",
+          "74ee914d8ecc",
+          "a5eb07f61c8c",
+          "06a546e4b731",
+          "7ab6ab7022e5",
+          "c93db0f50e84",
+          "3725580aedbd",
+          "4b0ab6f61cdb",
+          "b30685cceddc",
+          "4e63243c944e",
+          "17210891e218",
+          "f691f21d34c7",
+          "5f0cea5b19ed",
+          "7844bc2591a4",
+          "5e7f6bd912ad",
+          "80648deefba0",
+          "c7db5c48f348",
+          "f08ab434a5ed",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "e9055faad49b",
+          "504365aa02ad",
+          "ec115d834a13",
+          "974fe894e53e",
+          "98eb9ee9f118",
+          "42e1bab77e32",
+          "ec014143f9fd",
+          "5c564d1a3a80",
+          "613e97c8cc9f",
+          "23425dd6c779",
+          "25a9bd486ca9",
+          "efc71947ee6d",
+          "c98b09a3ae06",
+          "7ae5bda0e65c",
+          "d2f0daabff81",
+          "fcb57ea8ab5e",
+          "5d7923cfd0d4",
+          "427a20ad098a",
+          "59f6c147ddd0",
+          "d9f57f3d6a40",
+          "bd655ababb4a",
+          "6af6ad0a12f6",
+          "ec9cf2ea1380",
+          "e146114ba8ec",
+          "cd2ca5b8db6f",
+          "e4c630cc87b3",
+          "89e16c7c78ed",
+          "51bdd6be6a0d",
+          "d02e6bc9902a",
+          "66ab1306ccfc",
+          "18558590f472",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "1507347f3a7c",
+          "584f4a33bddf",
+          "967e86dc8567",
+          "f5e9df567728",
+          "917be66a27c5"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790165267.087019,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790165267.0898602,
+      "status": "done",
+      "result": {
+        "summary": "Implemented shadow harness depth, guarded fast-path skips, promotion checks, and distribution docs.\nGate: exit 0; 1,301 tests passed. Commit: `2165668`. Working tree clean.\nFailures-only test output: empty.\n\n```text\n.orchestrator/pool.toml                    |   4 +\ndocs/hermes-hardening/15-harness-depth.md  | 105 +\norchestrator/daemon.py                     |  28 +-\norchestrator/decision_log.py               |   1 +\norchestrator/harness_depth.py              | 150 +\norchestrator/promotion.py                  |  21 +\norchestrator/spawn.py                      |  10 +-\ntests/test_daemon.py                       |  49 +\ntests/test_harness_depth.py                |  99 +\ntests/test_promotion.py                    |  13 +\n10 files changed, 474 insertions(+), 6 deletions(-)\n```",
+        "executed_by": "codex:astra",
+        "thread": "01a0ce21-0f3d-7b32-9e40-3faa22e6d98f",
+        "usage": {
+          "input_tokens": 2748864,
+          "cached_input_tokens": 2646656,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 13827,
+          "reasoning_output_tokens": 2670,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790165372.658504,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790165488.241772,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790165488.648811,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        }
+      }
+    },
+    {
+      "ts": 1790165488.780994,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+      }
+    },
+    {
+      "ts": 1790165488.790535,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961
+      }
+    },
+    {
+      "ts": 1790165750.404768,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790165880.68489,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961,
+        "merged_at": 1790165880.684642,
+        "merged_at_lease": 1790166780.684642
+      }
+    },
+    {
+      "ts": 1790165880.981143,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961,
+        "merged_at": 1790165880.684642,
+        "merged_at_lease": 1790166780.684642,
+        "merged_at_done": 1790165880.980923
+      }
+    },
+    {
+      "ts": 1790165880.98306,
+      "status": "held",
+      "hold_reason": "merge rebase_changed_diff"
+    },
+    {
+      "ts": 1790165882.162221,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961,
+        "merged_at": 1790165880.684642,
+        "merged_at_lease": 1790166780.684642,
+        "merged_at_done": 1790165880.980923,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790165882.256524,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961,
+        "merged_at": 1790165880.684642,
+        "merged_at_lease": 1790166780.684642,
+        "merged_at_done": 1790165880.980923,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790165880.98306": true
+        }
+      }
+    },
+    {
+      "ts": 1790166013.967686,
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790165880.98306": true
+        }
+      },
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1790166139.427714,
+      "status": "done",
+      "merged_into": "goal/T-0991",
+      "sha": "a647db940069aef97b3c0a1574e06c3ecaaf6c79",
+      "merged_at": 1790166139.426822,
+      "changed_files": [
+        ".orchestrator/pool.toml",
+        "docs/hermes-hardening/15-harness-depth.md",
+        "orchestrator/daemon.py",
+        "orchestrator/decision_log.py",
+        "orchestrator/harness_depth.py",
+        "orchestrator/promotion.py",
+        "orchestrator/spawn.py",
+        "tests/test_daemon.py",
+        "tests/test_harness_depth.py",
+        "tests/test_promotion.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790164619.478074,
+        "dispatched_at": 1790164619.479112,
+        "dispatched_at_lease": 1790165519.479112,
+        "dispatched_at_done": 1790164625.1761448,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790164665.96067
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790165488.241556,
+        "gated_at_lease": 1790166388.241556,
+        "first_green_at": 1790165488.240709,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1096",
+          "goal_head": "goal/T-0991",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/hermes-hardening/04-context-scanner.md",
+            "orchestrator/cli.py",
+            "orchestrator/context_scanner.py",
+            "orchestrator/evidence.py",
+            "orchestrator/skill_discovery.py",
+            "tests/test_cli.py",
+            "tests/test_context_scanner.py",
+            "tests/test_evidence.py",
+            "tests/test_skill_discovery.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790165488.6484349,
+          "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+        },
+        "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+        "gated_at_done": 1790165488.788961,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790165880.98306": true
+        },
+        "merged_at": 1790166139.426822
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 18:10: spec reviews T-1070 and T-1094 folded in; two rounds reviewed, Planner approves (waiver)",
+  "pipeline": {
+    "first_ready_at": 1790164619.478074,
+    "dispatched_at": 1790164619.479112,
+    "dispatched_at_lease": 1790165519.479112,
+    "dispatched_at_done": 1790164625.1761448,
+    "handoff": {
+      "baseline": "astra",
+      "selected": "astra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790164665.96067
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "61114315ac9169705d9902ea76eefb0a5c96416c",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790165488.241556,
+    "gated_at_lease": 1790166388.241556,
+    "first_green_at": 1790165488.240709,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1096",
+      "goal_head": "goal/T-0991",
+      "moved_count": 9,
+      "stale_paths": [
+        "docs/hermes-hardening/04-context-scanner.md",
+        "orchestrator/cli.py",
+        "orchestrator/context_scanner.py",
+        "orchestrator/evidence.py",
+        "orchestrator/skill_discovery.py",
+        "tests/test_cli.py",
+        "tests/test_context_scanner.py",
+        "tests/test_evidence.py",
+        "tests/test_skill_discovery.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790165488.6484349,
+      "head": "21656682d2e6a0b2eac59399d18f687c604c85f7"
+    },
+    "reviewed_sha": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+    "gated_at_done": 1790165488.788961,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790165880.98306": true
+    },
+    "merged_at": 1790166139.426822
+  },
+  "packet_meta": {
+    "chars": 7217,
+    "est_tokens": 1804,
+    "presented_tokens": 1804,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "c25c50e5d9ab384053cb7e7c442a91be277f49b8a86916fe7e8346230671eb0e"
+      },
+      "objective": {
+        "chars": 5448,
+        "est_tokens": 1362,
+        "sha256": "ad517b45c74102978c588797c2e831e3f13a17db4997b5801281e270fdfd3563"
+      },
+      "acceptance": {
+        "chars": 857,
+        "est_tokens": 214,
+        "sha256": "c53569bedf0b14862a5913da803783eb0a34ca2374028b3d17a18ea0e32887f7"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+      },
+      "write_scope": {
+        "chars": 339,
+        "est_tokens": 84,
+        "sha256": "4eda162935d16f72cf5d56dc300738fd225c18086e429b2de03bd4e68a66ec33"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "7c8aa23e89ba",
+    "version": "7c8aa23e89ba",
+    "candidate_known": true,
+    "base": "1acfc3b30612",
+    "sources": "pool.toml@5a6f02b2b0f6 gotchas@76acbe817c94 memory@notes over cap by 2417 chars: acceptance kept whole routed=active",
+    "policy_version": "5a6f02b2b0f6",
+    "gotchas": "76acbe817c94",
+    "candidate_tokens": 3320,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 23483,
+    "routed_reduction_ratio": 0.925292564718862,
+    "routed_hidden": 5,
+    "routed_ambiguous": 26,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "2f61d0dc4fbf",
+      "74ee914d8ecc",
+      "a5eb07f61c8c",
+      "06a546e4b731",
+      "7ab6ab7022e5",
+      "c93db0f50e84",
+      "3725580aedbd",
+      "4b0ab6f61cdb",
+      "b30685cceddc",
+      "4e63243c944e",
+      "17210891e218",
+      "f691f21d34c7",
+      "5f0cea5b19ed",
+      "7844bc2591a4",
+      "5e7f6bd912ad",
+      "80648deefba0",
+      "c7db5c48f348",
+      "f08ab434a5ed",
+      "6f6b02dad815",
+      "d0844cdc7c5a",
+      "e9055faad49b",
+      "504365aa02ad",
+      "ec115d834a13",
+      "974fe894e53e",
+      "98eb9ee9f118",
+      "42e1bab77e32",
+      "ec014143f9fd",
+      "5c564d1a3a80",
+      "613e97c8cc9f",
+      "23425dd6c779",
+      "25a9bd486ca9",
+      "efc71947ee6d",
+      "c98b09a3ae06",
+      "7ae5bda0e65c",
+      "d2f0daabff81",
+      "fcb57ea8ab5e",
+      "5d7923cfd0d4",
+      "427a20ad098a",
+      "59f6c147ddd0",
+      "d9f57f3d6a40",
+      "bd655ababb4a",
+      "6af6ad0a12f6",
+      "ec9cf2ea1380",
+      "e146114ba8ec",
+      "cd2ca5b8db6f",
+      "e4c630cc87b3",
+      "89e16c7c78ed",
+      "51bdd6be6a0d",
+      "d02e6bc9902a",
+      "66ab1306ccfc",
+      "18558590f472",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "1507347f3a7c",
+      "584f4a33bddf",
+      "967e86dc8567",
+      "f5e9df567728",
+      "917be66a27c5"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790164667.9728482,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "21656682d2e6a0b2eac59399d18f687c604c85f7",
+  "review_verdict": "approve",
+  "hold_reason": null,
+  "merged_into": "goal/T-0991",
+  "sha": "a647db940069aef97b3c0a1574e06c3ecaaf6c79",
+  "merged_at": 1790166139.426822,
+  "changed_files": [
+    ".orchestrator/pool.toml",
+    "docs/hermes-hardening/15-harness-depth.md",
+    "orchestrator/daemon.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/harness_depth.py",
+    "orchestrator/promotion.py",
+    "orchestrator/spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_harness_depth.py",
+    "tests/test_promotion.py"
+  ]
+}

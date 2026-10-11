@@ -1,0 +1,125 @@
+{
+  "id": "T-0160",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "D1 fix round 4: sweep done-but-unmerged tasks whose reviews all failed, drop the dead avoid_account field, make CLAUDE.md/planner.md/README state the real 7-10 review rule (from review T-0159)",
+  "spec": "Fix round for T-0157 (branch task/T-0157 at 8a82703, rebased on goal/T-0109; carries T-0120, T-0151, T-0154). Work in this task's worktree, cut from task/T-0157. Review T-0159 (opus) requested changes; items come from it. Do not widen scope.\n\n1 HIGH daemon.py merge_reviewed (\u2248line 400): the failed/held-sibling escape hatch only runs inside the loop over done reviews, so when EVERY review of a task fails (or its single review fails) nothing fires and the task sits done+gated forever. Restructure: iterate over execute tasks that are done, gated (pipeline.gated_at) and not merged (merged_into unset, not already_merged); for each, collect all its reviews (inputs[0] == id, any status). If none exist \u2192 skip (gate() creates them). If any review is done with request_changes \u2192 hold as today. If every review is failed or held (none queued/running/done-approve) \u2192 stamp review_held_at, status held, hold_reason \"reviews failed: <ids>\" and notify once. If the approved count >= reviews_expected(t) \u2192 stamp merged_at on src and merge. Otherwise wait. Keep stale() and already_merged() checks. Tests: (a) complexity-7 task with two failed reviews \u2192 held with hold_reason naming both ids, no merge; (b) complexity-4 task with its one review failed \u2192 held; (c) existing approve/merge tests still green.\n\n2 MED daemon.py gate() (\u2248line 364) and tests/test_daemon.py (\u2248line 327): avoid_account is always None and nothing consumes it. Remove the avoid_account field and its assertion; keep constraints {\"second_review\": true}. In .orchestrator/pool.toml [review] comment and README.md Pipeline: replace \"a different account when possible\" with \"both reviews may run on the same account; the model differs from the executor\".\n\n3 MED CLAUDE.md step 7 and .orchestrator/prompts/planner.md (same line, kept byte-identical for test_planner_md_matches_claude_md_lists): replace \"7\u201310 cross-model adversarial + security checklist\" with \"7\u201310 two reviews + security checklist: cross-model when Codex executed; when a Claude fallback executed, both reviews run on the non-executing Claude tier (only two Claude tiers exist, Codex reviews are unavailable while it cools)\". Nothing else in those two files changes.\n\n4 LOW README.md Pipeline: add one clause: \"an orphaned result (executor died, daemon re-gated its commit) gets exactly one review whatever its complexity\".\n\nNo new dependency. Commit on the task branch when green (`git add` the scoped files, `git commit`). Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0157",
+    "T-0159"
+  ],
+  "acceptance": [
+    "merge_reviewed sweeps done+gated+unmerged execute tasks: all-failed reviews hold the task with a hold_reason naming them and notify once (tests a, b); approve/merge paths still green",
+    "avoid_account removed from gate() and tests; pool.toml and README say both reviews may share an account and only the model differs from the executor",
+    "CLAUDE.md step 7 and prompts/planner.md carry the identical new 7-10 sentence; test_planner_md_matches_claude_md_lists green",
+    "README states the orphaned single-review exception",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the six scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "CLAUDE.md",
+    ".orchestrator/prompts/planner.md"
+  ],
+  "depends_on": [
+    "T-0157"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py",
+    "fix_round_for": "T-0157",
+    "worktree_base": "task/T-0157"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0160",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nFixed all 4 items from the T-0159 opus review of T-0157:\n\n1. **`merge_reviewed` all-failed-reviews bug** \u2014 restructured to iterate over done+gated+unmerged *execute* tasks instead of done *review* tasks. The old loop only ever noticed a stuck task via a done+approve review; if every review of a task failed or was held, none of them ever reached `done`, so the task sat wedged forever. New logic holds whenever approvals-so-far plus still-live (queued/running) reviews can no longer reach `reviews_expected()`, naming the stuck reviews in `hold_reason`. Added two tests: two-failed-reviews on a complexity-7 task, and one-failed-review on a complexity-4 task; all prior approve/hold/merge tests still pass unchanged.\n2. **Removed `avoid_account`** from `gate()`'s second-review constraints (it was always `None` and unused) and updated the test, `pool.toml` comment, and README wording to \"both reviews may run on the same account; the model differs from the executor.\"\n3. **CLAUDE.md / planner.md step 7** \u2014 replaced \"cross-model adversarial\" with the more precise Codex-vs-Claude-fallback wording, kept byte-identical between both files.\n4. **README** \u2014 added the orphaned-result single-review exception clause.\n\n### Files changed\n`orchestrator/daemon.py`, `tests/test_daemon.py`, `.orchestrator/pool.toml`, `README.md`, `CLAUDE.md`, `.orchestrator/prompts/planner.md`\n\n### Test output\n`uv run python -m unittest discover -q tests` \u2192 **169 tests, OK** (no failures). `.claude/hooks/tests-green.sh` also exits 0.\n\nCommitted on `task/T-0160` as `2f37982`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789741645.1042292,
+      "pipeline": {
+        "gated_at": 1789741645.10405,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789741654.069897,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789741654.0734148,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0160",
+      "claimed_at": 1789741654.073206
+    },
+    {
+      "ts": 1789741654.083474,
+      "pid": 28913,
+      "account": "A"
+    },
+    {
+      "ts": 1789742049.283488,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nFixed all 4 items from the T-0159 opus review of T-0157:\n\n1. **`merge_reviewed` all-failed-reviews bug** \u2014 restructured to iterate over done+gated+unmerged *execute* tasks instead of done *review* tasks. The old loop only ever noticed a stuck task via a done+approve review; if every review of a task failed or was held, none of them ever reached `done`, so the task sat wedged forever. New logic holds whenever approvals-so-far plus still-live (queued/running) reviews can no longer reach `reviews_expected()`, naming the stuck reviews in `hold_reason`. Added two tests: two-failed-reviews on a complexity-7 task, and one-failed-review on a complexity-4 task; all prior approve/hold/merge tests still pass unchanged.\n2. **Removed `avoid_account`** from `gate()`'s second-review constraints (it was always `None` and unused) and updated the test, `pool.toml` comment, and README wording to \"both reviews may run on the same account; the model differs from the executor.\"\n3. **CLAUDE.md / planner.md step 7** \u2014 replaced \"cross-model adversarial\" with the more precise Codex-vs-Claude-fallback wording, kept byte-identical between both files.\n4. **README** \u2014 added the orphaned-result single-review exception clause.\n\n### Files changed\n`orchestrator/daemon.py`, `tests/test_daemon.py`, `.orchestrator/pool.toml`, `README.md`, `CLAUDE.md`, `.orchestrator/prompts/planner.md`\n\n### Test output\n`uv run python -m unittest discover -q tests` \u2192 **169 tests, OK** (no failures). `.claude/hooks/tests-green.sh` also exits 0.\n\nCommitted on `task/T-0160` as `2f37982`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789742416.6261592,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789742426.119452,
+      "pipeline": {
+        "gated_at": 1789741645.10405,
+        "gated_by": "planner-pre-stamp: gate and review by hand",
+        "review_held_at": 1789742426.119363
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789753314.400034,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "hold_reason": null,
+      "merged_via": "T-0169 (D1 fix-round chain, rebased)"
+    }
+  ],
+  "pipeline": {
+    "gated_at": 1789741645.10405,
+    "gated_by": "planner-pre-stamp: gate and review by hand",
+    "review_held_at": 1789742426.119363
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789741654.073206,
+  "pid": 28913,
+  "account": "A",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0109",
+  "merged_via": "T-0169 (D1 fix-round chain, rebased)"
+}

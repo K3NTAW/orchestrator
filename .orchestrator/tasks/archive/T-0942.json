@@ -1,0 +1,120 @@
+{
+  "id": "T-0942",
+  "created_at": 1790118190.548526,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S9: Jev skill routing for the ambiguous bucket only: typed relevance questions, batched, cached by task state + skill version + repo head, declared Jev boundary, shadow decisions; deterministic candidates never touched",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P9, P8 step 6, P29, P38 (P37 stage 9). Depends on T-0939 (skill_router.select returns ambiguous ids and mandatory/selected sets; [skills] mode; skill_selection rows with role) and the Jev boundary from T-0774 (jev.declare_boundary, jev.ask(site=...), data classes). Facts: jev.ask redacts and caps payloads, refuses SENSITIVE/SECRET, and every site declares its fields; jev_route/jev_gate show the question pattern (typed yes/no questions with probabilities, batched into one request, fail-open on None); [jev] has budget and cache settings; skills carry Level 1 renderings (trigger + objective + output).\nDo:\n1. orchestrator/jev_skills.py (new). `classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask) -> {\"decisions\": {id: {\"relevant_p\", \"reduces_rework_p\", \"duplicates_p\", \"worth_cost_p\", \"requires_specialist_p\", \"select\": bool}}, \"source\": \"jev\"|\"cache\"|\"none\", \"latency_ms\", \"usage\"}`. One batched request per task carrying, per ambiguous skill, only its Level 1 rendering (\u2264 400 chars) and, once, a redacted task digest (title, spec[:800], scope paths, task_class, role); at most [skills] jev_max_batch (default 8) skills per request, never more than one request per spawn; obvious trigger matches and mandatory skills are never sent. Selection rule: select when relevant_p \u2265 0.6 and worth_cost_p \u2265 0.5 and duplicates_p < 0.5; when Jev is unavailable (None) the ambiguous bucket stays excluded (fail-closed for extra skills, which is the safe direction).\n2. Boundary: jev.declare_boundary(\"skills\", fields=[...exact fields...], max_chars=6000, raw_source_allowed=False); tests assert an undeclared field is dropped and no packet section or file content ever appears in the payload.\n3. Cache: key = sha256(task id + task content hash (title+spec+scope) + sorted skill versions + repo head sha)[:16]; entries live in STATE/runs/jev/skills_cache.json with [jev.skills] cache_ttl_s (default 86400) and max entries 500; any change in the key invalidates.\n4. Wiring: skill_router.select gains `jev=True` behaviour when [skills] jev_mode (new key: off | shadow | active, default shadow) is shadow or active: shadow records the Jev verdicts in the skill_selection row (jev = {...}) without changing selected; active adds Jev-selected ambiguous skills to selected (still under max_selected and the presentation cap from T-0939). promotion.FEATURES gains \"jev_skill_routing\" (table skills, key jev_mode, default shadow) with an evidence loader counting rows carrying jev verdicts.\n5. Scorecard: skill_scorecard adds jev_agreement_rate (Jev-selected skills that were later used / Jev-selected) and jev_calls_per_spawn per role; `scorecard --skills` prints them.\n6. docs/skill-intelligence/10-jev-routing.md (\u226460 lines): the questions, the batching and cache rules, the boundary, what shadow logs, revert path (jev_mode off).\nTests (unittest, fake ask): tests/test_jev_skills.py::test_only_ambiguous_skills_are_sent_in_one_batch, ::test_selection_rule_thresholds, ::test_unavailable_jev_keeps_bucket_excluded, ::test_cache_key_invalidates_on_skill_version_or_head_change, ::test_boundary_drops_undeclared_fields_and_never_carries_content; tests/test_skill_router.py::test_jev_shadow_records_without_changing_selection, ::test_jev_active_adds_selected_ambiguous_under_caps. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_skills.py::test_only_ambiguous_skills_are_sent_in_one_batch passes",
+    "tests/test_jev_skills.py::test_selection_rule_thresholds passes",
+    "tests/test_jev_skills.py::test_unavailable_jev_keeps_bucket_excluded passes",
+    "tests/test_jev_skills.py::test_cache_key_invalidates_on_skill_version_or_head_change passes",
+    "tests/test_jev_skills.py::test_boundary_drops_undeclared_fields_and_never_carries_content passes",
+    "tests/test_skill_router.py::test_jev_shadow_records_without_changing_selection passes",
+    "tests/test_skill_router.py::test_jev_active_adds_selected_ambiguous_under_caps passes",
+    "pool.toml has [skills] jev_mode = \"shadow\" and promotion.FEATURES has jev_skill_routing; docs/skill-intelligence/10-jev-routing.md exists; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/jev_skills.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/jev.py",
+    "orchestrator/promotion.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_skills.py",
+    "tests/test_skill_router.py",
+    "tests/test_promotion.py",
+    "docs/skill-intelligence/10-jev-routing.md"
+  ],
+  "depends_on": [
+    "T-0939",
+    "T-0938"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790121013.850589,
+      "pipeline": {
+        "first_ready_at": 1790121013.8505049
+      }
+    },
+    {
+      "ts": 1790121013.980567,
+      "pipeline": {
+        "first_ready_at": 1790121013.8505049,
+        "spec_review_at": 1790121013.980474,
+        "spec_review_at_lease": 1790121913.980474
+      }
+    },
+    {
+      "ts": 1790121013.987974,
+      "pipeline": {
+        "first_ready_at": 1790121013.8505049,
+        "spec_review_at": 1790121013.980474,
+        "spec_review_at_lease": 1790121913.980474,
+        "spec_review_at_done": 1790121013.987786
+      }
+    },
+    {
+      "ts": 1790122646.661827,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "decision_log.record() already exposes a top-level jev=None kwarg (decision_log.py:115) that lands in row[\"jev\"], but the only two call sites that write kind=\"skill_selection\" rows are spawn.py:_skill_routing (line 98-106) and orchestrator/executor.py:_route_skills (line 31-38). Both build a fixed-key extra={...} dict and neither passes jev=... nor forwards a new choice[\"jev\"] field. Neither file is in T-0960's scope list. Result: skill_router.select() can compute choice[\"jev\"]={...} exactly as specified, and the new unit tests in tests/test_skill_router.py will pass (they call select() directly and inspect the return dict), but every real production skill_selection row will still log jev=None regardless of jev_mode=shadow|active, since spawn.py/executor.py never thread the value through. That silently breaks item 5 (jev_agreement_rate/jev_calls_per_spawn) and the promotion.FEATURES['jev_skill_routing'] evidence loader ('counting rows carrying jev verdicts' will always count 0), and makes docs/skill-intelligence/10-jev-routing.md's description of 'what shadow logs' false even though every listed acceptance test is green.",
+          "severity": "high",
+          "line": 98
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Same missing wiring as spawn.py: _route_skills (line 31-38) calls decision_log.record for skill_selection without jev=..., and this file is also outside T-0960 scope.",
+          "severity": "high",
+          "line": 31
+        }
+      ]
+    },
+    {
+      "ts": 1790122669.396242,
+      "status": "failed",
+      "reason": "superseded 11:45 by T-0967 (spec v2 after T-0960: jev verdicts threaded into both skill_selection record sites with tests)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790121013.8505049,
+    "spec_review_at": 1790121013.980474,
+    "spec_review_at_lease": 1790121913.980474,
+    "spec_review_at_done": 1790121013.987786
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "decision_log.record() already exposes a top-level jev=None kwarg (decision_log.py:115) that lands in row[\"jev\"], but the only two call sites that write kind=\"skill_selection\" rows are spawn.py:_skill_routing (line 98-106) and orchestrator/executor.py:_route_skills (line 31-38). Both build a fixed-key extra={...} dict and neither passes jev=... nor forwards a new choice[\"jev\"] field. Neither file is in T-0960's scope list. Result: skill_router.select() can compute choice[\"jev\"]={...} exactly as specified, and the new unit tests in tests/test_skill_router.py will pass (they call select() directly and inspect the return dict), but every real production skill_selection row will still log jev=None regardless of jev_mode=shadow|active, since spawn.py/executor.py never thread the value through. That silently breaks item 5 (jev_agreement_rate/jev_calls_per_spawn) and the promotion.FEATURES['jev_skill_routing'] evidence loader ('counting rows carrying jev verdicts' will always count 0), and makes docs/skill-intelligence/10-jev-routing.md's description of 'what shadow logs' false even though every listed acceptance test is green.",
+      "severity": "high",
+      "line": 98
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Same missing wiring as spawn.py: _route_skills (line 31-38) calls decision_log.record for skill_selection without jev=..., and this file is also outside T-0960 scope.",
+      "severity": "high",
+      "line": 31
+    }
+  ],
+  "reason": "superseded 11:45 by T-0967 (spec v2 after T-0960: jev verdicts threaded into both skill_selection record sites with tests)"
+}

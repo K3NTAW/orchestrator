@@ -1,0 +1,97 @@
+{
+  "id": "T-0384",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H2: premium launch attribution \u2014 every headless Planner launch persists route, reason, decision requested, evidence and cheaper steps tried plus the pinned policy version; scorecard --planner explains premium usage (invocations, context, output, cache, cost, top reasons) for headless and interactive sessions",
+  "spec": "Build on goal/T-0353 after H1 (T-0356: bus.policy_version, log_run fields). Handover sections 2 and 3. Evidence (scout T-0354): planner_runs._claim/_record_running (planner_runs.py:271-317) store kind, payload_key, attempts, account and jev but no reason, evidence or cheaper steps; goals.launch_planner re-reads pool.toml fresh on every call and nothing pins the effective config or prompt version to the run; scorecard.format_planner_runs_cell (scorecard.py:622-632) shows count and usd only; the interactive Planner's transcript tally (pool.tally_planner) is not broken down per session.\n1. planner_runs: the claim record and the run row (bus.log_run) carry route (escalate | investigate | routine | none), reason (one short string), decision_requested (what the packet asks), evidence (list of short strings: task ids, hold reasons, failing ids), cheaper_steps (list), policy_version (bus.policy_version() at claim time) and prompt_hash (sha12 of the rendered decision prompt). When decision.py (H3a) is importable, take route/reason/evidence/cheaper_steps from its Route; until H3b wires it, default route escalate with reason \"legacy:autonomous\". reconcile() copies the pinned versions into the finished row; a pool.toml edit during a run does not change what the row says the run used.\n2. planner_runs.premium_summary(days=7) -> dict: headless launches (count, by kind, by route, by reason top 5, mean and max input tokens, output tokens, cache read share, usd, gave_up count) from planner_runs.json plus run rows; interactive sessions from pool.tally_planner's per-transcript offsets: sessions count, tokens per session (in, out, cache read), day totals per account, labelled \"interactive\". Soft budget check: goals whose premium launches exceed [planner.routes].premium_launches_soft_per_goal (default 2 when the key is absent) are listed as exceptions with their reasons, never blocked.\n3. cli: orchestrator scorecard --planner prints that summary as text (and --json); the existing --by goal table keeps its planner_runs cell but adds a route column (count per route).\nTests: tests/test_planner_runs.py::test_claim_persists_route_reason_evidence_and_versions, ::test_policy_edit_during_run_does_not_change_recorded_version, ::test_premium_summary_counts_routes_reasons_and_exceptions; tests/test_scorecard.py::test_scorecard_planner_text_and_json. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0361"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py::test_claim_persists_route_reason_evidence_and_versions, ::test_policy_edit_during_run_does_not_change_recorded_version and ::test_premium_summary_counts_routes_reasons_and_exceptions pass",
+    "tests/test_scorecard.py::test_scorecard_planner_text_and_json passes",
+    "orchestrator scorecard --planner on the fixture state prints invocation count, mean input, output, cache share, usd, top reasons and the interactive session rows, and marks soft-budget exceptions without blocking anything",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_runs.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0384",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1048,
+        "issue": "daemon.tick() is the only production caller of planner_runs.run() and it never computes or passes a route. decision.route() (added in T-0357) is never imported/called anywhere outside its own module and tests. So every real headless Planner launch will be recorded with route=\"escalate\", reason=\"legacy:autonomous\" forever, making orchestrator scorecard --planner's route/reason breakdown and soft-budget 'exceptions' meaningless in production (always one bucket, exceptions fire for any goal with >2 launches regardless of whether a cheaper route existed). The audit plumbing and tests are correct in isolation, but the feature this task is meant to deliver (auditing premium vs. cheaper routes) is not actually wired up.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789903512.4162838,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0384",
+      "claimed_at": 1789903512.415776
+    },
+    {
+      "ts": 1789903512.418098,
+      "account": "B"
+    },
+    {
+      "ts": 1789903512.454179,
+      "pid": 53285,
+      "account": "B"
+    },
+    {
+      "ts": 1789903751.117043,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1048,
+            "issue": "daemon.tick() is the only production caller of planner_runs.run() and it never computes or passes a route. decision.route() (added in T-0357) is never imported/called anywhere outside its own module and tests. So every real headless Planner launch will be recorded with route=\"escalate\", reason=\"legacy:autonomous\" forever, making orchestrator scorecard --planner's route/reason breakdown and soft-budget 'exceptions' meaningless in production (always one bucket, exceptions fire for any goal with >2 launches regardless of whether a cheaper route existed). The audit plumbing and tests are correct in isolation, but the feature this task is meant to deliver (auditing premium vs. cheaper routes) is not actually wired up.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789903751.11872,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789903512.415776,
+  "account": "B",
+  "pid": 53285,
+  "review_verdict": "request_changes"
+}

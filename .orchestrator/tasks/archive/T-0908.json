@@ -1,0 +1,204 @@
+{
+  "id": "T-0908",
+  "created_at": 1790112271.2662861,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Active path 2: tool_disclosure active passes the minimal allowlist to Claude workers, with a bus-event escalation when a hidden tool is needed",
+  "spec": "Today (T-0802) tool_disclosure mode \"active\" is treated as shadow. Build the real active branch. Facts: spawn.run_worker builds the per-role Claude Code allowlist from the table at spawn.py:24-31 and passes it to the worker launch; tool_catalog.minimal_set(task, role) returns keep/drop/mandatory; Codex executors are untouched (their tools are the CLI's).\nDo:\n1. Active: when promotion.mode(\"tool_disclosure\") == \"active\", run_worker passes the minimal set's `keep` list (mandatory always included) as the allowlist for review, spec_review, scout, challenge and the Claude execute fallback; the legacy full list is still logged in the tool_disclosure decision row as candidates, and the decision's selected becomes the kept list.\n2. Escalation path (P11): the worker prompt gains one line telling the worker that if it needs a tool outside its allowlist it must post `bus_post_result` with status \"held\" and reason starting \"needs_tool:<tool id>\"; daemon (or spawn.run_worker's result handling) recognises that reason, records a decision_log row kind \"tool_disclosure\" reason \"hidden_tool_requested\", and re-spawns the worker once with the full legacy allowlist (respawn capped at one per task; the second attempt logs \"tool_escalation_used\" in the task pipeline). Scorecard: hidden_tool_recovery_rate per role = escalations / active spawns; `scorecard --economy` shows it.\n3. Safety: mandatory tools (Read for all, Bash(git *) for review/scout, tests-green + Edit/Write for execute, bus_post_result for all) can never be dropped; a docs-only execute keeps Edit/Write.\nTests: tests/test_spawn.py::test_active_allowlist_is_minimal_set_with_mandatory, ::test_hidden_tool_request_respawns_once_with_full_allowlist; tests/test_tool_catalog.py::test_mandatory_never_dropped_in_active; docs/context-economy/06-tool-disclosure.md Active section with the revert path.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.",
+  "inputs": [
+    "T-0856"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_active_allowlist_is_minimal_set_with_mandatory passes",
+    "tests/test_spawn.py::test_hidden_tool_request_respawns_once_with_full_allowlist passes",
+    "tests/test_tool_catalog.py::test_mandatory_never_dropped_in_active passes",
+    "docs/context-economy/06-tool-disclosure.md has an Active section; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/tool_catalog.py",
+    "orchestrator/daemon.py",
+    "orchestrator/context_scorecard.py",
+    ".orchestrator/prompts/review.md",
+    ".orchestrator/prompts/scout.md",
+    ".orchestrator/prompts/spec-review.md",
+    ".orchestrator/prompts/challenge.md",
+    "tests/test_spawn.py",
+    "tests/test_tool_catalog.py",
+    "docs/context-economy/06-tool-disclosure.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0908",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "run_worker's post-run branch for non-review roles (scout, challenge, execute-fallback) ends with bus.post_result(task_id, ..., \"done\") once run_claude exits 0, with no check of what the worker already posted mid-run. Only the review-role path (T-0139 guard) checks the existing posted result before overwriting. A worker that posts bus_post_result(status=\"held\", reason=\"needs_tool:X\") per P11 will have that status silently overwritten back to done before any respawn logic can see it.",
+        "severity": "high",
+        "line": 1062
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "dispatch()'s automatic held-retry loop (bus.read(status=\"held\", role=\"execute\") at line 741, re-armed at 866-871) only re-dispatches role==execute tasks. Held review/scout/challenge/spec_review tasks currently wait for Planner/human action (review_held_at, spec_review_held_at), not automatic daemon retry. The spec names no insertion point in daemon.py that reaches these non-execute roles, and doesn't reconcile the new auto-respawn with the existing held-waits-for-Planner convention.",
+        "severity": "high",
+        "line": 741
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "pool.reserve()/max_budget_usd/timeout are computed once per run_worker() call before the first run_claude invocation. A one-time respawn implies a second full `claude -p` subprocess call for the same task, but the spec doesn't say whether that second call draws a fresh budget/timeout reservation or silently doubles spend and wall-clock against the single reservation already made.",
+        "severity": "med",
+        "line": 1015
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "issue": "The 'scorecard --economy shows it' claim depends on cli.py's `if a.economy:` block (not in scope), which prints only by_role_task_class, handoffs_by_executor_task_class, promotion, and last_context_eval. hidden_tool_recovery_rate is described as 'per role' which doesn't match the existing per-(role,task_class) structure context_scorecard.build() returns, so it's unclear whether it's visible for free or needs an unscoped cli.py change. No acceptance test covers this claim.",
+        "severity": "med",
+        "line": 356
+      }
+    ],
+    "suggested_spec_changes": [
+      "Name the exact hook in spawn.py's run_worker result handling (or a new helper called before the generic done/failed post_result branches) that checks bus.get(task_id)'s current status/hold_reason for a 'needs_tool:' prefix before that branch overwrites it, mirroring the existing review-verdict guard.",
+      "Either scope daemon.py changes to add a held-retry path for review/scout/challenge/spec_review roles analogous to the existing role==execute retry_held logic, or move the one-time respawn entirely into spawn.run_worker (synchronous, same call) and drop daemon.py from scope.",
+      "Specify budget/timeout handling for the respawned attempt: either reserve a second budget slot via pool.reserve() before the retry call, or cap the respawn's max_budget_usd/timeout so combined spend can't exceed the original per-task limit.",
+      "Either state that hidden_tool_recovery_rate is added as a key inside context_scorecard.build()'s existing by_role_task_class dict (so it appears in scorecard --economy without touching cli.py), or add orchestrator/cli.py to scope and give it an acceptance test."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790112274.5543392,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0908",
+      "claimed_at": 1790112274.500746
+    },
+    {
+      "ts": 1790112274.55657,
+      "account": "B"
+    },
+    {
+      "ts": 1790112275.616879,
+      "pid": 92939,
+      "account": "B"
+    },
+    {
+      "ts": 1790112447.9467561,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "run_worker's post-run branch for non-review roles (scout, challenge, execute-fallback) ends with bus.post_result(task_id, ..., \"done\") once run_claude exits 0, with no check of what the worker already posted mid-run. Only the review-role path (T-0139 guard) checks the existing posted result before overwriting. A worker that posts bus_post_result(status=\"held\", reason=\"needs_tool:X\") per P11 will have that status silently overwritten back to done before any respawn logic can see it.",
+            "severity": "high",
+            "line": 1062
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "dispatch()'s automatic held-retry loop (bus.read(status=\"held\", role=\"execute\") at line 741, re-armed at 866-871) only re-dispatches role==execute tasks. Held review/scout/challenge/spec_review tasks currently wait for Planner/human action (review_held_at, spec_review_held_at), not automatic daemon retry. The spec names no insertion point in daemon.py that reaches these non-execute roles, and doesn't reconcile the new auto-respawn with the existing held-waits-for-Planner convention.",
+            "severity": "high",
+            "line": 741
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "pool.reserve()/max_budget_usd/timeout are computed once per run_worker() call before the first run_claude invocation. A one-time respawn implies a second full `claude -p` subprocess call for the same task, but the spec doesn't say whether that second call draws a fresh budget/timeout reservation or silently doubles spend and wall-clock against the single reservation already made.",
+            "severity": "med",
+            "line": 1015
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "issue": "The 'scorecard --economy shows it' claim depends on cli.py's `if a.economy:` block (not in scope), which prints only by_role_task_class, handoffs_by_executor_task_class, promotion, and last_context_eval. hidden_tool_recovery_rate is described as 'per role' which doesn't match the existing per-(role,task_class) structure context_scorecard.build() returns, so it's unclear whether it's visible for free or needs an unscoped cli.py change. No acceptance test covers this claim.",
+            "severity": "med",
+            "line": 356
+          }
+        ],
+        "suggested_spec_changes": [
+          "Name the exact hook in spawn.py's run_worker result handling (or a new helper called before the generic done/failed post_result branches) that checks bus.get(task_id)'s current status/hold_reason for a 'needs_tool:' prefix before that branch overwrites it, mirroring the existing review-verdict guard.",
+          "Either scope daemon.py changes to add a held-retry path for review/scout/challenge/spec_review roles analogous to the existing role==execute retry_held logic, or move the one-time respawn entirely into spawn.run_worker (synchronous, same call) and drop daemon.py from scope.",
+          "Specify budget/timeout handling for the respawned attempt: either reserve a second budget slot via pool.reserve() before the retry call, or cap the respawn's max_budget_usd/timeout so combined spend can't exceed the original per-task limit.",
+          "Either state that hidden_tool_recovery_rate is added as a key inside context_scorecard.build()'s existing by_role_task_class dict (so it appears in scorecard --economy without touching cli.py), or add orchestrator/cli.py to scope and give it an acceptance test."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790112447.949,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "run_worker's post-run branch for non-review roles (scout, challenge, execute-fallback) ends with bus.post_result(task_id, ..., \"done\") once run_claude exits 0, with no check of what the worker already posted mid-run. Only the review-role path (T-0139 guard) checks the existing posted result before overwriting. A worker that posts bus_post_result(status=\"held\", reason=\"needs_tool:X\") per P11 will have that status silently overwritten back to done before any respawn logic can see it.",
+          "severity": "high",
+          "line": 1062
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "dispatch()'s automatic held-retry loop (bus.read(status=\"held\", role=\"execute\") at line 741, re-armed at 866-871) only re-dispatches role==execute tasks. Held review/scout/challenge/spec_review tasks currently wait for Planner/human action (review_held_at, spec_review_held_at), not automatic daemon retry. The spec names no insertion point in daemon.py that reaches these non-execute roles, and doesn't reconcile the new auto-respawn with the existing held-waits-for-Planner convention.",
+          "severity": "high",
+          "line": 741
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "pool.reserve()/max_budget_usd/timeout are computed once per run_worker() call before the first run_claude invocation. A one-time respawn implies a second full `claude -p` subprocess call for the same task, but the spec doesn't say whether that second call draws a fresh budget/timeout reservation or silently doubles spend and wall-clock against the single reservation already made.",
+          "severity": "med",
+          "line": 1015
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "The 'scorecard --economy shows it' claim depends on cli.py's `if a.economy:` block (not in scope), which prints only by_role_task_class, handoffs_by_executor_task_class, promotion, and last_context_eval. hidden_tool_recovery_rate is described as 'per role' which doesn't match the existing per-(role,task_class) structure context_scorecard.build() returns, so it's unclear whether it's visible for free or needs an unscoped cli.py change. No acceptance test covers this claim.",
+          "severity": "med",
+          "line": 356
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790112274.500746,
+  "account": "B",
+  "pid": 92939,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "run_worker's post-run branch for non-review roles (scout, challenge, execute-fallback) ends with bus.post_result(task_id, ..., \"done\") once run_claude exits 0, with no check of what the worker already posted mid-run. Only the review-role path (T-0139 guard) checks the existing posted result before overwriting. A worker that posts bus_post_result(status=\"held\", reason=\"needs_tool:X\") per P11 will have that status silently overwritten back to done before any respawn logic can see it.",
+      "severity": "high",
+      "line": 1062
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "dispatch()'s automatic held-retry loop (bus.read(status=\"held\", role=\"execute\") at line 741, re-armed at 866-871) only re-dispatches role==execute tasks. Held review/scout/challenge/spec_review tasks currently wait for Planner/human action (review_held_at, spec_review_held_at), not automatic daemon retry. The spec names no insertion point in daemon.py that reaches these non-execute roles, and doesn't reconcile the new auto-respawn with the existing held-waits-for-Planner convention.",
+      "severity": "high",
+      "line": 741
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "pool.reserve()/max_budget_usd/timeout are computed once per run_worker() call before the first run_claude invocation. A one-time respawn implies a second full `claude -p` subprocess call for the same task, but the spec doesn't say whether that second call draws a fresh budget/timeout reservation or silently doubles spend and wall-clock against the single reservation already made.",
+      "severity": "med",
+      "line": 1015
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "The 'scorecard --economy shows it' claim depends on cli.py's `if a.economy:` block (not in scope), which prints only by_role_task_class, handoffs_by_executor_task_class, promotion, and last_context_eval. hidden_tool_recovery_rate is described as 'per role' which doesn't match the existing per-(role,task_class) structure context_scorecard.build() returns, so it's unclear whether it's visible for free or needs an unscoped cli.py change. No acceptance test covers this claim.",
+      "severity": "med",
+      "line": 356
+    }
+  ]
+}

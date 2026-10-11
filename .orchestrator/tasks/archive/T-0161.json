@@ -1,0 +1,152 @@
+{
+  "id": "T-0161",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): C-O4 fix round 2 on serve.py from review T-0155 (T-0158, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0158 delta: `git diff 38db9bb HEAD` in worktree wt/T-0158 (orchestrator/serve.py, tests/test_serve.py). Fix round for review T-0155; confirm each item resolved: (1) every goals.* string that reaches a response body goes through the CREDENTIAL_RE redaction and a 300-char cap, full text only in the log (SECRET test); (2) MAX_BODY_BYTES enforced before buffering: Content-Length check first, then streaming with abort, request.body() no longer used on POST /goals (tests with an unread stream and a chunked over-limit body); (3) repos.toml read/parse guarded \u2192 503 with /healthz still 200; the unfiltered fan-out isolates a failing repo as an error entry (tests); (4) cancel swallows ProcessLookupError/PermissionError \u2192 200 stopped (test). Then confirm nothing regressed from T-0147/T-0153 (auth bytes compare \u2192 401, per-slug lock spanning clone+check+start, clone stderr never in a body, 400/404/409/422 map, plain def handlers, module-attribute goals import). Run `uv run python -m unittest tests.test_serve -q` once. Verdict approve or request_changes with file:line comments; keep to real defects. This is the third review of the serve endpoint: request changes only for a defect that matters in production.",
+  "inputs": [
+    "T-0158"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the four T-0155 items confirmed resolved or named unresolved with evidence",
+    "No regression of the T-0147/T-0153 guarantees"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "tests/test_serve.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0147",
+      "T-0153",
+      "T-0158"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0161",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/serve.py",
+        "line": 249,
+        "issue": "T-0155 item 3 isolated per-repo read failures only in the unfiltered GET /goals fan-out (line 234). get_goal (249), cancel_goal (267) and the duplicate check in create_goal (193) call goals.status/stop/list_goals unguarded. goals._load_goal_records does json.loads(goals_path.read_text()) with no try, so a truncated or hand-edited .orchestrator/goals.json makes GET /goals return {\"repo\":\"x\",\"error\":\"unreadable\"} while GET /goals/x/T-1 and POST /goals on the same repo return a bare 500. kgpt gets nothing actionable from the 500 and cannot tell a corrupt state file from a server bug. Wrap these three the same way the fan-out is wrapped (log + 503 or an \"unreadable\" reason).",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 86,
+        "issue": "Every handler is a plain def, so all of them run on the shared anyio threadpool (default 40 tokens). _with_repo_lock blocks its thread inside fcntl.flock for the whole critical section, which includes git clone bounded only by CLONE_TIMEOUT_S=300. 40 concurrent POSTs against one slug (or one slow clone plus a retrying caller) exhaust the limiter, and healthz \u2014 also sync \u2014 stops being scheduled, so the container health probe fails and the runtime restarts the process mid-clone, leaving a half-cloned path at cfg[\"path\"] that the next request will not re-clone because os.path.isdir(path) is now true. Either take the lock non-blocking and return 409/503, or make healthz async so liveness cannot be starved.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 116,
+        "issue": "_safe_reason redacts only the URL-embedded-credential shape (CREDENTIAL_RE = '://[^/@\\s]+@') and then forwards the first 300 chars of an arbitrary goals.start refusal verbatim. goals.start reasons pass through _precheck_git, which can carry raw git stderr; a credential that is not in https://user:tok@host form \u2014 a GIT_ASKPASS echo, an 'Authentication failed' line quoting a PAT, or a token in a query string (?access_token=...) \u2014 reaches the 422 body unredacted. The cap limits volume, not sensitivity. Prefer an allowlist of known refusal reasons, or at minimum add the query-string and bare-token patterns.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 184,
+        "issue": "subprocess.run([\"git\", \"clone\", git_url, path]) has no '--' separator, so a repos.toml git_url beginning with '-' is parsed by git as an option and an 'ext::sh -c ...' URL invokes a shell via git's ext transport. repos.toml is operator-controlled so this is not remotely reachable, but the fix is one token: [\"git\", \"clone\", \"--\", git_url, path].",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 48,
+        "issue": "_load_repos returns {} when repos.toml is absent, so a config volume that fails to mount makes every slug resolve to 404 'unknown repo' rather than the 503 that a malformed file now produces (T-0155 item 3). kgpt cannot distinguish 'this repo was removed from config' from 'the server has no config at all' and will treat a transient mount failure as a permanent deletion instead of retrying. Missing and malformed should both be 503.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789741697.488958,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0161",
+      "claimed_at": 1789741697.488495
+    },
+    {
+      "ts": 1789741697.5229492,
+      "pid": 32957,
+      "account": "A"
+    },
+    {
+      "ts": 1789741839.3938391,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/serve.py",
+            "line": 249,
+            "issue": "T-0155 item 3 isolated per-repo read failures only in the unfiltered GET /goals fan-out (line 234). get_goal (249), cancel_goal (267) and the duplicate check in create_goal (193) call goals.status/stop/list_goals unguarded. goals._load_goal_records does json.loads(goals_path.read_text()) with no try, so a truncated or hand-edited .orchestrator/goals.json makes GET /goals return {\"repo\":\"x\",\"error\":\"unreadable\"} while GET /goals/x/T-1 and POST /goals on the same repo return a bare 500. kgpt gets nothing actionable from the 500 and cannot tell a corrupt state file from a server bug. Wrap these three the same way the fan-out is wrapped (log + 503 or an \"unreadable\" reason).",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 86,
+            "issue": "Every handler is a plain def, so all of them run on the shared anyio threadpool (default 40 tokens). _with_repo_lock blocks its thread inside fcntl.flock for the whole critical section, which includes git clone bounded only by CLONE_TIMEOUT_S=300. 40 concurrent POSTs against one slug (or one slow clone plus a retrying caller) exhaust the limiter, and healthz \u2014 also sync \u2014 stops being scheduled, so the container health probe fails and the runtime restarts the process mid-clone, leaving a half-cloned path at cfg[\"path\"] that the next request will not re-clone because os.path.isdir(path) is now true. Either take the lock non-blocking and return 409/503, or make healthz async so liveness cannot be starved.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 116,
+            "issue": "_safe_reason redacts only the URL-embedded-credential shape (CREDENTIAL_RE = '://[^/@\\s]+@') and then forwards the first 300 chars of an arbitrary goals.start refusal verbatim. goals.start reasons pass through _precheck_git, which can carry raw git stderr; a credential that is not in https://user:tok@host form \u2014 a GIT_ASKPASS echo, an 'Authentication failed' line quoting a PAT, or a token in a query string (?access_token=...) \u2014 reaches the 422 body unredacted. The cap limits volume, not sensitivity. Prefer an allowlist of known refusal reasons, or at minimum add the query-string and bare-token patterns.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 184,
+            "issue": "subprocess.run([\"git\", \"clone\", git_url, path]) has no '--' separator, so a repos.toml git_url beginning with '-' is parsed by git as an option and an 'ext::sh -c ...' URL invokes a shell via git's ext transport. repos.toml is operator-controlled so this is not remotely reachable, but the fix is one token: [\"git\", \"clone\", \"--\", git_url, path].",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 48,
+            "issue": "_load_repos returns {} when repos.toml is absent, so a config volume that fails to mount makes every slug resolve to 404 'unknown repo' rather than the 503 that a malformed file now produces (T-0155 item 3). kgpt cannot distinguish 'this repo was removed from config' from 'the server has no config at all' and will treat a transient mount failure as a permanent deletion instead of retrying. Missing and malformed should both be 503.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789741839.397575,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789741859.8385868,
+      "pipeline": {
+        "merged_at": 1789741859.8384871
+      }
+    }
+  ],
+  "claimed_at": 1789741697.488495,
+  "pid": 32957,
+  "account": "A",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789741859.8384871
+  }
+}

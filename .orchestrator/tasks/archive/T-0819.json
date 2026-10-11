@@ -1,0 +1,195 @@
+{
+  "id": "T-0819",
+  "created_at": 1790091905.785089,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P10/P11/P22 tool disclosure, shadow: measure tool-definition tokens per role, compute a task-class-based minimal tool set from a Level-0 catalog, log tool_disclosure decisions; allowlists unchanged",
+  "spec": "Facts (Planner grep, provenance repo): worker tool exposure is the per-role Claude Code allowlist in spawn.py:24-31 (scout/triage/review/challenge/spec_review/execute; execute is the Claude fallback only, Codex executors get the Codex CLI's own tools); the bus MCP exposes bus_post_result/bus_read/... to workers (orchestrator/bus_mcp.py) and the orchestrator MCP exposes 11 Planner tools (orchestrator/mcp.py:76-170). Tool schemas for Claude Code built-ins are not controlled by this repo, so P10 here means: know what each role is offered, estimate its schema cost, and compute (shadow) the minimum set a task class needs.\nDo:\n1. orchestrator/tool_catalog.py (new): CATALOG = Level-0 entries {tool_id: {\"line\": one-line purpose, \"category\": one of read, search, edit, shell, test, git, bus, memory, graph, browser, executor, review, \"est_schema_tokens\": int}} for every id that appears in spawn.py allowlists (Read, Grep, Glob, Edit, Write, each Bash(...) pattern as its own id, mcp__bus__* tools) plus the orchestrator MCP tools (codex, codex_reply, spawn_scout, spawn_review, spawn_challenge, spawn_spec_review, merge, status, executor_fallback, hold_account, resume_account). est_schema_tokens: measure MCP tools from their docstring + signature (chars//4) at import time; built-ins use a fixed table with a comment saying they are estimates (Read 350, Grep 400, Glob 200, Edit 300, Write 200, Bash 500 per pattern group, MCP tools measured). `level0(ids) -> str` renders the compact catalog (\"- codex \u2014 implement software tasks\"). `disclosed(role) -> list[str]` parses the allowlist for a role. `tokens(ids) -> int`.\n2. `minimal_set(task, role) -> dict` deterministic: categories needed by task_class \u00d7 role (table in the module: e.g. review \u2192 read, search, git, bus; scout \u2192 read, search, git, bus; execute refactor \u2192 read, search, edit, test, git, bus; execute with tests in acceptance adds test; docs-only scope (all paths .md) drops test and shell). Returns {\"keep\": ids, \"drop\": ids, \"reason\": str, \"mandatory\": ids} where mandatory = bus_post_result for every role and everything the role's safety needs (never dropped: Read for all, Bash(git *) for review/scout, tests-green for execute).\n3. Shadow wiring: in spawn.run_worker (and the Claude execute fallback) when promotion.mode(\"tool_disclosure\") in (\"shadow\",\"active\") (active treated as shadow with a one-time notify warning): compute disclosed(role), tokens, minimal_set; record decision_log.record(kind=\"tool_disclosure\", subject=task id, candidates=disclosed ids, hard_constraints=mandatory, deterministic={\"task_class\", \"role\", \"kept\", \"dropped\", \"tokens_disclosed\", \"tokens_minimal\"}, selected=\"allowlist unchanged (shadow)\", reason=minimal_set reason, mode=mode); add tool_tokens_disclosed and tool_tokens_minimal to the task's packet_meta so bus.log_run carries them into the run's context (bus.py copied keys). The allowlist passed to the worker is byte-identical to today (assert in a test).\n4. P22 measurement hooks: `tool_catalog.recovery_events(root)` scans runs for rows where a worker asked for a tool outside its allowlist (grep the existing run rows for permission denials if any field carries them; if none exists today, document that this signal is not yet recorded and return an empty list with a note field). context_scorecard gains per-role columns tool_tokens_disclosed (avg) and tool_tokens_minimal (avg) and tool_reduction = minimal/disclosed.\n5. Codex executors: record the same tool_disclosure decision with role \"codex_execute\" using a fixed CODEX_TOOLS entry (\"codex CLI built-ins; not controlled here\", est 0) so the scorecard shows the gap honestly.\nTests (unittest, `import _harness` first): tests/test_tool_catalog.py::test_catalog_covers_every_allowlisted_id (every id parsed from spawn allowlists has a CATALOG entry), ::test_minimal_set_never_drops_mandatory, ::test_docs_only_task_drops_test_and_shell; tests/test_spawn.py::test_worker_allowlist_unchanged_under_tool_disclosure_shadow (the allowed-tools argument built for a review worker is identical with mode off and shadow; a tool_disclosure decision row exists in shadow only). docs/context-economy/06-tool-disclosure.md (\u226460 lines): the catalog, the category table, what shadow logs, what active would do (P11 escalation path: a worker that needs a hidden optional tool posts a bus event and the Planner re-spawns with the wider set; not implemented), revert path (mode off).\nDo not change any allowlist string. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [
+    "T-0802"
+  ],
+  "acceptance": [
+    "tests/test_tool_catalog.py::test_catalog_covers_every_allowlisted_id passes",
+    "tests/test_tool_catalog.py::test_minimal_set_never_drops_mandatory passes",
+    "tests/test_tool_catalog.py::test_docs_only_task_drops_test_and_shell passes",
+    "tests/test_spawn.py::test_worker_allowlist_unchanged_under_tool_disclosure_shadow passes",
+    "docs/context-economy/06-tool-disclosure.md exists; spawn.py allowlist strings unchanged (git diff shows no change to lines 24-31 values); .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/tool_catalog.py",
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_tool_catalog.py",
+    "tests/test_spawn.py",
+    "docs/context-economy/06-tool-disclosure.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0819",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "line": 108,
+        "issue": "The `needed` category set for role \"execute\" never includes \"shell\", and no other code path adds it. So Bash(npm *), Bash(npx *), Bash(uv *), Bash(python3 *), Bash(bash skills/*) land in `drop` for every execute task unconditionally, not only for docs-only scope as the diff/docs claim (\"A docs-only scope drops optional test and shell tools\"). Verified: minimal_set({'task_class':'feature','scope':['x.py'],'acceptance':['implement feature']}, 'execute') drops all five shell tools exactly like a docs-only task does. This makes tests/test_tool_catalog.py::test_docs_only_task_drops_test_and_shell pass without actually proving docs-only-specific behavior for shell (it would pass for any execute task), and it systematically overstates the 'minimal' token count / reduction ratio the whole P22 measurement exists to report honestly, for any execute task that legitimately needs npm/python3/uv/bash-skills.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "line": 83,
+        "issue": "`_task_class` duplicates the codebase's canonical `attribution.task_class` (orchestrator/attribution.py:128) but with an incompatible vocabulary: attribution infers security/architectural/debugging/mechanical/unfamiliar, while this helper checks task.get('task_class') or constraints.get('task_class') and otherwise hardcodes 'refactor'. No production code sets constraints.task_class to 'refactor'/'feature'/'fix'/'test'/'docs' (grep confirms), so the task_class-gated branch in minimal_set (line ~117, 'if role==execute and task_class not in {...}: needed.discard(test)') is effectively dead in production and always falls through to the default. Low impact today since the docs-only path and mandatory tests-green override compensate, but it's a second, silent source of inaccurate 'minimal' measurements and diverges from the module's own reason string which cites task_class as if it were meaningful.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "c17dc61d12aa",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790091905.7863271,
+      "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+    },
+    {
+      "ts": 1790091906.706944,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1790093244.9463491,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner 18:08: account B cooldown over; re-spawned by hand"
+    },
+    {
+      "ts": 1790093248.226411,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0819",
+      "claimed_at": 1790093248.225987
+    },
+    {
+      "ts": 1790093248.227701,
+      "account": "B"
+    },
+    {
+      "ts": 1790093248.956288,
+      "pid": 70952,
+      "account": "B"
+    },
+    {
+      "ts": 1790093455.620387,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "line": 108,
+            "issue": "The `needed` category set for role \"execute\" never includes \"shell\", and no other code path adds it. So Bash(npm *), Bash(npx *), Bash(uv *), Bash(python3 *), Bash(bash skills/*) land in `drop` for every execute task unconditionally, not only for docs-only scope as the diff/docs claim (\"A docs-only scope drops optional test and shell tools\"). Verified: minimal_set({'task_class':'feature','scope':['x.py'],'acceptance':['implement feature']}, 'execute') drops all five shell tools exactly like a docs-only task does. This makes tests/test_tool_catalog.py::test_docs_only_task_drops_test_and_shell pass without actually proving docs-only-specific behavior for shell (it would pass for any execute task), and it systematically overstates the 'minimal' token count / reduction ratio the whole P22 measurement exists to report honestly, for any execute task that legitimately needs npm/python3/uv/bash-skills.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "line": 83,
+            "issue": "`_task_class` duplicates the codebase's canonical `attribution.task_class` (orchestrator/attribution.py:128) but with an incompatible vocabulary: attribution infers security/architectural/debugging/mechanical/unfamiliar, while this helper checks task.get('task_class') or constraints.get('task_class') and otherwise hardcodes 'refactor'. No production code sets constraints.task_class to 'refactor'/'feature'/'fix'/'test'/'docs' (grep confirms), so the task_class-gated branch in minimal_set (line ~117, 'if role==execute and task_class not in {...}: needed.discard(test)') is effectively dead in production and always falls through to the default. Low impact today since the docs-only path and mandatory tests-green override compensate, but it's a second, silent source of inaccurate 'minimal' measurements and diverges from the module's own reason string which cites task_class as if it were meaningful.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "c17dc61d12aa",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790093455.6220648,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790093455.6945941,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "packet_version": "c17dc61d12aa",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+      "packet_version": "c17dc61d12aa",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+  "hold_reason": null,
+  "reason": "Planner 18:08: account B cooldown over; re-spawned by hand",
+  "claimed_at": 1790093248.225987,
+  "account": "B",
+  "pid": 70952,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+    "packet_version": "c17dc61d12aa",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "c17dc61d12aa",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

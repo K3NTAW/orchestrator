@@ -1,0 +1,668 @@
+{
+  "id": "T-0774",
+  "created_at": 1790081269.233336,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 4,
+  "title": "P20 Jev privacy boundary: every Jev call site declares what leaves the machine, a central test enforces it, jev.ask refuses undeclared raw payloads",
+  "spec": "Brief .orchestrator/roadmap-context.md P19/P20. Inventory (P0 audit, provenance repo): jev_gate.py:221 (title, spec[:1500], acceptance, scope, role, 20 recent tool calls redacted, proposed input[:300]); jev_route.py:97-120 (redacted spec[:1500], acceptance, scope, complexity, task_class, memory titles[:10]); jev_planner.py:126-138 (state() capped 4000 chars via _clip at :30); jev_sched.py:158-194 (pair titles, scope, spec[:400], reasons, \u22648 pairs); jev_points.py:72-83 (title[:300], spec[:600], scope[:300], evidence with content stripped); jev_rank.py:41 (goal_text NOT redacted by rank itself; caller's job; 40-item batches). jev.ask (jev.py:184-202) redacts the serialized state centrally with jev.redact (KEY/TOKEN/SECRET/PASSWORD assignments and 32+ char hex/base64 runs) and caps at max_state_chars.\nDo:\n1. orchestrator/jev.py: add a BOUNDARY registry: `declare_boundary(site, *, fields, max_chars, raw_source_allowed=False, notes=\"\")` and `BOUNDARIES` dict; ask() gains a required keyword `site` (default None keeps old callers working but logs one warning row via notify and counts it in a module counter `undeclared_calls`); when site is declared, ask() asserts the top-level keys of `state` (when it is a dict) are a subset of the declared fields, and drops (not raises) any undeclared key with a warning, so a code change cannot silently widen the payload. Redaction and cap stay as they are. Never log the payload itself.\n2. Each call site declares its boundary at import time with the fields it actually sends (list them exactly from the current code) and passes site=... to jev.ask: jev_gate (\"gate\"), jev_route (\"route\"), jev_planner (\"planner\"), jev_sched (\"sched\"), jev_points (\"points\"), jev_rank (\"rank\": declare raw_source_allowed=False and apply jev.redact to goal_text and item texts inside rank itself instead of relying on callers; keep the batch size).\n3. Policy hook for P19: `jev.allowed_for_class(data_class)` returning True for PUBLIC and INTERNAL, False for SENSITIVE and SECRET, read from pool.toml `[jev] max_data_class = \"INTERNAL\"` (add the key with a dated comment). ask() takes an optional `data_class` kwarg (default \"INTERNAL\") and returns None without sending when not allowed, recording the refusal in the same counter style. No caller passes SENSITIVE yet; this is the boundary future work must go through.\n4. tests/test_jev_boundary.py (unittest, `import _harness` first): test_every_call_site_declares_boundary (importing the six modules registers six sites and every ask call in their source passes site=; grep the module source for \"jev.ask(\" / \"ask_fn(\" and assert a site kwarg or a declared default), test_ask_drops_undeclared_fields (a fake transport captures the payload; an extra key is absent and a warning was counted), test_ask_refuses_sensitive_class (no transport call, None returned), test_rank_redacts_goal_text (a goal_text containing `API_KEY=abc123...` reaches the fake transport redacted). Use the existing fake-transport pattern from tests/test_jev.py.\n5. docs/context-economy/04-jev-boundary.md (\u226460 lines): table of site \u2192 fields \u2192 caps \u2192 redaction \u2192 mode; the data-class policy; the revert path.\nKeep all current behaviour and existing tests green (tests/test_jev*.py). Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_boundary.py::test_every_call_site_declares_boundary passes",
+    "tests/test_jev_boundary.py::test_ask_drops_undeclared_fields passes",
+    "tests/test_jev_boundary.py::test_ask_refuses_sensitive_class passes",
+    "tests/test_jev_boundary.py::test_rank_redacts_goal_text passes",
+    "docs/context-economy/04-jev-boundary.md lists all six sites; existing tests/test_jev*.py stay green; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/jev.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/jev_route.py",
+    "orchestrator/jev_planner.py",
+    "orchestrator/jev_sched.py",
+    "orchestrator/jev_points.py",
+    "orchestrator/jev_rank.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_boundary.py",
+    "docs/context-economy/04-jev-boundary.md"
+  ],
+  "depends_on": [
+    "T-0772"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3000,
+    "task_class": "security",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0774",
+  "codex_thread": "01a0c949-e9ae-74e1-8e0a-21527c12cc89",
+  "result": {
+    "summary": "Implemented six Jev boundaries, payload filtering, data-class policy, and rank redaction. Preserved lazy gate imports and legacy transports.\nGate: exit 0; 1,036 tests passed. Working tree clean.\nCommit: `6ae7183eb8df61faafa3e3b6cf18169acfae4f27`.\n\nFiles changed: seven Jev modules, pool.toml, boundary tests, and boundary documentation. Diff: 10 files, +271/\u221210.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c949-e9ae-74e1-8e0a-21527c12cc89",
+    "usage": {
+      "input_tokens": 1442970,
+      "cached_input_tokens": 1384448,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 8066,
+      "reasoning_output_tokens": 1385,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790083427.839472,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141
+      }
+    },
+    {
+      "ts": 1790083427.8412778,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202
+      }
+    },
+    {
+      "ts": 1790083430.3461819,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991
+      }
+    },
+    {
+      "ts": 1790083458.5660548,
+      "packet_meta": {
+        "chars": 4939,
+        "est_tokens": 1234,
+        "hash": "287c463fba54",
+        "version": "287c463fba54",
+        "base": "b6554efa37bb",
+        "sources": "pool.toml@c6194eabcbae gotchas@604030952640 memory@notes over cap by 139 chars: acceptance kept whole",
+        "policy_version": "c6194eabcbae",
+        "gotchas": "604030952640"
+      }
+    },
+    {
+      "ts": 1790083458.56757,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0774",
+      "claimed_at": 1790083458.567403
+    },
+    {
+      "ts": 1790083458.56883,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790083894.823125,
+      "codex_thread": "01a0c949-e9ae-74e1-8e0a-21527c12cc89",
+      "codex_thread_head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+    },
+    {
+      "ts": 1790083894.828332,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790083894.8314931,
+      "status": "done",
+      "result": {
+        "summary": "Implemented six Jev boundaries, payload filtering, data-class policy, and rank redaction. Preserved lazy gate imports and legacy transports.\nGate: exit 0; 1,036 tests passed. Working tree clean.\nCommit: `6ae7183eb8df61faafa3e3b6cf18169acfae4f27`.\n\nFiles changed: seven Jev modules, pool.toml, boundary tests, and boundary documentation. Diff: 10 files, +271/\u221210.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c949-e9ae-74e1-8e0a-21527c12cc89",
+        "usage": {
+          "input_tokens": 1442970,
+          "cached_input_tokens": 1384448,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8066,
+          "reasoning_output_tokens": 1385,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790083920.099087,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790084043.324009,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790084043.815948,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        }
+      }
+    },
+    {
+      "ts": 1790084043.9144151,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        },
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+      }
+    },
+    {
+      "ts": 1790084043.9232562,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        },
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+        "gated_at_done": 1790084043.923095
+      }
+    },
+    {
+      "ts": 1790084375.7417111,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790084470.6572459,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        },
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+        "gated_at_done": 1790084043.923095,
+        "merged_at": 1790084470.657053,
+        "merged_at_lease": 1790085370.657053
+      }
+    },
+    {
+      "ts": 1790084595.3579469,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "sha": "3d30979d2be63bed10c36a704331504fd70fbc92",
+      "merged_at": 1790084595.357025,
+      "changed_files": [
+        ".orchestrator/pool.toml",
+        "docs/context-economy/04-jev-boundary.md",
+        "orchestrator/jev.py",
+        "orchestrator/jev_gate.py",
+        "orchestrator/jev_planner.py",
+        "orchestrator/jev_points.py",
+        "orchestrator/jev_rank.py",
+        "orchestrator/jev_route.py",
+        "orchestrator/jev_sched.py",
+        "tests/test_jev_boundary.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        },
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+        "gated_at_done": 1790084043.923095,
+        "merged_at": 1790084470.657053,
+        "merged_at_lease": 1790085370.657053
+      }
+    },
+    {
+      "ts": 1790084596.0763159,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        },
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+        "gated_at_done": 1790084043.923095,
+        "merged_at": 1790084470.657053,
+        "merged_at_lease": 1790085370.657053,
+        "accepted_at": 1790084596.075825
+      }
+    },
+    {
+      "ts": 1790084596.198894,
+      "pipeline": {
+        "first_ready_at": 1790083427.8394141,
+        "dispatched_at": 1790083427.841202,
+        "dispatched_at_lease": 1790084327.841202,
+        "dispatched_at_done": 1790083430.345991,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0525,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790084043.323854,
+        "gated_at_lease": 1790084943.323854,
+        "first_green_at": 1790084043.323055,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0774",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790084043.815454,
+          "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+        },
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+        "gated_at_done": 1790084043.923095,
+        "merged_at": 1790084470.657053,
+        "merged_at_lease": 1790085370.657053,
+        "accepted_at": 1790084596.075825,
+        "merged_at_done": 1790084596.198674
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790083427.8394141,
+    "dispatched_at": 1790083427.841202,
+    "dispatched_at_lease": 1790084327.841202,
+    "dispatched_at_done": 1790083430.345991,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "terra",
+      "key": "d6f21b16dd825f17e3cb359c08ffc179c0c3316e",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0525,
+        "sol": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790084043.323854,
+    "gated_at_lease": 1790084943.323854,
+    "first_green_at": 1790084043.323055,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0774",
+      "goal_head": "goal/T-0760",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790084043.815454,
+      "head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+    },
+    "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+    "gated_at_done": 1790084043.923095,
+    "merged_at": 1790084470.657053,
+    "merged_at_lease": 1790085370.657053,
+    "accepted_at": 1790084596.075825,
+    "merged_at_done": 1790084596.198674
+  },
+  "packet_meta": {
+    "chars": 4939,
+    "est_tokens": 1234,
+    "hash": "287c463fba54",
+    "version": "287c463fba54",
+    "base": "b6554efa37bb",
+    "sources": "pool.toml@c6194eabcbae gotchas@604030952640 memory@notes over cap by 139 chars: acceptance kept whole",
+    "policy_version": "c6194eabcbae",
+    "gotchas": "604030952640"
+  },
+  "claimed_at": 1790083458.567403,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0760",
+  "sha": "3d30979d2be63bed10c36a704331504fd70fbc92",
+  "merged_at": 1790084595.357025,
+  "changed_files": [
+    ".orchestrator/pool.toml",
+    "docs/context-economy/04-jev-boundary.md",
+    "orchestrator/jev.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/jev_planner.py",
+    "orchestrator/jev_points.py",
+    "orchestrator/jev_rank.py",
+    "orchestrator/jev_route.py",
+    "orchestrator/jev_sched.py",
+    "tests/test_jev_boundary.py"
+  ]
+}

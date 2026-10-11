@@ -1,0 +1,208 @@
+{
+  "id": "T-0646",
+  "created_at": 1789980319.110935,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "R15a: daemon.dispatch integration \u2014 empirical durations, capacity admission, adaptive concurrency limit, merge-pressure throttle, Jev scheduling annotation and decision-log rows, all behind existing [scheduler] modes",
+  "spec": "Why: the pure scheduling modules merged in this goal (duration, capacity, concurrency, merge_pressure, jev_sched, decision_log, sched_scorecard) are not called by the daemon yet; daemon.dispatch (orchestrator/daemon.py:660-860) still ranks with cold-start durations, fills wave_limit = min(slots, max_wave or slots) and never records why capacity or merge pressure changed a decision (AP P5, P6, P11, P13, P15; brief P14).\nWhat (orchestrator/daemon.py dispatch path only; behaviour identical when [scheduler].mode == off; shadow logs, active applies). Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in the named file; no pytest fixtures; use the daemon test harness in tests/_harness.py.\n1. Durations: durations = duration.durations_for(list(tasks.values())) computed once per dispatch; _wave_order(candidate_ids, tasks, durations) passes them to critical_path.rank; wave_row['priority'] = critical_path.explain(tid, tasks, durations) and wave_row['duration_sources'] = duration.explain_for(...) (source and n per task). Exceptions inside duration fall back to the cold-start dict with wave_row['duration_error'] set.\n2. Capacity: snap = capacity.snapshot(pool, running_claude_workers(pool), inflight_claude_dispatches()); imminent = ids of queued execute tasks whose depends_on are all merged or (status done and pipeline.gated_at); admission = capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent). wave_row['capacity'] = {'admit', 'deferred', 'assignments'}. In active mode candidates deferred by admit are removed from the wave and their dispatch entry reason becomes admit's reason; in shadow the row records them only.\n3. Concurrency: pressure = merge_pressure.assess(); limit = concurrency.select_limit(hard_max=slots, ready_ids=candidate_ids, tasks, pairwise_rows=interference.pairwise([...candidates]), priorities, snapshot=snap, pressure=pressure, durations=durations); wave_limit = min(slots, max_wave or slots, limit['limit']) in active mode, unchanged in shadow; schedlog.append('concurrency', concurrency.log_row(limit, wave_ids)) every dispatch that had candidates.\n4. Merge pressure: throttle = merge_pressure.throttle(candidate_ids, tasks, pressure['waiting'], pressure); active mode with [scheduler].merge_pressure_mode == 'throttle' removes throttle['deferred'] from the wave with dispatch reason 'merge_pressure'; wave_row['merge_pressure'] = pressure minus 'waiting' plus would_defer.\n5. Jev scheduling: wave_row['jev_sched'] = jev_sched.annotate(result, pairwise_rows, tasks, goal_head=<git rev-parse goal/<parent> of the first candidate or 'main'>); when [scheduler].jev_mode == 'active' and scheduler mode == 'active', use its wave/deferred; any exception -> deterministic wave, error recorded.\n6. Decision log: one decision_log.record(kind='wave', subject=goal id or first candidate, candidates=candidate_ids, hard_constraints=['depends_on', 'hard_interference', 'capacity'], deterministic={'baseline_order', 'wave', 'deferred', 'limit'}, historical={'durations': sources}, jev=jev_sched signals or None, selected=dispatched ids, rejected=deferred map, reason=joined limit reasons, mode=scheduler mode) per dispatch with candidates; one record(kind='capacity'/'concurrency'/'merge_pressure') only when that layer changed the wave in active mode.\n7. New dispatch skip reasons added to the vocabulary: capacity reasons from admit (executor_capacity, cooldown, account_capacity, budget, reserved_for_critical:<id>, no_eligible_executor), 'merge_pressure', 'jev_sched'. scorecard.parallelism skip-reason tally must accept them (grep the reason set there; extend the tuple, no other scorecard change).\nSafety: never dispatch more than free_slots; never dispatch a task whose depends_on are unmerged or whose spec review is pending; off mode produces byte-identical dispatch rows to today (regression test).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_off_mode_is_unchanged \u2014 with [scheduler].mode off no duration, capacity, concurrency, merge_pressure or jev_sched call happens and the dispatch row equals the pre-integration shape",
+    "tests/test_daemon.py::test_dispatch_shadow_records_durations_capacity_limit_and_pressure_without_applying \u2014 shadow mode: wave_row carries priority with empirical est_duration_s, duration_sources, capacity, concurrency limit, merge_pressure and jev_sched keys, first-come dispatch unchanged, a concurrency row and a wave decision row are written",
+    "tests/test_daemon.py::test_dispatch_active_applies_concurrency_limit_and_capacity_deferrals \u2014 active mode: wave_limit is the concurrency limit when below slots, a task admit deferred with reserved_for_critical is not dispatched and its dispatch entry carries that reason",
+    "tests/test_daemon.py::test_dispatch_active_merge_pressure_throttle_defers_only_coupled \u2014 saturated pressure with merge_pressure_mode throttle defers the coupled candidate with reason merge_pressure and dispatches the independent one",
+    "tests/test_daemon.py::test_dispatch_never_exceeds_free_slots_or_dependencies_under_any_mode \u2014 active mode with a limit above slots dispatches at most slots tasks and never a task with an unmerged dependency; a raising duration/jev_sched call falls back to the deterministic wave",
+    "tests/test_scorecard.py::test_parallelism_skip_reasons_accept_capacity_and_pressure_reasons \u2014 dispatch rows with reasons reserved_for_critical:T-1 and merge_pressure are tallied, not counted as unknown"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/scorecard.py",
+    "tests/test_daemon.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [
+    "T-0564",
+    "T-0567",
+    "T-0570",
+    "T-0572",
+    "T-0598",
+    "T-0599",
+    "T-0636"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/duration.py",
+      "orchestrator/capacity.py",
+      "orchestrator/concurrency.py",
+      "orchestrator/merge_pressure.py",
+      "orchestrator/jev_sched.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/interference.py",
+      "orchestrator/critical_path.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/pool.py",
+      "tests/test_daemon.py",
+      "tests/_harness.py",
+      ".orchestrator/pool.toml"
+    ],
+    "interface_contract": "dispatch(pool) signature unchanged; _wave_order(candidate_ids, tasks, durations=None); wave_row gains keys duration_sources, capacity, concurrency, merge_pressure, jev_sched; new schedlog file runs/sched/concurrency.jsonl; decision rows kind wave; new dispatch reasons listed in the spec; [scheduler].mode off byte-identical to today"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R15a v2 after spec review T-0649 (scheduler cfg defaults for the new keys; deferral handling on the lost-claim retry branch; scorecard skip tally counts action 'skipped'; keyword-only call example)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789980340.4273658,
+      "pipeline": {
+        "first_ready_at": 1789980340.427304
+      }
+    },
+    {
+      "ts": 1789980340.47968,
+      "pipeline": {
+        "first_ready_at": 1789980340.427304,
+        "spec_review_at": 1789980340.479619,
+        "spec_review_at_lease": 1789981240.479619
+      }
+    },
+    {
+      "ts": 1789980340.487009,
+      "pipeline": {
+        "first_ready_at": 1789980340.427304,
+        "spec_review_at": 1789980340.479619,
+        "spec_review_at_lease": 1789981240.479619,
+        "spec_review_at_done": 1789980340.486794
+      }
+    },
+    {
+      "ts": 1789980556.909685,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_load_scheduler_cfg's default cfg dict (only mode/soft_conflict_policy/max_wave/stale_rebase) is never extended with defaults for the new keys the spec has dispatch() read directly (merge_pressure_mode, jev_mode, duration_mode, concurrency_mode, reserve_imminent). Any pool.toml or test fixture that omits these will KeyError the first time dispatch() indexes scheduler['merge_pressure_mode'] etc.",
+          "severity": "high",
+          "line": 597
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec's duration/capacity/concurrency/merge_pressure/jev layers are described as if added independently, but dispatch() already has a hard/soft-conflict wave via interference.select_wave (line 692-705) and a second interference.select_wave recompute on the competing-dispatcher retry path (line 767-786, triggered when stamp() loses a race). The spec never says whether admit/concurrency/merge_pressure/jev deferrals must be reapplied on that retry recompute, risking the 'never dispatch more than free_slots' and merge-pressure/jev safety guarantees once a claim is lost mid-wave.",
+          "severity": "high",
+          "line": 767
+        },
+        {
+          "path": "orchestrator/scorecard.py",
+          "issue": "Point 7 describes 'the reason set'/'the tuple' to extend for skip-reason tallying, but parallelism()'s skip tally (skips[reason] = skips.get(reason, 0) + 1, line 1567-1568) is a freeform dict with no enumerated tuple \u2014 any string is already accepted, so there is nothing to 'extend'. Separately, real dispatch rows use action='skipped' (daemon.py:713) while the tally only counts action=='skip' (scorecard.py:1565); existing unit tests mask this by hand-writing 'skip' in fixtures. The new reasons will pass the isolated unit test but will never appear in scorecard output computed from real dispatch logs, undermining the feature's stated purpose.",
+          "severity": "medium",
+          "line": 1565
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec step 3's call `concurrency.select_limit(hard_max=slots, ready_ids=candidate_ids, tasks, pairwise_rows=interference.pairwise([...candidates]), priorities, snapshot=snap, pressure=pressure, durations=durations)` places positional args (tasks, priorities) after keyword args \u2014 invalid Python syntax if transcribed literally by the executor.",
+          "severity": "low",
+          "line": 660
+        }
+      ]
+    },
+    {
+      "ts": 1789980563.0022569,
+      "pipeline": {
+        "first_ready_at": 1789980340.427304,
+        "spec_review_at": 1789980340.479619,
+        "spec_review_at_lease": 1789981240.479619,
+        "spec_review_at_done": 1789980340.486794,
+        "spec_review_held_at": 1789980563.002183
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789980563.5925262,
+      "pipeline": {
+        "first_ready_at": 1789980340.427304,
+        "spec_review_at": 1789980340.479619,
+        "spec_review_at_lease": 1789981240.479619,
+        "spec_review_at_done": 1789980340.486794,
+        "spec_review_held_at": 1789980563.002183,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789980563.644511,
+      "pipeline": {
+        "first_ready_at": 1789980340.427304,
+        "spec_review_at": 1789980340.479619,
+        "spec_review_at_lease": 1789981240.479619,
+        "spec_review_at_done": 1789980340.486794,
+        "spec_review_held_at": 1789980563.002183,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789980563.0022569": true
+        }
+      }
+    },
+    {
+      "ts": 1789980680.865812,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R15a v2 after spec review T-0649 (scheduler cfg defaults for the new keys; deferral handling on the lost-claim retry branch; scorecard skip tally counts action 'skipped'; keyword-only call example)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789980340.427304,
+    "spec_review_at": 1789980340.479619,
+    "spec_review_at_lease": 1789981240.479619,
+    "spec_review_at_done": 1789980340.486794,
+    "spec_review_held_at": 1789980563.002183,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789980563.0022569": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_load_scheduler_cfg's default cfg dict (only mode/soft_conflict_policy/max_wave/stale_rebase) is never extended with defaults for the new keys the spec has dispatch() read directly (merge_pressure_mode, jev_mode, duration_mode, concurrency_mode, reserve_imminent). Any pool.toml or test fixture that omits these will KeyError the first time dispatch() indexes scheduler['merge_pressure_mode'] etc.",
+      "severity": "high",
+      "line": 597
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec's duration/capacity/concurrency/merge_pressure/jev layers are described as if added independently, but dispatch() already has a hard/soft-conflict wave via interference.select_wave (line 692-705) and a second interference.select_wave recompute on the competing-dispatcher retry path (line 767-786, triggered when stamp() loses a race). The spec never says whether admit/concurrency/merge_pressure/jev deferrals must be reapplied on that retry recompute, risking the 'never dispatch more than free_slots' and merge-pressure/jev safety guarantees once a claim is lost mid-wave.",
+      "severity": "high",
+      "line": 767
+    },
+    {
+      "path": "orchestrator/scorecard.py",
+      "issue": "Point 7 describes 'the reason set'/'the tuple' to extend for skip-reason tallying, but parallelism()'s skip tally (skips[reason] = skips.get(reason, 0) + 1, line 1567-1568) is a freeform dict with no enumerated tuple \u2014 any string is already accepted, so there is nothing to 'extend'. Separately, real dispatch rows use action='skipped' (daemon.py:713) while the tally only counts action=='skip' (scorecard.py:1565); existing unit tests mask this by hand-writing 'skip' in fixtures. The new reasons will pass the isolated unit test but will never appear in scorecard output computed from real dispatch logs, undermining the feature's stated purpose.",
+      "severity": "medium",
+      "line": 1565
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec step 3's call `concurrency.select_limit(hard_max=slots, ready_ids=candidate_ids, tasks, pairwise_rows=interference.pairwise([...candidates]), priorities, snapshot=snap, pressure=pressure, durations=durations)` places positional args (tasks, priorities) after keyword args \u2014 invalid Python syntax if transcribed literally by the executor.",
+      "severity": "low",
+      "line": 660
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

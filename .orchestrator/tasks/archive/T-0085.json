@@ -1,0 +1,91 @@
+{
+  "id": "T-0085",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "review: C-O1: notify() works off the laptop \u2014 always log, POST to ORCH_NOTIFY_URL when set, osascript only on darwin",
+  "spec": "Why: orchestrator/daemon.py:16-23 notify() shells out to osascript and is gated on sys.platform == \"darwin\", so on a headless Linux executor host (Phase C) the both-accounts-cooling, budget and held-task alerts vanish. Change notify(msg): (1) always print one line `[notify] <msg>` to stderr (already partly the case, keep it); (2) if env ORCH_NOTIFY_URL is set, POST the message as a plain-text body with urllib (stdlib, no new dependency), 5 s timeout, any exception swallowed into a stderr line `[notify] webhook failed: <reason>` (an alerting failure must never break a tick); (3) osascript only when sys.platform == \"darwin\" and env ORCH_NOTIFY_DESKTOP is not \"0\". Document ORCH_NOTIFY_URL in README.md \"Run it\" with the ntfy example `https://ntfy.kentawaibel.com/orchestrator` as the shape, not as a fact about the user's setup. Tests in tests/test_daemon.py: notify posts to a local http.server thread when the env var is set (assert body and method), does not raise when the URL is unreachable (closed port), and never calls subprocess when platform is patched to \"linux\".",
+  "inputs": [
+    "T-0078"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py has three new tests: webhook_posts_body, webhook_failure_is_swallowed, no_osascript_off_darwin; all green",
+    "notify() never raises regardless of ORCH_NOTIFY_URL value or network state",
+    "README.md documents ORCH_NOTIFY_URL and ORCH_NOTIFY_DESKTOP in one short paragraph",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0085",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_daemon.py",
+        "line": 23,
+        "issue": "setUp() never clears ORCH_NOTIFY_URL, so if it's set in the ambient environment (exactly what README.md now tells users to do to enable the feature), every notify() call anywhere in this suite fires a real outbound POST to that URL \u2014 not just the 3 new webhook tests. Verified: with a local HTTP server standing in for ORCH_NOTIFY_URL, running `python -m unittest tests.test_daemon` produced 10 real hits across the 20 tests (held-task, merge, spec-review-rejected, etc. all call notify() internally). On a real ntfy/webhook endpoint this spams the user's phone/notification channel on every local test run and makes those unrelated tests network-dependent/non-hermetic. Fix: setUp should pop/clear ORCH_NOTIFY_URL (and ORCH_NOTIFY_DESKTOP) with cleanup restore, same pattern as the new set_env helper, so the webhook path is strictly opt-in per test.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789732410.16139,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0085",
+      "claimed_at": 1789732410.161122
+    },
+    {
+      "ts": 1789732410.2219179,
+      "pid": 81657,
+      "account": "B"
+    },
+    {
+      "ts": 1789732493.504095,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_daemon.py",
+            "line": 23,
+            "issue": "setUp() never clears ORCH_NOTIFY_URL, so if it's set in the ambient environment (exactly what README.md now tells users to do to enable the feature), every notify() call anywhere in this suite fires a real outbound POST to that URL \u2014 not just the 3 new webhook tests. Verified: with a local HTTP server standing in for ORCH_NOTIFY_URL, running `python -m unittest tests.test_daemon` produced 10 real hits across the 20 tests (held-task, merge, spec-review-rejected, etc. all call notify() internally). On a real ntfy/webhook endpoint this spams the user's phone/notification channel on every local test run and makes those unrelated tests network-dependent/non-hermetic. Fix: setUp should pop/clear ORCH_NOTIFY_URL (and ORCH_NOTIFY_DESKTOP) with cleanup restore, same pattern as the new set_env helper, so the webhook path is strictly opt-in per test.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789732493.505802,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789732410.161122,
+  "pid": 81657,
+  "account": "B",
+  "review_verdict": "request_changes"
+}

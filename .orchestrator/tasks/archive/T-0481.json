@@ -1,0 +1,132 @@
+{
+  "id": "T-0481",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P2b fix round 1: the resume dispatch worker handles every executor.reply outcome (done, failed, held, refused, incompatible) so a fix task is never orphaned, one resume_plan() is the single compatibility source for dispatch and reply, and a compatibility change at run time falls back to a fresh dispatch on the fix task instead of rewriting the parent's thread (review T-0478)",
+  "spec": "Fix round for T-0466 (P2b) on its branch task/T-0466 at 21c34a7, addressing review T-0478 (three findings). Base goal/T-0445.\n1. daemon._dispatch_reply_worker (daemon.py around 543): handle every status executor.reply can return. done: as today (the fix task adopts the parent branch commit, result posted on the fix task). failed: the fix task gets the result and status failed (or held with gate semantics as a fresh fix task would). held (parent executor cooling or usage limit, executor.py 140-144, 340-342): post a result on the fix task with status held and hold_reason budget, and clear pipeline.dispatched_at plus its _done marker on the fix task so dispatch() retries it on a later tick when the executor frees (the same requeue the fresh path uses). refused (parent merged concurrently, executor.py 329-330): fix task failed with reason \"parent_merged\" and pipeline.resume.reason = parent_merged. Any exception: fix task failed with the error head. Every branch posts a result on the fix task id, never only on the parent.\n2. Single source of truth: executor.resume_plan(parent, fix_task) -> {\"mode\": \"resume\" | \"fresh\", \"reason\": None | \"no_thread\" | \"incompatible_worktree\" | \"rounds_exhausted\" | \"executor_not_codex\"}; dispatch() uses it to choose the path and records it in pipeline.resume; executor.reply(parent, delta, plan=None) re-validates with the same function at run time and, when the plan changed (worktree dirty, rounds or executor changed), returns status \"incompatible\" with the new reason instead of running a fresh exec on the parent; the reply worker then dispatches the fix task through the fresh path (P1a packet, the fix task's own worktree) and sets pipeline.resume = {\"mode\": \"fresh\", \"reason\": \"compat_changed:<reason>\"}. Parent bookkeeping (codex_thread, codex_thread_head, rounds) changes only on an actual resume.\n3. Tests tests/test_daemon.py: test_reply_worker_handles_held_requeues_fix_task_for_retry (dispatched_at cleared, status held with reason budget, a later tick re-dispatches), test_reply_worker_handles_refused_marks_fix_task_failed_parent_merged, test_fix_round_fresh_reasons_rounds_exhausted_and_executor_not_codex, test_reply_compat_changed_falls_back_to_fresh_on_fix_task_not_parent (parent thread and rounds unchanged); tests/test_executor.py: test_resume_plan_single_source_used_by_dispatch_and_reply (monkeypatch resume_plan once; both callers observe it). Keep every T-0466 test and existing tests green; full .claude/hooks/tests-green.sh exit 0; commit on task/T-0466's branch (verify with git branch --show-current before committing) with the task id including every named test; report sha and failures only.",
+  "inputs": [
+    "T-0479"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_reply_worker_handles_held_requeues_fix_task_for_retry, test_reply_worker_handles_refused_marks_fix_task_failed_parent_merged, test_fix_round_fresh_reasons_rounds_exhausted_and_executor_not_codex, test_reply_compat_changed_falls_back_to_fresh_on_fix_task_not_parent pass",
+    "tests/test_executor.py::test_resume_plan_single_source_used_by_dispatch_and_reply passes",
+    "every executor.reply outcome posts a result on the fix task; resume_plan is the only compatibility check; parent thread bookkeeping changes only on an actual resume",
+    "all T-0466 tests and existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0481",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 545,
+        "issue": "_dispatch_reply_worker only posts a bus result for executor.reply status in {done,failed}. reply() can also return status \"held\" (executor unavailable / codex usage-limit cooldown) or \"refused\" (parent already merged). Neither path calls bus.post_result, so the fix task hangs indefinitely in dispatched state. Violates acceptance: 'every executor.reply outcome posts a result on the fix task'.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 578,
+        "issue": "Compatibility is computed twice independently: daemon.dispatch() calls executor._resume_compatible(parent) to set pipeline.resume/worktree/branch, then executor.reply() calls _resume_compatible(t) again on a differently-shaped record to pick resume-vs-fresh args. These can diverge, leaving the fix task's recorded pipeline.resume inconsistent with what reply() actually did. Violates acceptance: 'resume_plan is the only compatibility check' -- no single shared function exists.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 53,
+        "issue": "Acceptance criteria name five specific tests that must pass (test_reply_worker_handles_held_requeues_fix_task_for_retry, test_reply_worker_handles_refused_marks_fix_task_failed_parent_merged, test_fix_round_fresh_reasons_rounds_exhausted_and_executor_not_codex, test_reply_compat_changed_falls_back_to_fresh_on_fix_task_not_parent, and test_resume_plan_single_source_used_by_dispatch_and_reply in test_executor.py). None of these exist in the diff; different tests covering fewer scenarios were substituted instead.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "line": 358,
+        "issue": "bus.update(task_id, rounds=rounds) inside reply() runs even on the fresh-repair fallback branch (when _resume_compatible(t) is False, i.e. not an actual thread resume), bumping the parent's round counter regardless. Violates acceptance: 'parent thread bookkeeping changes only on an actual resume'.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789933311.185649,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0481",
+      "claimed_at": 1789933311.185243
+    },
+    {
+      "ts": 1789933311.1870022,
+      "account": "B"
+    },
+    {
+      "ts": 1789933311.233025,
+      "pid": 6897,
+      "account": "B"
+    },
+    {
+      "ts": 1789933432.909581,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 545,
+            "issue": "_dispatch_reply_worker only posts a bus result for executor.reply status in {done,failed}. reply() can also return status \"held\" (executor unavailable / codex usage-limit cooldown) or \"refused\" (parent already merged). Neither path calls bus.post_result, so the fix task hangs indefinitely in dispatched state. Violates acceptance: 'every executor.reply outcome posts a result on the fix task'.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 578,
+            "issue": "Compatibility is computed twice independently: daemon.dispatch() calls executor._resume_compatible(parent) to set pipeline.resume/worktree/branch, then executor.reply() calls _resume_compatible(t) again on a differently-shaped record to pick resume-vs-fresh args. These can diverge, leaving the fix task's recorded pipeline.resume inconsistent with what reply() actually did. Violates acceptance: 'resume_plan is the only compatibility check' -- no single shared function exists.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 53,
+            "issue": "Acceptance criteria name five specific tests that must pass (test_reply_worker_handles_held_requeues_fix_task_for_retry, test_reply_worker_handles_refused_marks_fix_task_failed_parent_merged, test_fix_round_fresh_reasons_rounds_exhausted_and_executor_not_codex, test_reply_compat_changed_falls_back_to_fresh_on_fix_task_not_parent, and test_resume_plan_single_source_used_by_dispatch_and_reply in test_executor.py). None of these exist in the diff; different tests covering fewer scenarios were substituted instead.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 358,
+            "issue": "bus.update(task_id, rounds=rounds) inside reply() runs even on the fresh-repair fallback branch (when _resume_compatible(t) is False, i.e. not an actual thread resume), bumping the parent's round counter regardless. Violates acceptance: 'parent thread bookkeeping changes only on an actual resume'.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789933432.912016,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789933311.185243,
+  "account": "B",
+  "pid": 6897,
+  "review_verdict": "request_changes"
+}

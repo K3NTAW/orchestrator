@@ -1,0 +1,641 @@
+{
+  "id": "T-1362",
+  "created_at": 1790194491.968531,
+  "parent": "T-1334",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S2b v2: capacity snapshot and fallback treat claude:<tier> rows as Claude capacity; README plug-and-play",
+  "spec": "Goal T-1334 (S1 T-1352 merged). Replaces T-1357 after spec review T-1359. Claude executor rows have id \"claude:<tier>\" (S2a contract), so running claude-row tasks carry executor \"claude:<tier>\" and are already counted by daemon.running_claude_workers (daemon.py:470, \"claude:\" prefix) into snapshot[\"claude_workers_free\"]; no change there. The dispatch-time check (executor.start -> pool.pick) stays authoritative and holds \"no account with headroom\"; the snapshot rule below is advisory and read-only.\n\n1. capacity.snapshot (capacity.py:9): each executor row carries \"provider\"; every reader uses row.get(\"provider\", \"codex\") so rows built elsewhere (concurrency.py, speculation.py, tests) without the key stay codex.\n2. One helper _usable(row, snapshot, free=None) used by eligible_executors_from_snapshot (:54), admit (:101) and the \"fallback\" flag (:45): codex row -> today's checks; claude row -> today's checks (enabled, role, band, cooling_s == 0, row free, day_tasks_left) plus at least one snapshot account with cooling_s == 0 plus the shared counter > 0. fallback = enabled execute rows exist and none is usable (with the shared counter at its snapshot value).\n3. admit: free[\"claude_rows\"] = snapshot[\"claude_workers_free\"]; the `available` filter (capacity.py:127) requires free[\"claude_rows\"] > 0 for claude rows; the imminent-reservation blocker (:141) treats a claude row as having min(row free, free[\"claude_rows\"]); on choosing a claude row decrement both. The legacy \"claude\" pseudo-executor only appears when fallback is True, i.e. when no claude row is usable, so the two never draw in the same pass.\n4. _reason (:75): a claude row otherwise eligible but shared counter 0 -> \"account_capacity\"; every account cooling -> \"cooldown\".\n5. daemon._codex_available (daemon.py:454): a claude row counts when enabled, has \"execute\", is not cooling and at least one pool account is not cooling (same advisory rule; no Pool.pick, no window roll).\n6. README.md \"Executors and routing\" (README.md:278): Claude rows (id \"claude:<tier>\", tier alias in [models], model optional and must match the alias, roles, band, max_parallel, daily_budget_tasks), headroom from [[claude_accounts]] and [limits].max_parallel_claude_workers, reviewer never runs the executing model, plug-and-play: add a [models] alias + a claude:<alias> row for a new Claude model, add a codex row for a new Codex model, enabled=false on every codex row to run without Codex.\nTests (unittest.TestCase methods): two ready tasks and one shared slot -> one admitted, one deferred account_capacity; every account cooling -> claude row not eligible, reason cooldown; all codex rows cooling + healthy claude row -> fallback False and the claude row eligible; codex-only snapshot rows without \"provider\" -> admit result equals hard-coded expected ids; a running task with executor \"claude:opus\" lowers claude_workers_free via running_claude_workers; _codex_available with a claude row, one account not cooling vs all cooling. No pool.toml edit, no new dependencies. Additive; git revert restores the old admission.",
+  "inputs": [
+    "T-1361"
+  ],
+  "acceptance": [
+    "tests/test_capacity.py::test_claude_rows_share_claude_worker_slots",
+    "tests/test_capacity.py::test_claude_row_unusable_when_every_account_cools",
+    "tests/test_capacity.py::test_healthy_claude_row_prevents_fallback",
+    "tests/test_capacity.py::test_codex_only_rows_without_provider_unchanged",
+    "tests/test_daemon.py::test_running_claude_row_task_counts_as_claude_worker",
+    "tests/test_daemon.py::test_codex_available_counts_claude_row_when_an_account_is_free",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_capacity.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1362",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/capacity.py",
+        "issue": "The spec defines fallback as 'no enabled execute row is usable', and _usable includes free, band and day_tasks_left. Today fallback means only 'all enabled rows cooling'. If every codex row is saturated but healthy, fallback flips True and tasks route to the legacy 'claude' pseudo-executor instead of waiting. daemon._fallback_mode (daemon.py:463) still keys on cooling only, so the two disagree, and the 'codex-only unchanged' criterion breaks.",
+        "severity": "high",
+        "line": 45
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "free_slots (daemon.py:483-499) is not in the spec. It sums max_parallel minus running for every non-cooling execute row, claude rows included, with no shared claude cap and no account check. capacity_reason at daemon.py:773 also ignores claude rows. With scheduler mode off, admit is skipped and _first_come_order over-dispatches claude tasks, which executor.start/pool.pick then holds.",
+        "severity": "med",
+        "line": 494
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The advisory _codex_available rule (enabled, execute, not cooling, one account free) ignores band, daily budget and row saturation, which both the snapshot _usable and pool.eligible_executors apply. With every codex row cooling and a claude row that is over budget or out of band, _codex_available stays True, so fallback_claude never fires and tasks hold indefinitely.",
+        "severity": "med",
+        "line": 460
+      },
+      {
+        "path": "orchestrator/capacity.py",
+        "issue": "choice_key (:132) and the imminent blocker (:141) read free[executor_id] (row free). The spec does not say whether they use the effective min(row free, claude_rows). A claude row with free=4 and shared counter 1 can outrank a codex row, and the `free==1` blocker check can misfire.",
+        "severity": "med",
+        "line": 132
+      },
+      {
+        "path": "orchestrator/concurrency.py",
+        "issue": "concurrency.py and speculation.py read snapshot rows and claude_workers_free but are outside scope. The spec does not check that select_limit does not double count the shared counter against per-row free for claude rows.",
+        "severity": "low",
+        "line": 80
+      }
+    ],
+    "suggested_spec_changes": [
+      "Keep the snapshot fallback flag cooling-based: all enabled execute rows cooling AND no claude row with a non-cooling account and counter > 0. Use _usable only in eligible_executors_from_snapshot and admit.",
+      "Add daemon.free_slots and the dispatch capacity_reason (daemon.py:773) to scope. Cap claude-row slots by claude_workers_free and gate them on a non-cooling account, or state explicitly that the mismatch is accepted.",
+      "Make _codex_available apply the same band, budget and saturation semantics as the snapshot rule, or document why it differs, so _fallback_mode and snapshot['fallback'] agree. Add a test where codex rows are saturated but healthy and fallback stays False.",
+      "State that choice_key and the imminent blocker use effective free = min(row free, claude_rows) for claude rows, and add a test for a claude row with a large row free and a shared counter of 1 alongside a codex row.",
+      "Add concurrency.py to the trace list, or add a test that select_limit does not change for codex-only snapshots and does not double count for claude rows.",
+      "Add a test for saturated-but-healthy codex rows: fallback False, and admit defers with reason executor_capacity."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790194494.700566,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4977,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790194494.706578,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ff17b0648ea2f1297749043296dfc8dc992cfc2abef20cafb0560329c303c650"
+          },
+          "spec": {
+            "chars": 3091,
+            "est_tokens": 772,
+            "sha256": "ff51844a13295c99d034c5cd118234ca60ee91117bb9b9bcbd4cd52bb447c005"
+          },
+          "acceptance": {
+            "chars": 519,
+            "est_tokens": 129,
+            "sha256": "afba387257c0832a76fc23ee38a105e8bd03777534a59399d79eff09016960a9"
+          },
+          "scope": {
+            "chars": 121,
+            "est_tokens": 30,
+            "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 309,
+            "est_tokens": 77,
+            "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "ca59ba6158df",
+        "version": "ca59ba6158df",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1361 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4977,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790194496.8324869,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1362",
+      "claimed_at": 1790194496.827635
+    },
+    {
+      "ts": 1790194496.843088,
+      "account": "A"
+    },
+    {
+      "ts": 1790194504.126385,
+      "pid": 90607,
+      "account": "A"
+    },
+    {
+      "ts": 1790194550.859947,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ff17b0648ea2f1297749043296dfc8dc992cfc2abef20cafb0560329c303c650"
+          },
+          "spec": {
+            "chars": 3091,
+            "est_tokens": 772,
+            "sha256": "ff51844a13295c99d034c5cd118234ca60ee91117bb9b9bcbd4cd52bb447c005"
+          },
+          "acceptance": {
+            "chars": 519,
+            "est_tokens": 129,
+            "sha256": "afba387257c0832a76fc23ee38a105e8bd03777534a59399d79eff09016960a9"
+          },
+          "scope": {
+            "chars": 121,
+            "est_tokens": 30,
+            "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 309,
+            "est_tokens": 77,
+            "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "ca59ba6158df",
+        "version": "ca59ba6158df",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1361 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4977,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "9aeb30db-c2ba-4fce-903f-adfee66daf6d"
+      }
+    },
+    {
+      "ts": 1790194550.8889558,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ff17b0648ea2f1297749043296dfc8dc992cfc2abef20cafb0560329c303c650"
+          },
+          "spec": {
+            "chars": 3091,
+            "est_tokens": 772,
+            "sha256": "ff51844a13295c99d034c5cd118234ca60ee91117bb9b9bcbd4cd52bb447c005"
+          },
+          "acceptance": {
+            "chars": 519,
+            "est_tokens": 129,
+            "sha256": "afba387257c0832a76fc23ee38a105e8bd03777534a59399d79eff09016960a9"
+          },
+          "scope": {
+            "chars": 121,
+            "est_tokens": 30,
+            "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 309,
+            "est_tokens": 77,
+            "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "ca59ba6158df",
+        "version": "ca59ba6158df",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1361 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4977,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "9aeb30db-c2ba-4fce-903f-adfee66daf6d",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790194552.255466,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/capacity.py",
+            "issue": "The spec defines fallback as 'no enabled execute row is usable', and _usable includes free, band and day_tasks_left. Today fallback means only 'all enabled rows cooling'. If every codex row is saturated but healthy, fallback flips True and tasks route to the legacy 'claude' pseudo-executor instead of waiting. daemon._fallback_mode (daemon.py:463) still keys on cooling only, so the two disagree, and the 'codex-only unchanged' criterion breaks.",
+            "severity": "high",
+            "line": 45
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "free_slots (daemon.py:483-499) is not in the spec. It sums max_parallel minus running for every non-cooling execute row, claude rows included, with no shared claude cap and no account check. capacity_reason at daemon.py:773 also ignores claude rows. With scheduler mode off, admit is skipped and _first_come_order over-dispatches claude tasks, which executor.start/pool.pick then holds.",
+            "severity": "med",
+            "line": 494
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The advisory _codex_available rule (enabled, execute, not cooling, one account free) ignores band, daily budget and row saturation, which both the snapshot _usable and pool.eligible_executors apply. With every codex row cooling and a claude row that is over budget or out of band, _codex_available stays True, so fallback_claude never fires and tasks hold indefinitely.",
+            "severity": "med",
+            "line": 460
+          },
+          {
+            "path": "orchestrator/capacity.py",
+            "issue": "choice_key (:132) and the imminent blocker (:141) read free[executor_id] (row free). The spec does not say whether they use the effective min(row free, claude_rows). A claude row with free=4 and shared counter 1 can outrank a codex row, and the `free==1` blocker check can misfire.",
+            "severity": "med",
+            "line": 132
+          },
+          {
+            "path": "orchestrator/concurrency.py",
+            "issue": "concurrency.py and speculation.py read snapshot rows and claude_workers_free but are outside scope. The spec does not check that select_limit does not double count the shared counter against per-row free for claude rows.",
+            "severity": "low",
+            "line": 80
+          }
+        ],
+        "suggested_spec_changes": [
+          "Keep the snapshot fallback flag cooling-based: all enabled execute rows cooling AND no claude row with a non-cooling account and counter > 0. Use _usable only in eligible_executors_from_snapshot and admit.",
+          "Add daemon.free_slots and the dispatch capacity_reason (daemon.py:773) to scope. Cap claude-row slots by claude_workers_free and gate them on a non-cooling account, or state explicitly that the mismatch is accepted.",
+          "Make _codex_available apply the same band, budget and saturation semantics as the snapshot rule, or document why it differs, so _fallback_mode and snapshot['fallback'] agree. Add a test where codex rows are saturated but healthy and fallback stays False.",
+          "State that choice_key and the imminent blocker use effective free = min(row free, claude_rows) for claude rows, and add a test for a claude row with a large row free and a shared counter of 1 alongside a codex row.",
+          "Add concurrency.py to the trace list, or add a test that select_limit does not change for codex-only snapshots and does not double count for claude rows.",
+          "Add a test for saturated-but-healthy codex rows: fallback False, and admit defers with reason executor_capacity."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790194552.261662,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "The spec defines fallback as 'no enabled execute row is usable', and _usable includes free, band and day_tasks_left. Today fallback means only 'all enabled rows cooling'. If every codex row is saturated but healthy, fallback flips True and tasks route to the legacy 'claude' pseudo-executor instead of waiting. daemon._fallback_mode (daemon.py:463) still keys on cooling only, so the two disagree, and the 'codex-only unchanged' criterion breaks.",
+          "severity": "high",
+          "line": 45
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "free_slots (daemon.py:483-499) is not in the spec. It sums max_parallel minus running for every non-cooling execute row, claude rows included, with no shared claude cap and no account check. capacity_reason at daemon.py:773 also ignores claude rows. With scheduler mode off, admit is skipped and _first_come_order over-dispatches claude tasks, which executor.start/pool.pick then holds.",
+          "severity": "med",
+          "line": 494
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The advisory _codex_available rule (enabled, execute, not cooling, one account free) ignores band, daily budget and row saturation, which both the snapshot _usable and pool.eligible_executors apply. With every codex row cooling and a claude row that is over budget or out of band, _codex_available stays True, so fallback_claude never fires and tasks hold indefinitely.",
+          "severity": "med",
+          "line": 460
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "choice_key (:132) and the imminent blocker (:141) read free[executor_id] (row free). The spec does not say whether they use the effective min(row free, claude_rows). A claude row with free=4 and shared counter 1 can outrank a codex row, and the `free==1` blocker check can misfire.",
+          "severity": "med",
+          "line": 132
+        },
+        {
+          "path": "orchestrator/concurrency.py",
+          "issue": "concurrency.py and speculation.py read snapshot rows and claude_workers_free but are outside scope. The spec does not check that select_limit does not double count the shared counter against per-row free for claude rows.",
+          "severity": "low",
+          "line": 80
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4238,
+    "est_tokens": 1059,
+    "presented_tokens": 1059,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "ff17b0648ea2f1297749043296dfc8dc992cfc2abef20cafb0560329c303c650"
+      },
+      "spec": {
+        "chars": 3091,
+        "est_tokens": 772,
+        "sha256": "ff51844a13295c99d034c5cd118234ca60ee91117bb9b9bcbd4cd52bb447c005"
+      },
+      "acceptance": {
+        "chars": 519,
+        "est_tokens": 129,
+        "sha256": "afba387257c0832a76fc23ee38a105e8bd03777534a59399d79eff09016960a9"
+      },
+      "scope": {
+        "chars": 121,
+        "est_tokens": 30,
+        "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+      },
+      "depends_on": {
+        "chars": 100,
+        "est_tokens": 25,
+        "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+      },
+      "existing tests": {
+        "chars": 309,
+        "est_tokens": 77,
+        "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 13,
+        "est_tokens": 3,
+        "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+      }
+    },
+    "hash": "ca59ba6158df",
+    "version": "ca59ba6158df",
+    "candidate_known": false,
+    "base": "1571826d4a38",
+    "sources": "task@T-1361 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 4977,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "9aeb30db-c2ba-4fce-903f-adfee66daf6d",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790194496.827635,
+  "account": "A",
+  "pid": 90607,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "The spec defines fallback as 'no enabled execute row is usable', and _usable includes free, band and day_tasks_left. Today fallback means only 'all enabled rows cooling'. If every codex row is saturated but healthy, fallback flips True and tasks route to the legacy 'claude' pseudo-executor instead of waiting. daemon._fallback_mode (daemon.py:463) still keys on cooling only, so the two disagree, and the 'codex-only unchanged' criterion breaks.",
+      "severity": "high",
+      "line": 45
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "free_slots (daemon.py:483-499) is not in the spec. It sums max_parallel minus running for every non-cooling execute row, claude rows included, with no shared claude cap and no account check. capacity_reason at daemon.py:773 also ignores claude rows. With scheduler mode off, admit is skipped and _first_come_order over-dispatches claude tasks, which executor.start/pool.pick then holds.",
+      "severity": "med",
+      "line": 494
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The advisory _codex_available rule (enabled, execute, not cooling, one account free) ignores band, daily budget and row saturation, which both the snapshot _usable and pool.eligible_executors apply. With every codex row cooling and a claude row that is over budget or out of band, _codex_available stays True, so fallback_claude never fires and tasks hold indefinitely.",
+      "severity": "med",
+      "line": 460
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "choice_key (:132) and the imminent blocker (:141) read free[executor_id] (row free). The spec does not say whether they use the effective min(row free, claude_rows). A claude row with free=4 and shared counter 1 can outrank a codex row, and the `free==1` blocker check can misfire.",
+      "severity": "med",
+      "line": 132
+    },
+    {
+      "path": "orchestrator/concurrency.py",
+      "issue": "concurrency.py and speculation.py read snapshot rows and claude_workers_free but are outside scope. The spec does not check that select_limit does not double count the shared counter against per-row free for claude rows.",
+      "severity": "low",
+      "line": 80
+    }
+  ]
+}

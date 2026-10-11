@@ -1,0 +1,148 @@
+{
+  "id": "T-0651",
+  "created_at": 1789980689.564202,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: R15a v2: daemon.dispatch integration \u2014 empirical durations, capacity admission, adaptive concurrency limit, merge-pressure throttle, Jev scheduling annotation and decision-log rows behind [scheduler] modes; skip-reason tally fix",
+  "spec": "Why: the scheduling modules merged in this goal (duration, capacity, concurrency, merge_pressure, jev_sched, decision_log) are not called by the daemon; daemon.dispatch (orchestrator/daemon.py:660-860) ranks with cold-start durations, fills wave_limit = min(slots, max_wave or slots) and records no reason when capacity or merge pressure would change a decision (AP P5, P6, P11, P13, P15; brief P14). v2 after spec review T-0649: cfg defaults, retry-branch behaviour, the skip tally mismatch and a valid call example.\nWhat (orchestrator/daemon.py dispatch path and one scorecard fix). Behaviour identical when [scheduler].mode == off; shadow logs, active applies. Tests: unittest.TestCase methods in the named files; every new test module begins with `import _harness`; use the daemon harness patterns already in tests/test_daemon.py (fake pool, temp STATE).\n0. _load_scheduler_cfg gains defaults for every new key so bracket access never KeyErrors: duration_mode 'empirical', duration_min_samples 5, duration_trim 0.1, reserve_imminent True, concurrency_mode 'adaptive', merge_pressure_mode 'observe', merge_queue_elevated 3, merge_queue_saturated 5, merge_conflicts_saturated 2, jev_mode 'shadow', jev_max_pairs 8, jev_cache_ttl_s 3600, jev_cache_max_entries 200; pool.toml values override; the existing mode validation stays.\n1. Durations: durations = duration.durations_for(list(tasks.values())) once per dispatch with candidates; _wave_order(candidate_ids, tasks, durations=None) passes them to critical_path.rank; wave_row['priority'] = {tid: critical_path.explain(tid, tasks, durations)}; wave_row['duration_sources'] = duration.explain_for(list(tasks.values())). A raising duration call falls back to durations = None and sets wave_row['duration_error'] = str(exc)[:200].\n2. Capacity: snap = capacity.snapshot(pool, running_claude_workers(pool), inflight_claude_dispatches()); imminent = ids of queued execute tasks not in candidate_ids whose every depends_on task is merged or (status done and pipeline.gated_at set); admission = capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent, cfg=scheduler); wave_row['capacity'] = {'admit', 'deferred', 'assignments'}. active: candidates in admission['deferred'] leave the wave and their dispatch entry reason is admission's reason string; shadow: recorded only.\n3. Merge pressure: pressure = merge_pressure.assess(cfg=scheduler); throttle = merge_pressure.throttle(candidate_ids, tasks, pressure['waiting'], pressure, pairwise_rows=pairwise_rows, cfg=scheduler) where pairwise_rows = interference.pairwise([tasks[i] for i in candidate_ids]); wave_row['merge_pressure'] = {k: v for k, v in pressure.items() if k != 'waiting'} plus {'would_defer': throttle['would_defer'], 'applied': throttle['applied']}; active with merge_pressure_mode 'throttle': ids in throttle['deferred'] leave the wave with dispatch reason 'merge_pressure'.\n4. Concurrency: limit = concurrency.select_limit(hard_max=slots, ready_ids=candidate_ids, tasks=tasks, pairwise_rows=pairwise_rows, priorities=priorities, snapshot=snap, pressure=pressure, durations=durations, cfg=scheduler) (all keyword arguments, in this order); active: wave_limit = min(slots, max_wave or slots, limit['limit']); shadow: wave_limit unchanged; schedlog.append('concurrency', concurrency.log_row(limit, wave_ids=result['wave'])) once per dispatch with candidates; wave_row['concurrency'] = limit.\n5. Jev scheduling: goal_head = git rev-parse of goal/<parent> for the first candidate (or 'main'), via _git_in on ROOT; wave_row['jev_sched'] = jev_sched.annotate(result, pairwise_rows, tasks, goal_head=goal_head, cfg=scheduler); active with jev_mode 'active': result = {'wave': annotated['wave'], 'deferred': annotated['deferred']}; any exception -> wave_row['jev_sched'] = {'error': str(exc)[:200]} and the deterministic result stands.\n6. Order of application in active mode: select_wave (hard/soft) -> capacity.admit deferrals -> merge_pressure throttle deferrals -> concurrency wave_limit (truncate the remaining wave to the limit, keeping wave order) -> jev_sched (may only remove). Lost-claim retry branch (daemon.py:767-786): after the recomputed select_wave on `remaining`, re-apply the SAME admission['deferred'], throttle['deferred'] sets and the same wave_limit minus already dispatched ids; do not call assess/admit/select_limit/annotate again on the retry path (reuse the tick's computed sets); document this in a comment.\n7. Decision log: once per dispatch with candidates decision_log.record(kind='wave', subject=<parent goal id of the first candidate or its task id>, candidates=candidate_ids, hard_constraints=['depends_on', 'hard_interference', 'free_slots'], deterministic={'baseline_order': selected before waves, 'wave': result['wave'], 'deferred': result['deferred'], 'limit': limit['limit']}, historical={'duration_sources': wave_row['duration_sources']}, jev=wave_row['jev_sched'].get('signals') if present else None, selected=dispatched_ids (filled after the loop), rejected={id: reason for every deferred id}, reason='; '.join(limit['reasons']), mode=scheduler['mode']); a failing record never breaks dispatch (caught, stderr line).\n8. New dispatch entry reasons: admission reasons (executor_capacity, cooldown, account_capacity, budget, reserved_for_critical:<id>, no_eligible_executor), 'merge_pressure', 'jev_sched'. Scorecard fix: scorecard.parallelism's skip tally (scorecard.py:1551-1556) counts action == 'skip' while dispatch rows carry action 'skipped'; count both spellings so real dispatch logs surface; add a test with a real-shaped row.\nSafety: never dispatch more than free_slots; never a task with unmerged depends_on or pending spec review; off mode produces the same dispatch rows and calls as today (regression test asserts no new module is called).",
+  "inputs": [
+    "T-0650"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_off_mode_is_unchanged \u2014 with [scheduler].mode off none of duration, capacity, concurrency, merge_pressure, jev_sched or decision_log is called and the dispatch row matches the pre-integration shape",
+    "tests/test_daemon.py::test_dispatch_shadow_records_durations_capacity_limit_and_pressure_without_applying \u2014 shadow mode: wave_row carries priority with empirical est_duration_s, duration_sources, capacity, concurrency, merge_pressure and jev_sched keys, first-come dispatch is unchanged, a concurrency row and a wave decision row are written",
+    "tests/test_daemon.py::test_dispatch_active_applies_admission_then_limit \u2014 active mode: a task admit deferred with reserved_for_critical is not dispatched and its entry carries that reason, and the wave is truncated to the concurrency limit when it is below free slots",
+    "tests/test_daemon.py::test_dispatch_active_merge_pressure_throttle_defers_only_coupled \u2014 saturated pressure with merge_pressure_mode throttle defers the coupled candidate with reason merge_pressure and dispatches the independent one",
+    "tests/test_daemon.py::test_dispatch_retry_branch_reuses_deferrals_and_never_exceeds_slots \u2014 a lost claim on the first candidate re-selects from the remaining ones without re-admitting a deferred id, never exceeding free_slots, and a raising duration or jev_sched call leaves the deterministic wave intact",
+    "tests/test_daemon.py::test_scheduler_cfg_defaults_cover_new_keys \u2014 _load_scheduler_cfg on an empty [scheduler] table returns every new key with its default",
+    "tests/test_scorecard.py::test_parallelism_skip_reasons_count_skipped_rows \u2014 a dispatch row with action skipped and reason reserved_for_critical:T-1 is tallied under skip_reasons"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/scorecard.py",
+    "tests/test_daemon.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0651",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Step 2 computes `imminent` as queued execute ids not in candidate_ids, then calls capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent, cfg=scheduler). But `tasks` is built by _wave_tasks over candidates+running plus depends_on ancestors and role=execute dependents of the *candidates*, and `priorities` (wave_row['priority']) is keyed only over candidate_ids. An imminent task by definition depends on work that is already merged or done+gated, not on a current candidate, so it will typically be absent from both dicts. capacity.admit's own contract (tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot) requires the imminent id to be present in `tasks` (for eligible_executors_from_snapshot, capacity.py:113-115: task is None -> skipped) and in `priorities` (capacity.py:68-72 _priority defaults missing ids to 0). If the imminent id is missing from `tasks`, admit never builds an imminent_sets entry for it; if it's missing from `priorities`, its priority reads as 0, which will be lower than any real candidate's critical-path priority, so the '> ' comparison in the reservation loop (capacity.py:140) never fires either way. The reserved_for_critical mechanism this integration is supposed to activate (AP P6, T-0598) becomes a permanent no-op for genuine out-of-band imminent demand, and acceptance test test_dispatch_active_applies_admission_then_limit (which asserts a reserved_for_critical deferral) cannot pass without the executor inventing an undocumented step.",
+        "severity": "high",
+        "line": 692
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Step 7's decision_log.record subject is described only as 'the parent goal id of the first candidate or its task id' with no rule for which ordering ('first candidate' of candidate_ids, wave_order, or dispatched_ids) to use; since these can differ once admission/pressure/concurrency reorder or drop ids, two correct implementations could log different subjects for the same tick, which will fragment decision_log.explain() lookups by goal.",
+        "severity": "low",
+        "line": 804
+      }
+    ],
+    "suggested_spec_changes": [
+      "In step 2, after computing `imminent`, fetch each imminent id's task via bus.get (skip ones that raise/are missing) and merge them into `tasks`; also compute critical_path.explain(tid, tasks, durations) for each imminent id and merge into the `priorities` dict passed to capacity.admit, matching the contract in tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot.",
+      "In step 7, pin 'first candidate' to a specific list (e.g. candidate_ids[0] before any wave filtering) so the decision row's subject is deterministic across shadow/active mode."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789980692.604104,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0651",
+      "claimed_at": 1789980692.603641
+    },
+    {
+      "ts": 1789980692.6056871,
+      "account": "B"
+    },
+    {
+      "ts": 1789980693.211515,
+      "pid": 18025,
+      "account": "B"
+    },
+    {
+      "ts": 1789980922.946505,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Step 2 computes `imminent` as queued execute ids not in candidate_ids, then calls capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent, cfg=scheduler). But `tasks` is built by _wave_tasks over candidates+running plus depends_on ancestors and role=execute dependents of the *candidates*, and `priorities` (wave_row['priority']) is keyed only over candidate_ids. An imminent task by definition depends on work that is already merged or done+gated, not on a current candidate, so it will typically be absent from both dicts. capacity.admit's own contract (tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot) requires the imminent id to be present in `tasks` (for eligible_executors_from_snapshot, capacity.py:113-115: task is None -> skipped) and in `priorities` (capacity.py:68-72 _priority defaults missing ids to 0). If the imminent id is missing from `tasks`, admit never builds an imminent_sets entry for it; if it's missing from `priorities`, its priority reads as 0, which will be lower than any real candidate's critical-path priority, so the '> ' comparison in the reservation loop (capacity.py:140) never fires either way. The reserved_for_critical mechanism this integration is supposed to activate (AP P6, T-0598) becomes a permanent no-op for genuine out-of-band imminent demand, and acceptance test test_dispatch_active_applies_admission_then_limit (which asserts a reserved_for_critical deferral) cannot pass without the executor inventing an undocumented step.",
+            "severity": "high",
+            "line": 692
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Step 7's decision_log.record subject is described only as 'the parent goal id of the first candidate or its task id' with no rule for which ordering ('first candidate' of candidate_ids, wave_order, or dispatched_ids) to use; since these can differ once admission/pressure/concurrency reorder or drop ids, two correct implementations could log different subjects for the same tick, which will fragment decision_log.explain() lookups by goal.",
+            "severity": "low",
+            "line": 804
+          }
+        ],
+        "suggested_spec_changes": [
+          "In step 2, after computing `imminent`, fetch each imminent id's task via bus.get (skip ones that raise/are missing) and merge them into `tasks`; also compute critical_path.explain(tid, tasks, durations) for each imminent id and merge into the `priorities` dict passed to capacity.admit, matching the contract in tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot.",
+          "In step 7, pin 'first candidate' to a specific list (e.g. candidate_ids[0] before any wave filtering) so the decision row's subject is deterministic across shadow/active mode."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789980922.948522,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Step 2 computes `imminent` as queued execute ids not in candidate_ids, then calls capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent, cfg=scheduler). But `tasks` is built by _wave_tasks over candidates+running plus depends_on ancestors and role=execute dependents of the *candidates*, and `priorities` (wave_row['priority']) is keyed only over candidate_ids. An imminent task by definition depends on work that is already merged or done+gated, not on a current candidate, so it will typically be absent from both dicts. capacity.admit's own contract (tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot) requires the imminent id to be present in `tasks` (for eligible_executors_from_snapshot, capacity.py:113-115: task is None -> skipped) and in `priorities` (capacity.py:68-72 _priority defaults missing ids to 0). If the imminent id is missing from `tasks`, admit never builds an imminent_sets entry for it; if it's missing from `priorities`, its priority reads as 0, which will be lower than any real candidate's critical-path priority, so the '> ' comparison in the reservation loop (capacity.py:140) never fires either way. The reserved_for_critical mechanism this integration is supposed to activate (AP P6, T-0598) becomes a permanent no-op for genuine out-of-band imminent demand, and acceptance test test_dispatch_active_applies_admission_then_limit (which asserts a reserved_for_critical deferral) cannot pass without the executor inventing an undocumented step.",
+          "severity": "high",
+          "line": 692
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Step 7's decision_log.record subject is described only as 'the parent goal id of the first candidate or its task id' with no rule for which ordering ('first candidate' of candidate_ids, wave_order, or dispatched_ids) to use; since these can differ once admission/pressure/concurrency reorder or drop ids, two correct implementations could log different subjects for the same tick, which will fragment decision_log.explain() lookups by goal.",
+          "severity": "low",
+          "line": 804
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789980692.603641,
+  "account": "B",
+  "pid": 18025,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Step 2 computes `imminent` as queued execute ids not in candidate_ids, then calls capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent, cfg=scheduler). But `tasks` is built by _wave_tasks over candidates+running plus depends_on ancestors and role=execute dependents of the *candidates*, and `priorities` (wave_row['priority']) is keyed only over candidate_ids. An imminent task by definition depends on work that is already merged or done+gated, not on a current candidate, so it will typically be absent from both dicts. capacity.admit's own contract (tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot) requires the imminent id to be present in `tasks` (for eligible_executors_from_snapshot, capacity.py:113-115: task is None -> skipped) and in `priorities` (capacity.py:68-72 _priority defaults missing ids to 0). If the imminent id is missing from `tasks`, admit never builds an imminent_sets entry for it; if it's missing from `priorities`, its priority reads as 0, which will be lower than any real candidate's critical-path priority, so the '> ' comparison in the reservation loop (capacity.py:140) never fires either way. The reserved_for_critical mechanism this integration is supposed to activate (AP P6, T-0598) becomes a permanent no-op for genuine out-of-band imminent demand, and acceptance test test_dispatch_active_applies_admission_then_limit (which asserts a reserved_for_critical deferral) cannot pass without the executor inventing an undocumented step.",
+      "severity": "high",
+      "line": 692
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Step 7's decision_log.record subject is described only as 'the parent goal id of the first candidate or its task id' with no rule for which ordering ('first candidate' of candidate_ids, wave_order, or dispatched_ids) to use; since these can differ once admission/pressure/concurrency reorder or drop ids, two correct implementations could log different subjects for the same tick, which will fragment decision_log.explain() lookups by goal.",
+      "severity": "low",
+      "line": 804
+    }
+  ]
+}

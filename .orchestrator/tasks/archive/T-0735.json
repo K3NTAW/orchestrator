@@ -1,0 +1,152 @@
+{
+  "id": "T-0735",
+  "created_at": 1790001588.559117,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Q5 v5: orchestrator/planner_scorecard.py + `scorecard --planner-routing` \u2014 Planner outcomes by model \u00d7 decision type \u00d7 band \u00d7 class \u00d7 architectural, non-inferiority evidence per class, economics (P7, P13, P16)",
+  "spec": "Why: no code joins Planner invocations to downstream engineering outcomes; premium_summary (planner_runs.py:843) counts launches and tokens only. The router (planner_router.py, merged) needs class_evidence and the brief (P7/P13/P16) a Planner scorecard with cold-start priors and a CLI. Three spec review rounds (T-0683, of T-0710, of T-0727) are folded in: producer named and a dependency (planner_telemetry.py, merged as T-0708), explicit min_samples source, literal criteria with correct signs, guarded telemetry import, terminal-state restriction, exclusive fix-round ownership, bare held task id. The Planner waived a fourth spec review. READ-SIDE: the scorecard stays empty in production until Wave B wires planner_runs to emit invocation rows.\nWhat: new module orchestrator/planner_scorecard.py plus cli.py flag `scorecard --planner-routing [--json]`.\n- Inputs: invocation rows via planner_telemetry.read_invocations_with_malformed(root) (rows merged by launch_id with fields launch_id, goal_id, kind, payload_keys, decision_type, model, tier, band, task_class, architectural, started_at, material, reescalation, total_tokens, usd, latency_s, outcome), bus tasks from root/tasks/*.json, spec_review and review tasks among them. Wrap `from . import planner_telemetry` in try/except ImportError so a missing module degrades to an empty card with card[\"error\"] = \"planner_telemetry unavailable\". Malformed lines counted in card[\"malformed\"].\n- min_samples: explicit parameter wins; else cfg planner.routing.min_samples when int (table may be absent); else cfg promotion.min_samples; else 20.\n- Ownership (every owned task id appears in exactly one invocation's set): (1) a root execute task (no constraints.fix_round_for) belongs to the invocation of the same goal with the latest started_at <= the root's created_at (none -> unowned); (2) a fix-round task (constraints.fix_round_for set) belongs to the kind == \"held\" invocation of the same goal whose payload_keys[0] equals its fix_round_for target and whose started_at <= the fix round's created_at, choosing the latest such invocation; when no such held invocation exists it belongs to its lineage root's owner (attribution.lineage(task)[\"root\"]). Wave B contract: a held invocation's payload_keys[0] is the bare held task id (no colon), so compare it directly.\n- Terminal roots: merged_into set, or status == \"failed\", or pipeline.first_green_at present. first_pass_rate, fix_round_rate and avg_fix_rounds use terminal roots only (in-flight roots excluded); downstream_accepted_rate counts all owned roots (unresolved = not accepted). Fix-round counts per root come from the root's fix-round children regardless of which invocation owns them.\n- group_key(row) -> f\"{model}|{decision_type}|{band}|{task_class}|{'arch' if architectural else 'plain'}\".\n- build(root=STATE, *, cfg=None, min_samples=None) -> {\"groups\": {key: metrics}, \"n\", \"malformed\", \"min_samples\", \"read_side_only\": True}; metrics per group: n, material_rate, downstream_accepted_rate, first_pass_rate (terminal roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children), fix_round_rate, avg_fix_rounds, gate_red_rate (pipeline.gate_reds > 0 over owned tasks), review_request_changes_rate (review tasks whose inputs[0] is an owned id, verdict from review_verdict or result.verdict == request_changes), spec_review_approval_rate (same for spec_review, verdict approve), replanning_rate (a later invocation of the same goal with decision_type architectural_replan), reescalation_rate (rows reescalation True), human_intervention_rate (None unless planner_telemetry.interactive_by_goal returns a row for the goal with a day after started_at; call wrapped in try/except Exception -> None), tokens_mean, usd_mean, latency_mean, terminal_roots, evidence \"sufficient\"|\"insufficient\" (n >= min_samples).\n- Thresholds: CRITERIA_MAP = {\"first_pass_rate\": (\"first_pass_delta\", \">=\", -0.02), \"avg_fix_rounds\": (\"fix_rounds_delta\", \"<=\", 0.05), \"gate_success\": (\"gate_success_delta\", \">=\", -0.02)} read from promotion.CRITERIA by those keys (overridable via cfg[\"promotion\"]); REVIEW_CHANGES_MAX_DELTA = 0.10 with \"<=\" is this module's own constant (promotion's review_findings_delta is NOT used); REESCALATION_MAX = 0.2; gate_success = 1 - gate_red_rate. An equal candidate/baseline pair passes every comparison.\n- class_evidence(model, decision_type, band, task_class, architectural, *, root=STATE, cfg=None, min_samples=None) -> {\"n\", \"noninferior\": True|False|None, \"deltas\", \"failed\", \"reescalation_rate\", \"baseline_model\"}: baseline group = same class with model == cfg [models].planner (fallback: rows with tier fable). None when either group has n < min_samples; False when any comparison fails or reescalation_rate > REESCALATION_MAX (failed lists \"reescalation\"); True otherwise. Tokens, usd, latency never enter the verdict.\n- economics(root=STATE) -> per model {\"planner_usd_per_accepted_goal\", \"planner_tokens_per_accepted_goal\", \"pipeline_usd_after_planning\" (mean over invocations of the sum of scorecard.by_task usd for owned tasks), \"expected_total_cost_after_planning\": {decision_type: mean(planner usd + pipeline usd)}}; accepted goals via scorecard.accepted_goals(root).\n- format(card) -> text table sorted by key with a first line 'read-side only: rows appear once planner_runs emits invocations' when n == 0; format_evidence(evidence) one line. cli.py: `sc.add_argument(\"--planner-routing\", action=\"store_true\")`, dispatch to build/format (json with --json), ap.error when combined with --planner or --parallelism.",
+  "inputs": [
+    "T-0730"
+  ],
+  "acceptance": [
+    "tests/test_planner_scorecard.py::test_groups_by_model_type_band_class_arch \u2014 rows written with planner_telemetry.record_launch/record_usage/record_materiality under a sandbox root for two models and two decision types produce four group keys with n, material_rate and downstream_accepted_rate from owned tasks",
+    "tests/test_planner_scorecard.py::test_ownership_is_exclusive_terminal_roots_and_fix_rounds \u2014 root T1 created after invocation A belongs to A; its fix round T2 created after held invocation B with payload_keys [T1] belongs to B and not A; a fix round with no matching held invocation belongs to its root's owner; no task id appears in two owned sets; an in-flight root (no merged_into, not failed, no first_green_at) is excluded from first_pass_rate and fix_round_rate but counted as not accepted",
+    "tests/test_planner_scorecard.py::test_class_evidence_noninferior_equivalent_worse_and_insufficient \u2014 opus identical to fable (all deltas 0) gives noninferior True with failed empty; first_pass_rate 0.3 lower gives False naming first_pass_rate; review_request_changes_rate 0.3 higher gives False naming review_request_changes_rate; n below min_samples gives None; a group with 1e9 tokens and 0 usd changes no verdict",
+    "tests/test_planner_scorecard.py::test_reescalation_penalises_class \u2014 reescalation_rate 0.5 on an otherwise equal class gives noninferior False with failed containing reescalation",
+    "tests/test_planner_scorecard.py::test_cli_flag_min_samples_source_and_malformed_tolerance \u2014 `scorecard --planner-routing --json` under a sandbox root prints a card with read_side_only True, groups and malformed 1 for a runs dir containing one malformed line; min_samples comes from [planner.routing] when present, else [promotion], else 20; a patched ImportError for planner_telemetry yields card error text instead of a crash"
+  ],
+  "scope": [
+    "orchestrator/planner_scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0735",
+  "codex_thread": null,
+  "result": {
+    "summary": "Diff matches the spec and all five acceptance tests are present with substantive assertions: group_key format, ownership exclusivity (root/held/fix-round/lineage-fallback), terminal-root gating of first_pass/fix_round rates, class_evidence noninferiority logic (criteria from promotion.CRITERIA, module-local REVIEW_CHANGES_MAX_DELTA, reescalation gate, tokens/usd/latency excluded from verdict), and the CLI flag with correct min_samples precedence (explicit > planner.routing > promotion > 20) and ImportError fallback to an error card. _lineage_root reimplements attribution.lineage's walk locally instead of calling it directly, but that's necessary to respect the passed root parameter (attribution.lineage uses bus.get against the default root) rather than a defect. No security concerns: read-only module, no new deps, no secrets, errors fail closed to an empty/error card.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "6a5fa1da11e0",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790001588.560129,
+      "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326"
+    },
+    {
+      "ts": 1790001592.775724,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0735",
+      "claimed_at": 1790001592.774862
+    },
+    {
+      "ts": 1790001592.77968,
+      "account": "B"
+    },
+    {
+      "ts": 1790001593.6294248,
+      "pid": 37058,
+      "account": "B"
+    },
+    {
+      "ts": 1790001783.318157,
+      "status": "done",
+      "result": {
+        "summary": "Diff matches the spec and all five acceptance tests are present with substantive assertions: group_key format, ownership exclusivity (root/held/fix-round/lineage-fallback), terminal-root gating of first_pass/fix_round rates, class_evidence noninferiority logic (criteria from promotion.CRITERIA, module-local REVIEW_CHANGES_MAX_DELTA, reescalation gate, tokens/usd/latency excluded from verdict), and the CLI flag with correct min_samples precedence (explicit > planner.routing > promotion > 20) and ImportError fallback to an error card. _lineage_root reimplements attribution.lineage's walk locally instead of calling it directly, but that's necessary to respect the passed root parameter (attribution.lineage uses bus.get against the default root) rather than a defect. No security concerns: read-only module, no new deps, no secrets, errors fail closed to an empty/error card.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "6a5fa1da11e0",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790001783.319207,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790001783.369086,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+        "packet_version": "6a5fa1da11e0",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+      "packet_version": "6a5fa1da11e0",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+  "claimed_at": 1790001592.774862,
+  "account": "B",
+  "pid": 37058,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "f2600e4ad3b7dc8b940c95db00ad5b542da92326",
+    "packet_version": "6a5fa1da11e0",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "6a5fa1da11e0",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

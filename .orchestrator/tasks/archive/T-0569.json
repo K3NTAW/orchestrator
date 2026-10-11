@@ -1,0 +1,170 @@
+{
+  "id": "T-0569",
+  "created_at": 1789970918.012054,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R4: orchestrator/concurrency.py \u2014 adaptive concurrency limit 0..hard_max from independence, critical path, capacity and merge pressure, with logged reasons (AP P13)",
+  "spec": "Why: daemon.dispatch fills wave_limit = min(slots, max_wave or slots) (orchestrator/daemon.py:690) \u2014 concurrency is always the hard maximum. AP P13 / brief P8 want a selected concurrency below the hard cap derived from evidence, never above it.\nWhat: new pure module orchestrator/concurrency.py; no daemon edits.\n- compatible_groups(ready_ids, pairwise_rows) -> list of lists: connected components over pairs with level hard or soft (rows shaped like interference.pairwise: {a, b, level, reasons}); singletons are independent tasks.\n- select_limit(hard_max, ready_ids, tasks, pairwise_rows, priorities, snapshot=None, pressure=None, durations=None, cfg=None) -> {\"hard_max\", \"limit\", \"reasons\": [strings], \"tasks_considered\": ready_ids, \"expected_benefit_s\", \"groups\": n_groups}. Rules, each appended to reasons when it binds: no ready work -> 0 (\"no_ready\"); limit starts at hard_max (\"hard_max=N\"); independent bound: at most one task per compatible group, so limit <= number of groups (\"compatible_groups=k\"); coupled group of size >= 3 with only hard edges -> limit 1 for that group (\"coupled_group:<ids>\"); shared-interface or migration reasons (reason kinds interface, migration, same_glob, glob_covers) -> conservative: limit <= max(1, groups-1) (\"shared_interface\"); capacity bound from snapshot: sum of executor free (or claude_workers_free in fallback) (\"capacity=m\"); pressure saturated -> limit <= max(1, independent singletons) (\"merge_pressure=saturated\"); cfg concurrency_mode = \"fixed\"|\"adaptive\" (default adaptive; fixed returns hard_max with reason \"fixed\"); minimum 1 when ready work exists and capacity > 0. Never exceed hard_max.\n- expected_benefit_s = sum(est durations of the first `limit` ranked tasks) - max(those) using durations dict or critical_path.est_duration_s priors.\n- log_row(result, wave_ids=None) -> dict ready for schedlog.append('concurrency', ...) with keys hard_max, limit, reasons, tasks_considered, expected_benefit_s, selected (wave_ids), observed_outcome None.",
+  "inputs": [
+    "T-0568"
+  ],
+  "acceptance": [
+    "tests/test_concurrency.py::test_coupled_group_selects_low_concurrency \u2014 four ready tasks all pairwise hard-coupled yield limit 1 with a coupled_group reason",
+    "tests/test_concurrency.py::test_independent_modules_select_higher_concurrency \u2014 five ready tasks with no interference and hard_max 4 yield limit 4 and reason hard_max binds",
+    "tests/test_concurrency.py::test_hard_max_is_never_exceeded \u2014 twenty independent tasks and hard_max 3 yield limit 3",
+    "tests/test_concurrency.py::test_no_ready_work_yields_zero \u2014 empty ready set yields limit 0 and reason no_ready",
+    "tests/test_concurrency.py::test_quota_and_merge_pressure_bound_the_limit \u2014 snapshot with 2 free executor slots bounds limit to 2 with a capacity reason; pressure saturated with one independent task bounds to 1 with merge_pressure=saturated; log_row carries hard_max, limit, reasons, tasks_considered, expected_benefit_s"
+  ],
+  "scope": [
+    "orchestrator/concurrency.py",
+    "tests/test_concurrency.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0569",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": ".orchestrator/adaptive-parallelism-program.md",
+        "issue": "select_limit's 'coupled group of size >= 3 with only hard edges -> limit 1' rule is applied as a single global scalar limit, so any one hard-coupled cluster in the ready set forces the entire wave to 1 even when other independent compatible_groups exist and are ready. This directly contradicts P13's own example ('five independent modules -> higher') and defeats the goal of the module. The only acceptance test for this rule (test_coupled_group_selects_low_concurrency) has zero independent groups present, so the conflict with independent work is never exercised.",
+        "severity": "high",
+        "line": 61
+      },
+      {
+        "path": "orchestrator/interference.py",
+        "issue": "The spec's shared-interface rule keys on reason kinds 'interface' and 'migration', neither of which interference.classify ever produces (hard kinds are dependency/same_file/glob_covers/same_glob; soft kinds are dir_contains/same_dir/test_adjacent/sibling_globs/graph_link). As written the branch is only reachable via same_glob/glob_covers, which are already hard edges folded into compatible_groups/coupled_group, so this rule is effectively dead code against real pairwise_rows and no acceptance test covers it.",
+        "severity": "med",
+        "line": 214
+      },
+      {
+        "path": ".orchestrator/adaptive-parallelism-program.md",
+        "issue": "Spec's Why cites 'brief P8' for the concurrency-selection motivation, but P8 is 'Scout result structure' (unrelated). The relevant sections are P13 (Adaptive parallelism) for the core rule and P11 (Merge-pressure awareness) for the merge_pressure signal.",
+        "severity": "low",
+        "line": 46
+      }
+    ],
+    "suggested_spec_changes": [
+      "Clarify whether the coupled-group-size>=3 rule should throttle only that group's contribution (e.g. cap it at 1 within compatible_groups accounting, letting other groups still count toward limit) or is intentionally meant to serialize the whole wave whenever any large hard cluster is ready; add a test mixing one coupled cluster of 3+ with several independent singletons to pin down the intended behavior.",
+      "Drop 'interface' and 'migration' from the shared-interface reason-kind list (or mark them explicitly as reserved for a future interference.py extension not yet implemented), and add an acceptance test that exercises the shared_interface bound using reason kinds interference.py actually emits (same_glob/glob_covers) at group size 2.",
+      "Fix the Why line to reference P13 (and P11 for merge_pressure) instead of P8."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789970920.418449,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0569",
+      "claimed_at": 1789970920.416503
+    },
+    {
+      "ts": 1789970920.4246569,
+      "account": "B"
+    },
+    {
+      "ts": 1789970922.3845592,
+      "pid": 70153,
+      "account": "B"
+    },
+    {
+      "ts": 1789971058.239531,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": ".orchestrator/adaptive-parallelism-program.md",
+            "issue": "select_limit's 'coupled group of size >= 3 with only hard edges -> limit 1' rule is applied as a single global scalar limit, so any one hard-coupled cluster in the ready set forces the entire wave to 1 even when other independent compatible_groups exist and are ready. This directly contradicts P13's own example ('five independent modules -> higher') and defeats the goal of the module. The only acceptance test for this rule (test_coupled_group_selects_low_concurrency) has zero independent groups present, so the conflict with independent work is never exercised.",
+            "severity": "high",
+            "line": 61
+          },
+          {
+            "path": "orchestrator/interference.py",
+            "issue": "The spec's shared-interface rule keys on reason kinds 'interface' and 'migration', neither of which interference.classify ever produces (hard kinds are dependency/same_file/glob_covers/same_glob; soft kinds are dir_contains/same_dir/test_adjacent/sibling_globs/graph_link). As written the branch is only reachable via same_glob/glob_covers, which are already hard edges folded into compatible_groups/coupled_group, so this rule is effectively dead code against real pairwise_rows and no acceptance test covers it.",
+            "severity": "med",
+            "line": 214
+          },
+          {
+            "path": ".orchestrator/adaptive-parallelism-program.md",
+            "issue": "Spec's Why cites 'brief P8' for the concurrency-selection motivation, but P8 is 'Scout result structure' (unrelated). The relevant sections are P13 (Adaptive parallelism) for the core rule and P11 (Merge-pressure awareness) for the merge_pressure signal.",
+            "severity": "low",
+            "line": 46
+          }
+        ],
+        "suggested_spec_changes": [
+          "Clarify whether the coupled-group-size>=3 rule should throttle only that group's contribution (e.g. cap it at 1 within compatible_groups accounting, letting other groups still count toward limit) or is intentionally meant to serialize the whole wave whenever any large hard cluster is ready; add a test mixing one coupled cluster of 3+ with several independent singletons to pin down the intended behavior.",
+          "Drop 'interface' and 'migration' from the shared-interface reason-kind list (or mark them explicitly as reserved for a future interference.py extension not yet implemented), and add an acceptance test that exercises the shared_interface bound using reason kinds interference.py actually emits (same_glob/glob_covers) at group size 2.",
+          "Fix the Why line to reference P13 (and P11 for merge_pressure) instead of P8."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971058.24102,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/adaptive-parallelism-program.md",
+          "issue": "select_limit's 'coupled group of size >= 3 with only hard edges -> limit 1' rule is applied as a single global scalar limit, so any one hard-coupled cluster in the ready set forces the entire wave to 1 even when other independent compatible_groups exist and are ready. This directly contradicts P13's own example ('five independent modules -> higher') and defeats the goal of the module. The only acceptance test for this rule (test_coupled_group_selects_low_concurrency) has zero independent groups present, so the conflict with independent work is never exercised.",
+          "severity": "high",
+          "line": 61
+        },
+        {
+          "path": "orchestrator/interference.py",
+          "issue": "The spec's shared-interface rule keys on reason kinds 'interface' and 'migration', neither of which interference.classify ever produces (hard kinds are dependency/same_file/glob_covers/same_glob; soft kinds are dir_contains/same_dir/test_adjacent/sibling_globs/graph_link). As written the branch is only reachable via same_glob/glob_covers, which are already hard edges folded into compatible_groups/coupled_group, so this rule is effectively dead code against real pairwise_rows and no acceptance test covers it.",
+          "severity": "med",
+          "line": 214
+        },
+        {
+          "path": ".orchestrator/adaptive-parallelism-program.md",
+          "issue": "Spec's Why cites 'brief P8' for the concurrency-selection motivation, but P8 is 'Scout result structure' (unrelated). The relevant sections are P13 (Adaptive parallelism) for the core rule and P11 (Merge-pressure awareness) for the merge_pressure signal.",
+          "severity": "low",
+          "line": 46
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789970920.416503,
+  "account": "B",
+  "pid": 70153,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/adaptive-parallelism-program.md",
+      "issue": "select_limit's 'coupled group of size >= 3 with only hard edges -> limit 1' rule is applied as a single global scalar limit, so any one hard-coupled cluster in the ready set forces the entire wave to 1 even when other independent compatible_groups exist and are ready. This directly contradicts P13's own example ('five independent modules -> higher') and defeats the goal of the module. The only acceptance test for this rule (test_coupled_group_selects_low_concurrency) has zero independent groups present, so the conflict with independent work is never exercised.",
+      "severity": "high",
+      "line": 61
+    },
+    {
+      "path": "orchestrator/interference.py",
+      "issue": "The spec's shared-interface rule keys on reason kinds 'interface' and 'migration', neither of which interference.classify ever produces (hard kinds are dependency/same_file/glob_covers/same_glob; soft kinds are dir_contains/same_dir/test_adjacent/sibling_globs/graph_link). As written the branch is only reachable via same_glob/glob_covers, which are already hard edges folded into compatible_groups/coupled_group, so this rule is effectively dead code against real pairwise_rows and no acceptance test covers it.",
+      "severity": "med",
+      "line": 214
+    },
+    {
+      "path": ".orchestrator/adaptive-parallelism-program.md",
+      "issue": "Spec's Why cites 'brief P8' for the concurrency-selection motivation, but P8 is 'Scout result structure' (unrelated). The relevant sections are P13 (Adaptive parallelism) for the core rule and P11 (Merge-pressure awareness) for the merge_pressure signal.",
+      "severity": "low",
+      "line": 46
+    }
+  ]
+}

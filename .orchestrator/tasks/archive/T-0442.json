@@ -1,0 +1,142 @@
+{
+  "id": "T-0442",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 2,
+  "title": "H3b v4 fix round 1: routine_close runs gh outside bus.locked() and holds the lock only for bus updates; both call sites read [planner.routes].enabled with the same default (review T-0441)",
+  "spec": "STEP 0: the worktree must contain f2a1cf1 (T-0439, H3b v4) in git log; never drop or amend it.\nReview T-0441 on T-0439, both findings to address:\n1. (high) orchestrator/planner_runs.py:1301 routine_close calls _open_pr(goal) (two gh subprocess calls, 60 s timeout each) inside the with bus.locked() block opened at line 1283; a slow gh holds the cross-process bus lock for up to two minutes and stalls dispatch, gate, merge and any attached Planner session. Fix: take the lock only for the stamp (closed_at) and for each bus.update or bus.post_result; run every gh call and the retrospective record script outside the lock; re-read the goal under the lock before each effect so the evidence checks stay correct. Test: tests/test_planner_runs.py::test_routine_close_runs_gh_outside_bus_lock (patch the gh runner to assert bus.locked is not held while it runs, e.g. by trying a non-blocking lock acquisition inside the mock).\n2. (low) orchestrator/daemon.py:176 auto_fix_round reads .get(\"routes\", {}).get(\"enabled\", False) while decision.route and the pool.toml comment treat a missing key as True. Fix: one helper routes_enabled(cfg) in decision.py (default True, matching the documented behaviour) used by daemon.auto_fix_round, planner_runs and decision.route. Test: tests/test_decision.py::test_routes_enabled_default_true_shared_by_callers.\nKeep every T-0439 test green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0439",
+    "T-0441"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f2a1cf1 below your commit",
+    "tests/test_planner_runs.py::test_routine_close_runs_gh_outside_bus_lock passes and grep shows no gh call inside a with bus.locked() block in planner_runs.py",
+    "tests/test_decision.py::test_routes_enabled_default_true_shared_by_callers passes and grep shows daemon.py, planner_runs.py and decision.py all use routes_enabled",
+    "the nineteen T-0439 acceptance tests still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/decision.py",
+    "tests/test_planner_runs.py",
+    "tests/test_decision.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 1200,
+    "fix_round_for": "T-0439",
+    "task_class": "routing"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0442",
+  "codex_thread": "01a0bf62-5bff-7373-b264-e8da179c2c1a",
+  "result": {
+    "summary": "Committed `cdc21db`; `f2a1cf1` remains directly below it.\nMoved close effects outside the bus lock and unified routing defaults.\nAll 629 tests passed; working tree clean.\n\n```text\n orchestrator/daemon.py       |  4 ++--\n orchestrator/decision.py     |  7 ++++++-\n orchestrator/planner_runs.py | 28 ++++++++++++++++++++--------\n tests/test_decision.py       | 21 +++++++++++++++++++++\n tests/test_planner_runs.py   | 41 +++++++++++++++++++++++++++++++++++++++++\n 5 files changed, 90 insertions(+), 11 deletions(-)\n```\n\nFailures-only output:\n```text\n/bin/bash: scripts/tests_green.sh: No such file or directory\n```\n\nUsed `.claude/hooks/tests-green.sh`: exit 0, no test failures.",
+    "executed_by": "codex:astra",
+    "thread": "01a0bf62-5bff-7373-b264-e8da179c2c1a",
+    "usage": {
+      "input_tokens": 501211,
+      "cached_input_tokens": 436608,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 3520,
+      "reasoning_output_tokens": 645
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789917287.962229,
+      "pipeline": {
+        "dispatched_at": 1789917287.962191
+      }
+    },
+    {
+      "ts": 1789917289.427199,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0442",
+      "claimed_at": 1789917289.426917
+    },
+    {
+      "ts": 1789917289.428208,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789917472.000111,
+      "codex_thread": "01a0bf62-5bff-7373-b264-e8da179c2c1a"
+    },
+    {
+      "ts": 1789917472.002778,
+      "status": "done",
+      "result": {
+        "summary": "Committed `cdc21db`; `f2a1cf1` remains directly below it.\nMoved close effects outside the bus lock and unified routing defaults.\nAll 629 tests passed; working tree clean.\n\n```text\n orchestrator/daemon.py       |  4 ++--\n orchestrator/decision.py     |  7 ++++++-\n orchestrator/planner_runs.py | 28 ++++++++++++++++++++--------\n tests/test_decision.py       | 21 +++++++++++++++++++++\n tests/test_planner_runs.py   | 41 +++++++++++++++++++++++++++++++++++++++++\n 5 files changed, 90 insertions(+), 11 deletions(-)\n```\n\nFailures-only output:\n```text\n/bin/bash: scripts/tests_green.sh: No such file or directory\n```\n\nUsed `.claude/hooks/tests-green.sh`: exit 0, no test failures.",
+        "executed_by": "codex:astra",
+        "thread": "01a0bf62-5bff-7373-b264-e8da179c2c1a",
+        "usage": {
+          "input_tokens": 501211,
+          "cached_input_tokens": 436608,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3520,
+          "reasoning_output_tokens": 645
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789917542.448386,
+      "pipeline": {
+        "dispatched_at": 1789917287.962191,
+        "gated_at": 1789917542.4483042,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789917707.315122,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789917730.3775601,
+      "pipeline": {
+        "dispatched_at": 1789917287.962191,
+        "gated_at": 1789917542.4483042,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789917730.377496
+      }
+    },
+    {
+      "ts": 1789917802.421528,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "sha": "cdc21db2ccd6cfc79f4b534e50d84dd0fdcbe60b"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789917287.962191,
+    "gated_at": 1789917542.4483042,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789917730.377496
+  },
+  "claimed_at": 1789917289.426917,
+  "rounds": 0,
+  "executor": "astra",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0353",
+  "sha": "cdc21db2ccd6cfc79f4b534e50d84dd0fdcbe60b"
+}

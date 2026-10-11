@@ -1,0 +1,180 @@
+{
+  "id": "T-0923",
+  "created_at": 1790115757.573781,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S3: dynamic skill disclosure in shadow: per worker spawn compute the smallest useful skill set (deterministic candidates \u2192 cap), log it as the skill_selection decision next to the static exposure, measure the token delta; exposure unchanged (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P8 (steps 1-4 and 7), P10, P29, P30 (P37 stage 3). Depends on T-0894 (skill telemetry: skills_exposed/skills_used/skill tokens in run context, skill_selection decision rows, skill_scorecard) and T-0867 (skills_registry.candidates(task, role), render(id, level), compact skills with declared triggers/task_classes/tools/requires_context). Facts: exposure today is static (all active registry skills for the role); the context program's promotion.mode() reads per-feature modes from pool.toml; decision_log kind skill_selection exists after S1b.\nDo:\n1. pool.toml: add `[skills] mode = \"shadow\"` (off | shadow | active; dated comment; revert: off) and `max_selected = 3`; promotion.FEATURES gains \"skill_routing\" (table skills, key mode, default shadow) with an evidence loader returning n = skill_selection rows carrying a minimal set (stay until Stage 4 scorecards provide quality deltas).\n2. orchestrator/skill_router.py (new): `select(task, role, cfg=None, history=None) -> {\"candidates\": [...], \"selected\": [ids], \"rejected\": [{\"id\", \"reason\"}], \"reason\", \"tokens_exposed_l0\", \"tokens_selected_l0\", \"tokens_selected_l2\", \"ambiguous\": [ids]}`. Deterministic rules: role-only skills that the role's prompt relies on are mandatory (implement-spec for executors, adversarial-review for review/spec_review, challenge for challenge, memory + orchestrate + resume + write-spec for planner, repo-map/test-gap/trace-callers only when their triggers match, classify/compact-memory only for triage); trigger matches from skills_registry.candidates rank next; cap at max_selected keeping mandatory first; candidates with a single weak trigger match (one keyword) go to \"ambiguous\" (reserved for Jev in Stage 9) and are excluded from selected in shadow; `history` (Stage 4 scorecard rows) is accepted but unused until Stage 4 fills it. Never returns an empty set for a role that has a mandatory skill.\n3. Shadow wiring: in spawn.run_worker and the Codex dispatch path, when [skills] mode is shadow or active (active treated as shadow with a one-time notify warning until Stage 5), call skill_router.select and (a) extend the skill_selection decision row from S1b: candidates = registry ids for the role, deterministic = {\"triggers\": matched per candidate, \"task_class\", \"mandatory\": ids}, selected = the minimal set, rejected = the rest with reasons, extra = {\"tokens_exposed_l0\", \"tokens_selected_l0\", \"tokens_selected_l2\", \"ambiguous\"}, mode = the mode; (b) add skills_selected and skill_tokens_selected_l0/l2 to packet_meta so bus.log_run carries them (bus.py copied keys). Worker exposure stays the static set; nothing in .claude/skills, prompts or AGENTS.md changes.\n4. Recovery signal (P30 skill recovery rate): after completion, compare skills_used (S1b) with skills_selected: a used skill that was not selected is a \"skill_recovery\"; record it in decision_log.outcome for the skill_selection row and count it in skill_scorecard as skill_recovery_rate per role (recoveries / spawns with a selection). Also skill_reduction = 1 - tokens_selected_l0 / tokens_exposed_l0 per role.\n5. `orchestrator scorecard --skills` shows selected-set size avg, skill_reduction and skill_recovery_rate; `--economy` skills block includes them. docs/skill-intelligence/04-routing.md (\u226460 lines): the rules, mandatory table, what shadow logs, what active will do (Stage 5), revert path.\nTests (unittest): tests/test_skill_router.py::test_executor_gets_implement_spec_mandatory_and_nothing_irrelevant, ::test_scout_who_calls_task_selects_trace_callers_not_repo_map, ::test_cap_keeps_mandatory_first, ::test_single_weak_match_goes_to_ambiguous_not_selected, ::test_never_empty_for_roles_with_mandatory; tests/test_spawn.py::test_skill_selection_row_and_meta_in_shadow_without_exposure_change (exposure list identical to mode off; decision row carries selected and rejected); tests/test_skill_scorecard.py::test_skill_recovery_rate_and_reduction. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 04:30) after spec review T-0909 (request_changes), binding on top of v1:\n- pool.toml: add the keys `mode = \"shadow\"` and `max_selected = 3` to the EXISTING [skills] table (created by the discovery task: trusted_repos, allowed_domains); never declare the table twice.\n- The cap applies to non-mandatory candidates only: mandatory skills for the role are always all selected (planner has four), then up to max_selected further candidates by trigger strength.\n- \"Weak match\" is defined by trigger strength, not by count: strength = number of words in the matched trigger phrase(s) summed over matches; a candidate whose total strength is 1 (a single one-word trigger such as \"impact\") is ambiguous; a multi-word phrase such as \"who calls\" has strength 2 and is a firm match. test_scout_who_calls_task_selects_trace_callers_not_repo_map therefore holds.\n- promotion.collect(): a new `if feature == \"skill_routing\":` branch counts skill_selection decision rows whose mode is shadow or active AND whose reason is not the stage-1 static reason (reason != \"stage1 static\"), so the legacy full-exposure rows are excluded; test tests/test_promotion.py::test_skill_routing_evidence_excludes_static_rows.",
+  "inputs": [
+    "T-0913"
+  ],
+  "acceptance": [
+    "tests/test_skill_router.py::test_executor_gets_implement_spec_mandatory_and_nothing_irrelevant passes",
+    "tests/test_skill_router.py::test_scout_who_calls_task_selects_trace_callers_not_repo_map passes",
+    "tests/test_skill_router.py::test_cap_keeps_mandatory_first passes",
+    "tests/test_skill_router.py::test_single_weak_match_goes_to_ambiguous_not_selected passes",
+    "tests/test_skill_router.py::test_never_empty_for_roles_with_mandatory passes",
+    "tests/test_spawn.py::test_skill_selection_row_and_meta_in_shadow_without_exposure_change passes",
+    "tests/test_skill_scorecard.py::test_skill_recovery_rate_and_reduction passes",
+    "pool.toml has [skills] mode = \"shadow\" and promotion.FEATURES has skill_routing; docs/skill-intelligence/04-routing.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_promotion.py::test_skill_routing_evidence_excludes_static_rows passes"
+  ],
+  "scope": [
+    "orchestrator/skill_router.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/bus.py",
+    "orchestrator/promotion.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/context_scorecard.py",
+    ".orchestrator/pool.toml",
+    "tests/test_skill_router.py",
+    "tests/test_spawn.py",
+    "tests/test_skill_scorecard.py",
+    "tests/test_promotion.py",
+    "docs/skill-intelligence/04-routing.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0923",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/skill_router.py",
+        "line": 10,
+        "issue": "MANDATORY maps role \"review\"/\"spec_review\" to skill id \"reviewer/adversarial-review\" and \"challenge\" to \"reviewer/challenge\", but the actual registry ids (skill_id = f\"{role}/{directory_name}\" from skills_registry.sync(), directories skills/review/adversarial-review and skills/review/challenge) are \"review/adversarial-review\" and \"review/challenge\" \u2014 there is no \"reviewer/*\" skill. Verified by running skills_registry.sync() against the real skills/ tree: it emits 'review/adversarial-review': roles ['review','spec_review'] and 'review/challenge': roles ['challenge']. For every review, spec_review, and challenge spawn in shadow mode, selected will contain a phantom id that is never actually exposed or used, so (a) token accounting silently zeroes out for that mandatory skill (records.get(id, {}) misses), and (b) the real used id (review/adversarial-review or review/challenge) will never match anything in skills_selected, so decision_log.outcome's skill_recovery diff fires on essentially every review/spec_review/challenge run \u2014 corrupting exactly the P30 skill_recovery_rate metric this task exists to produce for 3 of the ~6 routed roles. If Stage 5 later makes 'active' gate real exposure, reviewers/challengers would lose their mandatory skill entirely. The unit tests don't catch this because they use synthetic registries with ids that happen to match the (wrong) MANDATORY strings instead of syncing the real skills/ directory.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "5e44535e60d6",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790115757.574628,
+      "reviewed_sha": "5e607d62c4cd6784a2a19613e50c6614a196dda1"
+    },
+    {
+      "ts": 1790115761.125089,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0923",
+      "claimed_at": 1790115761.124744
+    },
+    {
+      "ts": 1790115761.126348,
+      "account": "B"
+    },
+    {
+      "ts": 1790115762.24287,
+      "pid": 59244,
+      "account": "B"
+    },
+    {
+      "ts": 1790116035.1638699,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/skill_router.py",
+            "line": 10,
+            "issue": "MANDATORY maps role \"review\"/\"spec_review\" to skill id \"reviewer/adversarial-review\" and \"challenge\" to \"reviewer/challenge\", but the actual registry ids (skill_id = f\"{role}/{directory_name}\" from skills_registry.sync(), directories skills/review/adversarial-review and skills/review/challenge) are \"review/adversarial-review\" and \"review/challenge\" \u2014 there is no \"reviewer/*\" skill. Verified by running skills_registry.sync() against the real skills/ tree: it emits 'review/adversarial-review': roles ['review','spec_review'] and 'review/challenge': roles ['challenge']. For every review, spec_review, and challenge spawn in shadow mode, selected will contain a phantom id that is never actually exposed or used, so (a) token accounting silently zeroes out for that mandatory skill (records.get(id, {}) misses), and (b) the real used id (review/adversarial-review or review/challenge) will never match anything in skills_selected, so decision_log.outcome's skill_recovery diff fires on essentially every review/spec_review/challenge run \u2014 corrupting exactly the P30 skill_recovery_rate metric this task exists to produce for 3 of the ~6 routed roles. If Stage 5 later makes 'active' gate real exposure, reviewers/challengers would lose their mandatory skill entirely. The unit tests don't catch this because they use synthetic registries with ids that happen to match the (wrong) MANDATORY strings instead of syncing the real skills/ directory.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "5e44535e60d6",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790116035.165418,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790116035.2211862,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "5e607d62c4cd6784a2a19613e50c6614a196dda1",
+        "packet_version": "5e44535e60d6",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "5e607d62c4cd6784a2a19613e50c6614a196dda1",
+      "packet_version": "5e44535e60d6",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "5e607d62c4cd6784a2a19613e50c6614a196dda1",
+  "claimed_at": 1790115761.124744,
+  "account": "B",
+  "pid": 59244,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "5e607d62c4cd6784a2a19613e50c6614a196dda1",
+    "packet_version": "5e44535e60d6",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "5e44535e60d6",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,494 @@
+{
+  "id": "T-1001",
+  "created_at": 1790153741.000173,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S1d context_scanner: deterministic hostile-content scanner (safe/suspicious/blocked with evidence) and trust classes with a fixed authority order on evidence objects (P19, P20)",
+  "spec": "Create orchestrator/context_scanner.py. scan(text, *, source_kind) -> {\"verdict\": \"safe\"|\"suspicious\"|\"blocked\", \"findings\": [{\"pattern\": name, \"line\": n, \"excerpt\": max 120 chars}], \"score\": int}. Pattern families (regex, case-insensitive, each with a weight): override_instructions (ignore/disregard previous or prior instructions, you are now, new system prompt), authority_claim (claims to be the system, the operator, the developer, or to have higher authority), credential_read (read/print/cat of dotenv files, the user's ssh or cloud-provider credential directories, tokens, api keys, passwords), exfiltration (curl/wget/nc/fetch of a URL with a variable, token or file attached; base64 pipe to network), permission_change (world-writable chmod, sudoers edits, disable safeguards, hooks, guardrails, permissions bypass), hidden_execution (shell execution hidden in HTML comments, markdown links or images with javascript: or data: schemes), invisible_unicode (zero-width space/joiner, bidi overrides, tag characters), hidden_html (html comments or display:none blocks containing instruction verbs). Scoring: blocked when any pattern of weight 3 hits (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode inside instruction text) or score >= 6; suspicious for score 2..5; safe below. Document text that merely describes these attacks (security docs, this scanner's own tests, review checklists) must scan safe or suspicious, never blocked, when the matches sit inside fenced code blocks or lines starting with a list marker followed by a pattern name or a quote; implement that as a context rule (code fences and quoted lines carry weight 0 for override_instructions and authority_claim). source_kind in (\"skill\", \"agents_md\", \"claude_md\", \"readme\", \"prompt\", \"mcp_description\", \"evidence\", \"other\") only tunes thresholds (skill and mcp_description: blocked threshold 4). Pure function, no I/O, no network, no LLM.\nTrust classes: TRUST_CLASSES = (\"SYSTEM\",\"TRUSTED_REPO\",\"LOCAL_USER\",\"EXTERNAL\",\"UNTRUSTED\") and authority(cls) -> int (SYSTEM 4 ... UNTRUSTED 0); may_override(lower, higher) -> False whenever authority(lower) < authority(higher). Jev is never consulted here.\norchestrator/evidence.py: add field trust_class to the evidence dataclass, set in make() from provenance (repo -> TRUSTED_REPO, memory -> LOCAL_USER, anything else -> EXTERNAL) and demoted to UNTRUSTED when scan(content, source_kind=\"evidence\")[\"verdict\"] == \"blocked\"; the scan result (verdict, pattern names only) is stored as field scan on the object and persisted; keep the existing trust field values as they are for compatibility. Existing evidence JSONL rows without the new fields must still load (default trust_class from provenance, scan None).\norchestrator/skill_discovery.py inspect(): run scan over every text file of the quarantined skill (SKILL.md first) with source_kind skill and add scan results to the inspection report (verdict per file, overall = worst); a blocked overall verdict is recorded in the report and the skill stays quarantined (no state change here; stage 2 hardening gates on it). CLI: `orchestrator scan <path> [--kind k] [--json]` prints the verdict and findings for a file (read-only). Docs: docs/hermes-hardening/04-context-scanner.md (pattern families, weights, thresholds, trust classes and the authority rule, known limitations: heuristic, not semantic). Test fixtures must be synthetic and must never contain credential-shaped strings (no key-like tokens); describe the attack in words.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-0995"
+  ],
+  "acceptance": [
+    "tests/test_context_scanner.py::test_blocks_override_and_exfiltration_patterns (malicious AGENTS.md, fake authority escalation, secret exfiltration instruction all blocked with findings naming the pattern and line)",
+    "tests/test_context_scanner.py::test_harmless_security_documentation_not_blocked (a review checklist and a docs page describing the attacks inside fences and quoted lines scan safe or suspicious)",
+    "tests/test_context_scanner.py::test_invisible_unicode_detected (zero-width and bidi characters inside instruction text block; inside a code fence only suspicious)",
+    "tests/test_context_scanner.py::test_authority_order_is_deterministic (may_override false for every lower class against every higher one)",
+    "tests/test_evidence.py::test_make_sets_trust_class_and_scan (repo, memory and external provenance mapping; blocked content demoted to UNTRUSTED; old rows load)",
+    "tests/test_skill_discovery.py::test_inspect_reports_scan_verdicts (a quarantined skill with an injection line reports blocked and stays quarantined)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/context_scanner.py",
+    "orchestrator/evidence.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/cli.py",
+    "tests/test_context_scanner.py",
+    "tests/test_evidence.py",
+    "tests/test_skill_discovery.py",
+    "docs/hermes-hardening/04-context-scanner.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1001",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/evidence.py",
+        "issue": "Evidence is a frozen dataclass with no defaulted fields, and EvidencePool.__init__ loads persisted rows via `Evidence(**row)` (line ~131). Old JSONL rows written before this change will lack `trust_class` and `scan` keys, so `Evidence(**row)` raises TypeError unless something backfills those keys first. The spec says 'default trust_class from provenance, scan None' for old rows but never names where that backfill happens (EvidencePool.__init__ is the only place the raw row dict is available before construction) and never says trust_class/scan need dataclass defaults to make positional construction in make() still work. Without an explicit insertion point this is a coin-flip for the implementer and directly risks failing tests/test_evidence.py::test_make_sets_trust_class_and_scan's 'old rows load' clause.",
+        "severity": "high",
+        "line": 131
+      },
+      {
+        "path": "orchestrator/skill_discovery.py",
+        "issue": "inspect() already runs its own regex-based CHECKS tuple, including a 'hidden-instructions' block-severity check (ignore previous / you are now / system prompt / HTML comments / invisible unicode / base64), with its own severity vocabulary (info/warn/block) and findings schema (id/severity/check/line/excerpt). The spec adds a second, independent scan() pass (verdict safe/suspicious/blocked, pattern/line/excerpt/score) over the same files without saying whether the old hidden-instructions CHECK is superseded, kept as redundant defense-in-depth, or reconciled into one schema. Two overlapping detectors with different vocabularies bolted onto the same findings.json report is the kind of inconsistency a reviewer would reject, and the acceptance test only asserts the new scan verdict, not how the two coexist.",
+        "severity": "med",
+        "line": 225
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify exactly where the trust_class/scan backfill for legacy rows happens (e.g. patch EvidencePool.__init__ to default missing keys from row['provenance'] before constructing Evidence, or give both new fields dataclass defaults and do the provenance-based backfill inline in __init__) so the 'old rows load' acceptance clause has a concrete implementation path.",
+      "Clarify the relationship between skill_discovery.py's existing CHECKS 'hidden-instructions' entry and the new context_scanner-based scan: either remove/narrow the old regex check to avoid duplicate detection, or state explicitly that both are intentionally kept and how their differing severity vocabularies should be presented in the same inspection report."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790153747.4763122,
+      "packet_meta": {
+        "chars": 6247,
+        "est_tokens": 1561,
+        "presented_tokens": 1561,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "9b9ff586ba3d5cd901212734237f674fa1d837f37b5f4e6a2d2b0f1e8ee46402"
+          },
+          "spec": {
+            "chars": 4183,
+            "est_tokens": 1045,
+            "sha256": "0d03b2aec3d15ea760f5ec5da774e28902c54f783001407c2319d42c193fb11c"
+          },
+          "acceptance": {
+            "chars": 1083,
+            "est_tokens": 270,
+            "sha256": "69ad0faee692be220ceb8f32d7b4828e48ba212fdfe405b35aecc6e1e1820284"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 598,
+            "est_tokens": 149,
+            "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "59a61ded2591",
+        "version": "59a61ded2591",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0995 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790153749.893507,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1001",
+      "claimed_at": 1790153749.892195
+    },
+    {
+      "ts": 1790153749.897047,
+      "account": "B"
+    },
+    {
+      "ts": 1790153761.910941,
+      "pid": 90597,
+      "account": "B"
+    },
+    {
+      "ts": 1790153854.8538182,
+      "packet_meta": {
+        "chars": 6247,
+        "est_tokens": 1561,
+        "presented_tokens": 1561,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "9b9ff586ba3d5cd901212734237f674fa1d837f37b5f4e6a2d2b0f1e8ee46402"
+          },
+          "spec": {
+            "chars": 4183,
+            "est_tokens": 1045,
+            "sha256": "0d03b2aec3d15ea760f5ec5da774e28902c54f783001407c2319d42c193fb11c"
+          },
+          "acceptance": {
+            "chars": 1083,
+            "est_tokens": 270,
+            "sha256": "69ad0faee692be220ceb8f32d7b4828e48ba212fdfe405b35aecc6e1e1820284"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 598,
+            "est_tokens": 149,
+            "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "59a61ded2591",
+        "version": "59a61ded2591",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0995 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d1ed9ba8-a401-4acb-8cfc-edd2b620c2e2"
+      }
+    },
+    {
+      "ts": 1790153854.8710861,
+      "packet_meta": {
+        "chars": 6247,
+        "est_tokens": 1561,
+        "presented_tokens": 1561,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "9b9ff586ba3d5cd901212734237f674fa1d837f37b5f4e6a2d2b0f1e8ee46402"
+          },
+          "spec": {
+            "chars": 4183,
+            "est_tokens": 1045,
+            "sha256": "0d03b2aec3d15ea760f5ec5da774e28902c54f783001407c2319d42c193fb11c"
+          },
+          "acceptance": {
+            "chars": 1083,
+            "est_tokens": 270,
+            "sha256": "69ad0faee692be220ceb8f32d7b4828e48ba212fdfe405b35aecc6e1e1820284"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 598,
+            "est_tokens": 149,
+            "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "59a61ded2591",
+        "version": "59a61ded2591",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0995 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d1ed9ba8-a401-4acb-8cfc-edd2b620c2e2",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790153854.8758788,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/evidence.py",
+            "issue": "Evidence is a frozen dataclass with no defaulted fields, and EvidencePool.__init__ loads persisted rows via `Evidence(**row)` (line ~131). Old JSONL rows written before this change will lack `trust_class` and `scan` keys, so `Evidence(**row)` raises TypeError unless something backfills those keys first. The spec says 'default trust_class from provenance, scan None' for old rows but never names where that backfill happens (EvidencePool.__init__ is the only place the raw row dict is available before construction) and never says trust_class/scan need dataclass defaults to make positional construction in make() still work. Without an explicit insertion point this is a coin-flip for the implementer and directly risks failing tests/test_evidence.py::test_make_sets_trust_class_and_scan's 'old rows load' clause.",
+            "severity": "high",
+            "line": 131
+          },
+          {
+            "path": "orchestrator/skill_discovery.py",
+            "issue": "inspect() already runs its own regex-based CHECKS tuple, including a 'hidden-instructions' block-severity check (ignore previous / you are now / system prompt / HTML comments / invisible unicode / base64), with its own severity vocabulary (info/warn/block) and findings schema (id/severity/check/line/excerpt). The spec adds a second, independent scan() pass (verdict safe/suspicious/blocked, pattern/line/excerpt/score) over the same files without saying whether the old hidden-instructions CHECK is superseded, kept as redundant defense-in-depth, or reconciled into one schema. Two overlapping detectors with different vocabularies bolted onto the same findings.json report is the kind of inconsistency a reviewer would reject, and the acceptance test only asserts the new scan verdict, not how the two coexist.",
+            "severity": "med",
+            "line": 225
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify exactly where the trust_class/scan backfill for legacy rows happens (e.g. patch EvidencePool.__init__ to default missing keys from row['provenance'] before constructing Evidence, or give both new fields dataclass defaults and do the provenance-based backfill inline in __init__) so the 'old rows load' acceptance clause has a concrete implementation path.",
+          "Clarify the relationship between skill_discovery.py's existing CHECKS 'hidden-instructions' entry and the new context_scanner-based scan: either remove/narrow the old regex check to avoid duplicate detection, or state explicitly that both are intentionally kept and how their differing severity vocabularies should be presented in the same inspection report."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790153854.8768551,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/evidence.py",
+          "issue": "Evidence is a frozen dataclass with no defaulted fields, and EvidencePool.__init__ loads persisted rows via `Evidence(**row)` (line ~131). Old JSONL rows written before this change will lack `trust_class` and `scan` keys, so `Evidence(**row)` raises TypeError unless something backfills those keys first. The spec says 'default trust_class from provenance, scan None' for old rows but never names where that backfill happens (EvidencePool.__init__ is the only place the raw row dict is available before construction) and never says trust_class/scan need dataclass defaults to make positional construction in make() still work. Without an explicit insertion point this is a coin-flip for the implementer and directly risks failing tests/test_evidence.py::test_make_sets_trust_class_and_scan's 'old rows load' clause.",
+          "severity": "high",
+          "line": 131
+        },
+        {
+          "path": "orchestrator/skill_discovery.py",
+          "issue": "inspect() already runs its own regex-based CHECKS tuple, including a 'hidden-instructions' block-severity check (ignore previous / you are now / system prompt / HTML comments / invisible unicode / base64), with its own severity vocabulary (info/warn/block) and findings schema (id/severity/check/line/excerpt). The spec adds a second, independent scan() pass (verdict safe/suspicious/blocked, pattern/line/excerpt/score) over the same files without saying whether the old hidden-instructions CHECK is superseded, kept as redundant defense-in-depth, or reconciled into one schema. Two overlapping detectors with different vocabularies bolted onto the same findings.json report is the kind of inconsistency a reviewer would reject, and the acceptance test only asserts the new scan verdict, not how the two coexist.",
+          "severity": "med",
+          "line": 225
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 6247,
+    "est_tokens": 1561,
+    "presented_tokens": 1561,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "9b9ff586ba3d5cd901212734237f674fa1d837f37b5f4e6a2d2b0f1e8ee46402"
+      },
+      "spec": {
+        "chars": 4183,
+        "est_tokens": 1045,
+        "sha256": "0d03b2aec3d15ea760f5ec5da774e28902c54f783001407c2319d42c193fb11c"
+      },
+      "acceptance": {
+        "chars": 1083,
+        "est_tokens": 270,
+        "sha256": "69ad0faee692be220ceb8f32d7b4828e48ba212fdfe405b35aecc6e1e1820284"
+      },
+      "scope": {
+        "chars": 261,
+        "est_tokens": 65,
+        "sha256": "ee54b7a41cd5a9ec113350c268b601efa53a6d20a8862d5f13fd101dbc686fee"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 598,
+        "est_tokens": 149,
+        "sha256": "29fb115e032aaecb4c3ac92b3eb255c6a98ecba50dc2db002af59b02e4e65a05"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "59a61ded2591",
+    "version": "59a61ded2591",
+    "candidate_known": false,
+    "base": "6b7a41246767",
+    "sources": "task@T-0995 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "d1ed9ba8-a401-4acb-8cfc-edd2b620c2e2",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790153749.892195,
+  "account": "B",
+  "pid": 90597,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/evidence.py",
+      "issue": "Evidence is a frozen dataclass with no defaulted fields, and EvidencePool.__init__ loads persisted rows via `Evidence(**row)` (line ~131). Old JSONL rows written before this change will lack `trust_class` and `scan` keys, so `Evidence(**row)` raises TypeError unless something backfills those keys first. The spec says 'default trust_class from provenance, scan None' for old rows but never names where that backfill happens (EvidencePool.__init__ is the only place the raw row dict is available before construction) and never says trust_class/scan need dataclass defaults to make positional construction in make() still work. Without an explicit insertion point this is a coin-flip for the implementer and directly risks failing tests/test_evidence.py::test_make_sets_trust_class_and_scan's 'old rows load' clause.",
+      "severity": "high",
+      "line": 131
+    },
+    {
+      "path": "orchestrator/skill_discovery.py",
+      "issue": "inspect() already runs its own regex-based CHECKS tuple, including a 'hidden-instructions' block-severity check (ignore previous / you are now / system prompt / HTML comments / invisible unicode / base64), with its own severity vocabulary (info/warn/block) and findings schema (id/severity/check/line/excerpt). The spec adds a second, independent scan() pass (verdict safe/suspicious/blocked, pattern/line/excerpt/score) over the same files without saying whether the old hidden-instructions CHECK is superseded, kept as redundant defense-in-depth, or reconciled into one schema. Two overlapping detectors with different vocabularies bolted onto the same findings.json report is the kind of inconsistency a reviewer would reject, and the acceptance test only asserts the new scan verdict, not how the two coexist.",
+      "severity": "med",
+      "line": 225
+    }
+  ]
+}

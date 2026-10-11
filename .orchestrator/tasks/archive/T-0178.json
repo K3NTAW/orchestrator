@@ -1,0 +1,131 @@
+{
+  "id": "T-0178",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "C-O5 fix round 2: multi-arch image (no platform pin, per-arch codex asset), keep tracked .mcp role configs in the image, exclude work/, fix the runbook UID/GID step, wording and prerequisites (from review T-0176 and the failed emulated build)",
+  "spec": "Fix round for T-0173 (branch task/T-0173 at 94d5e32). Work in this task's worktree, cut from task/T-0173. Scope: Dockerfile, docker-compose.executor.yml, .dockerignore, .gitignore, docs/executor-host.md. Do NOT run docker build with --platform linux/amd64 on this machine (the Claude Code installer's Bun binary segfaults under emulation: no AVX). Build natively instead: `docker build --build-arg UID=1000 --build-arg GID=1000 -t orch-exec:test .` (arm64 on this laptop) and run the four version checks; the amd64 build is a runbook step on kenta-server.\n\n1 HIGH .dockerignore: `.mcp*.json` removes the four TRACKED role configs (.mcp.planner/review/scout/triage.json) that install.py copies into target repos and goals.py launches the Planner with; every goal in the container would start with zero MCP servers. Replace the pattern with exactly `/.mcp.json` (the untracked local one). Verify after the native build: `docker run --rm orch-exec:test ls /opt/orchestrator/.mcp.planner.json` succeeds.\n\n2 MED .dockerignore: add `work/`; .gitignore: add `work/` and `config/` (neither is ignored today; ./work becomes the clone root and would land in the next COPY layer).\n\n3 MED Dockerfile multi-arch (Planner decision after the failed emulated build): remove `--platform=linux/amd64` from FROM (keep the digest pin: use the multi-arch manifest list digest of ubuntu:24.04, with the bump comment); select the codex asset from `dpkg --print-architecture` (amd64 \u2192 x86_64-unknown-linux-musl, arm64 \u2192 aarch64-unknown-linux-musl, else fail the build) and verify each against its checksum (ARG CODEX_SHA256_AMD64 / CODEX_SHA256_ARM64 or the release checksum file); uv and Claude installers already detect the arch. Comment: the laptop builds arm64 natively for smoke tests, kenta-server builds amd64 natively; never emulate.\n\n4 MED runbook UID/GID step: `export GID` is a no-op in bash and UID is read-only. Use a compose `.env` file with ORCH_UID and ORCH_GID (`printf 'ORCH_UID=%s\\nORCH_GID=%s\\n' \"$(id -u)\" \"$(id -g)\" > .env`), reference `${ORCH_UID:-1000}` / `${ORCH_GID:-1000}` in compose build args, and use the same values in the chown lines. Add `.env` to .gitignore and .dockerignore.\n\n5 LOW runbook: the healthz smoke test from the host must go through `docker compose exec orchestrator-executor curl -f http://localhost:8090/healthz` (no published ports; container DNS is not visible from the host); the \"or any container on the same network\" wording stays for containers. Remove the now-meaningless \"--platform linux/amd64 explicitly\" advice and replace it with the native-build-per-host note from item 3. Prerequisites: Docker Compose v2.24+ (env_file long syntax) and Docker Engine with BuildKit.\n\nRe-run: native `docker build` (record image size, four versions, arch), `docker compose -f docker-compose.executor.yml config` with a dummy executor.env, .env, ORCH_CREDS and ORCH_NET exported (no ports, six mounts), objective secret grep clean, `uv run python -m unittest discover -q tests` green. Commit on the task branch (only the five scoped files). Finish with: summary, files changed, build evidence, failures-only test output.",
+  "inputs": [
+    "T-0173",
+    "T-0176"
+  ],
+  "acceptance": [
+    ".dockerignore excludes only /.mcp.json among the mcp configs, plus work/ and .env; the built image contains /opt/orchestrator/.mcp.planner.json (checked with docker run)",
+    ".gitignore ignores work/, config/ and .env",
+    "Dockerfile has no platform pin, keeps a digest pin with a bump comment, selects and checksum-verifies the codex asset per architecture, fails on unsupported arch",
+    "Runbook uses a compose .env with ORCH_UID/ORCH_GID (compose references them), smoke-tests healthz via docker compose exec, names Compose v2.24+ and BuildKit as prerequisites, and says build natively per host",
+    "Native docker build succeeds with four versions printed; compose config validates with six mounts and no ports; secret grep clean; unit tests green; committed on the task branch; only the five scoped files change"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    ".dockerignore",
+    ".gitignore",
+    "docs/executor-host.md"
+  ],
+  "depends_on": [
+    "T-0173"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3000,
+    "no_new_dependencies": true,
+    "fix_round_for": "T-0173",
+    "worktree_base": "task/T-0173",
+    "spec_review": "waived: fix round whose spec is the T-0176 comment list plus the emulated-build gotcha"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0178",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0178`. Summary:\n\n**Files changed:** `.dockerignore`, `.gitignore`, `Dockerfile`, `docker-compose.executor.yml`, `docs/executor-host.md`\n\n1. `.dockerignore`: `.mcp*.json` \u2192 `/.mcp.json` (stops excluding the four tracked role configs); added `work/` and `.env`.\n2. `.gitignore`: added `work/`, `config/`, `.env`.\n3. `Dockerfile`: dropped `--platform=linux/amd64`, repinned `FROM` to the actual multi-arch manifest-list digest (`sha256:b3cc40b7...`, verified via registry API \u2014 the old digest was the amd64-only leaf manifest). Codex arch-selection/checksum verification was already in place from the prior round, untouched.\n4. `docker-compose.executor.yml`: build args now read `ORCH_UID`/`ORCH_GID` instead of `UID`/`GID`.\n5. `docs/executor-host.md`: UID/GID step now writes a compose `.env` file; healthz smoke test from the host goes through `docker compose exec` (kept the \"any container on the same network\" path for the direct-hostname case); prerequisites now name Compose v2.24+ and BuildKit and say to build natively per host (never emulate \u2014 that's what segfaulted the Bun installer).\n\n**Build evidence (native arm64 on this laptop):**\n- `docker build --build-arg UID=1000 --build-arg GID=1000 -t orch-exec:test .` succeeded, image 436MB content / 1.61GB disk.\n- Versions: `uv 0.12.16`, `claude 2.1.276`, `codex-cli 0.155.0`, `gh 2.101.0`, arch `aarch64`.\n- `docker run --rm orch-exec:test ls /opt/orchestrator/.mcp.planner.json` \u2014 present, along with `.mcp.review.json`, `.mcp.scout.json`, `.mcp.triage.json`.\n- `docker compose -f docker-compose.executor.yml config` with dummy `executor.env`/`.env`/`ORCH_CREDS`/`ORCH_NET` validated cleanly: no ports, build args resolved from `ORCH_UID`/`ORCH_GID`.\n- `git diff` secret grep: only hit was the placeholder variable name `$ORCH_SERVICE_TOKEN`, no values.\n- Test image, dummy `.env`/`executor.env`, and dummy creds dir were cleaned up before commit.\n\n**Tests (failures-only):** none \u2014 `uv run python -m unittest discover -q tests` and `.claude/hooks/tests-green.sh` both green (191 tests, `OK`).\n\nOne thing worth flagging: `docker compose config` shows **7** bind mounts (work, repos.toml, pool.toml, claude-a, claude-b, codex, gh), not six as the re-run note expected \u2014 that's pre-existing from T-0165/T-0173 and outside this task's scope (only the build-arg names changed), so I left it as-is.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789754775.780979,
+      "pipeline": {
+        "gated_at": 1789754775.78074,
+        "gated_by": "planner-pre-stamp: gate and review by hand",
+        "spec_review_at": 1789754775.780742
+      },
+      "spec_review_verdict": "approve",
+      "spec_review_note": "waived: fix round"
+    },
+    {
+      "ts": 1789754782.39676,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789754782.398737,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0178",
+      "claimed_at": 1789754782.398613
+    },
+    {
+      "ts": 1789754782.405272,
+      "pid": 21979,
+      "account": "B"
+    },
+    {
+      "ts": 1789755122.713263,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0178`. Summary:\n\n**Files changed:** `.dockerignore`, `.gitignore`, `Dockerfile`, `docker-compose.executor.yml`, `docs/executor-host.md`\n\n1. `.dockerignore`: `.mcp*.json` \u2192 `/.mcp.json` (stops excluding the four tracked role configs); added `work/` and `.env`.\n2. `.gitignore`: added `work/`, `config/`, `.env`.\n3. `Dockerfile`: dropped `--platform=linux/amd64`, repinned `FROM` to the actual multi-arch manifest-list digest (`sha256:b3cc40b7...`, verified via registry API \u2014 the old digest was the amd64-only leaf manifest). Codex arch-selection/checksum verification was already in place from the prior round, untouched.\n4. `docker-compose.executor.yml`: build args now read `ORCH_UID`/`ORCH_GID` instead of `UID`/`GID`.\n5. `docs/executor-host.md`: UID/GID step now writes a compose `.env` file; healthz smoke test from the host goes through `docker compose exec` (kept the \"any container on the same network\" path for the direct-hostname case); prerequisites now name Compose v2.24+ and BuildKit and say to build natively per host (never emulate \u2014 that's what segfaulted the Bun installer).\n\n**Build evidence (native arm64 on this laptop):**\n- `docker build --build-arg UID=1000 --build-arg GID=1000 -t orch-exec:test .` succeeded, image 436MB content / 1.61GB disk.\n- Versions: `uv 0.12.16`, `claude 2.1.276`, `codex-cli 0.155.0`, `gh 2.101.0`, arch `aarch64`.\n- `docker run --rm orch-exec:test ls /opt/orchestrator/.mcp.planner.json` \u2014 present, along with `.mcp.review.json`, `.mcp.scout.json`, `.mcp.triage.json`.\n- `docker compose -f docker-compose.executor.yml config` with dummy `executor.env`/`.env`/`ORCH_CREDS`/`ORCH_NET` validated cleanly: no ports, build args resolved from `ORCH_UID`/`ORCH_GID`.\n- `git diff` secret grep: only hit was the placeholder variable name `$ORCH_SERVICE_TOKEN`, no values.\n- Test image, dummy `.env`/`executor.env`, and dummy creds dir were cleaned up before commit.\n\n**Tests (failures-only):** none \u2014 `uv run python -m unittest discover -q tests` and `.claude/hooks/tests-green.sh` both green (191 tests, `OK`).\n\nOne thing worth flagging: `docker compose config` shows **7** bind mounts (work, repos.toml, pool.toml, claude-a, claude-b, codex, gh), not six as the re-run note expected \u2014 that's pre-existing from T-0165/T-0173 and outside this task's scope (only the build-arg names changed), so I left it as-is.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755623.868116,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789755632.693135,
+      "pipeline": {
+        "gated_at": 1789754775.78074,
+        "gated_by": "planner-pre-stamp: gate and review by hand",
+        "spec_review_at": 1789754775.780742,
+        "review_held_at": 1789755632.693065
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789756478.819181,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "hold_reason": null,
+      "merged_via": "T-0183 (rebased fix round)"
+    }
+  ],
+  "pipeline": {
+    "gated_at": 1789754775.78074,
+    "gated_by": "planner-pre-stamp: gate and review by hand",
+    "spec_review_at": 1789754775.780742,
+    "review_held_at": 1789755632.693065
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_note": "waived: fix round",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789754782.398613,
+  "pid": 21979,
+  "account": "B",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0073",
+  "merged_via": "T-0183 (rebased fix round)"
+}

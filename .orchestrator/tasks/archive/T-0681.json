@@ -1,0 +1,221 @@
+{
+  "id": "T-0681",
+  "created_at": 1789998109.178487,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Q4: orchestrator/planner_router.py \u2014 Planner tier router: modes off|shadow|active, hard vs soft Fable escalation, evidence gate, Fable reserve, hold instead of silent downgrade; decision_log kind planner_route (P5, P9, P11, P17, P18)",
+  "spec": "Why: decision.route (orchestrator/decision.py) decides routine/investigate/escalate and names escalate_tier fable; planner_runs.launch_routed (lines 1090-1110) resolves that alias to [models].planner. There is no Opus tier between investigate (sonnet) and escalate (fable), no hard/soft escalation split, no evidence gate, no Fable reserve and no hold path (brief P5, P9, P11, P17, P18).\nWhat: new pure module orchestrator/planner_router.py plus one new kind in decision_log.KINDS (\"planner_route\"). Inputs never mutated; no bus, pool or file reads: the caller supplies availability and evidence.\n- load_cfg(pool_cfg) -> routing dict with defaults from pool_cfg[\"planner\"][\"routing\"]: mode \"shadow\" (off|shadow|active), default_tier \"opus\", escalation_tier \"fable\", hard_complexity_min 9, hard_security True, hard_spec_review_request_changes_min 2, hard_ambiguous True, min_samples 20, shadow_sample_rate 1.0, fable_reserve_share 0.2, jev_mode \"shadow\", soft_threshold 0.5. Unknown mode or non-numeric value -> default plus one notify.notify_once(f\"planner_routing:{key}\", ...) (pattern daemon._load_scheduler_cfg); never raises.\n- @dataclass(frozen=True) RouterDecision: tier (str), mode, hard (bool), hold (bool), hold_reason (str|None), reasons (list[str]), soft_score (float), shadow_tier (str|None), candidates (list[str]), evidence (dict).\n- hard_escalation(classification, ctx, route, cfg) -> list[str] of hard reasons: route.name != \"escalate\" -> [] (routine/investigate/none are never routed here); routes disabled or route.reason startswith \"unknown:\" -> \"unknown_risk\"; complexity >= hard_complexity_min -> \"complexity\"; classification.risk_class == \"high\" or ctx.security_trigger or ctx.touches_auth or ctx.touches_data_deletion (when hard_security) -> \"security\"; classification.decision_type in (\"architectural_replan\", \"ambiguous_requirement\") when hard_ambiguous -> \"architectural_or_ambiguous\"; ctx.spec_review_request_changes >= hard_spec_review_request_changes_min -> \"repeated_spec_rejection\"; ctx.auto_fix_rounds_used >= ctx.auto_fix_rounds (when both ints) -> \"lineage_cap\"; ctx.get(\"reescalation\") True -> \"reescalation\".\n- soft_score(classification, ctx, evidence, jev_signal=None) -> float in [0, 1]: +0.3 architectural, +0.2 complexity 7-8, +0.2 evidence.reescalation_rate > 0.2, +0.2 evidence.noninferior is False, +0.1 classification.risk_class == \"low\", plus jev_signal.soft_adjust clamped to [-0.2, 0.2]; clamp total to [0, 1]. Token or cost figures are never inputs (docstring says so).\n- decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0) -> RouterDecision. availability = {tier: {\"available\": bool, \"reason\": str}} for default_tier and escalation_tier; also availability.get(\"fable_reserve_ok\", True) (caller computes remaining planner headroom share >= fable_reserve_share). evidence = {\"n\": int, \"noninferior\": True|False|None, \"reescalation_rate\": float} for the (default_tier, decision class) group from planner_scorecard.class_evidence. Rules: route.name != \"escalate\" -> tier route.tier or \"fable\", hard False, reasons [\"not_escalate_route\"] (unchanged behaviour). mode off -> tier route.tier or \"fable\", reasons [\"mode_off\"], shadow_tier None. hard reasons non-empty -> tier escalation_tier, hard True; if escalation tier unavailable -> hold True, hold_reason \"fable_unavailable:<reason>\" (never downgrade). mode shadow -> production tier escalation_tier (unchanged), shadow_tier default_tier when not hard, default tier available and sample <= shadow_sample_rate, else None with reason. mode active, not hard: default_tier when evidence.noninferior is True and evidence.n >= min_samples and soft_score < soft_threshold (reason \"evidence_noninferior\"); when fable_reserve_ok is False and evidence.noninferior is not False -> default_tier (reason \"fable_reserve_low\"); otherwise escalation_tier with reason \"insufficient_evidence\" or \"soft_escalation\"; a chosen tier that is unavailable falls back to the other available tier for soft decisions (reason \"fallback:<tier>_unavailable\"); both unavailable -> hold with hold_reason \"no_planner_tier_available\".\n- record(decision, *, subject, classification, root=None) -> decision_log.record(kind=\"planner_route\", subject=goal id, candidates=[default, escalation], hard_constraints=hard reasons, deterministic={\"route\": route.name, \"reason\": route.reason}, historical=evidence, jev=jev_signal, selected=tier or \"hold\", reason=\";\".join(reasons), mode=mode, extra={\"decision_type\", \"hold_reason\", \"shadow_tier\", \"soft_score\"}).\n- explain(decision) -> one line.\ndecision_log.py change: add \"planner_route\" to KINDS only.",
+  "inputs": [
+    "T-0680"
+  ],
+  "acceptance": [
+    "tests/test_planner_router.py::test_mode_off_reproduces_route_tier \u2014 mode off returns route.tier (fable) with reasons mode_off, shadow_tier None, hold False for every decision type; a non-escalate route returns its own tier unchanged in every mode",
+    "tests/test_planner_router.py::test_hard_escalation_never_downgrades_and_holds_when_fable_unavailable \u2014 complexity 9, security, ambiguous_requirement and repeated_spec_rejection each yield tier fable hard True in active mode even with noninferior evidence and a jev soft_adjust of -0.2; with fable unavailable the decision is hold True with hold_reason starting fable_unavailable",
+    "tests/test_planner_router.py::test_shadow_mode_keeps_fable_and_sets_shadow_tier \u2014 shadow mode yields tier fable and shadow_tier opus for a soft decision, shadow_tier None for a hard decision or when opus is unavailable or sample exceeds shadow_sample_rate",
+    "tests/test_planner_router.py::test_active_mode_requires_evidence_and_ignores_tokens \u2014 active with n 25 noninferior True picks opus; n 5 picks fable with reason insufficient_evidence; noninferior False picks fable; evidence carrying tokens_saved 1e9 changes nothing; fable_reserve_ok False with noninferior None picks opus with reason fable_reserve_low",
+    "tests/test_planner_router.py::test_load_cfg_defaults_and_record_kind \u2014 missing table gives every documented default, an invalid mode falls back to shadow with one notify, and record() appends a decision_log row of kind planner_route readable by decision_log.explain"
+  ],
+  "scope": [
+    "orchestrator/planner_router.py",
+    "orchestrator/decision_log.py",
+    "tests/test_planner_router.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0681",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "load_cfg's fallback for an invalid mode/value is specified as notify.notify_once(f\"planner_routing:{key}\", ...), described as matching daemon._load_scheduler_cfg's pattern. It doesn't: daemon.py's actual fallback calls plain notify(msg) (stderr/webhook only). notify_once(task_id, transition, msg) calls bus.get(task_id) and bus.update(task_id, ...); with a synthetic id like 'planner_routing:mode' that is not a real bus task file, bus.get raises KeyError (orchestrator/bus.py:89-93), so load_cfg would crash on the very fallback path meant to fail safe. It also directly violates this module's own stated constraint ('no bus, pool or file reads') in the same spec paragraph.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "record(decision, *, subject, classification, root=None) is specified to call decision_log.record(..., deterministic={\"route\": route.name, \"reason\": route.reason}, jev=jev_signal, ...), but neither route nor jev_signal is a parameter of record() nor a field of RouterDecision (whose fields are tier, mode, hard, hold, hold_reason, reasons, soft_score, shadow_tier, candidates, evidence). As written, record() has no way to obtain route.name/route.reason or jev_signal to log them; the deterministic/jev logging described by the acceptance criteria cannot be implemented from the given signature.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "hard_escalation/soft_score/decide take a `classification` argument accessed via classification.risk_class and classification.decision_type (values 'high'/'low', 'architectural_replan'/'ambiguous_requirement'). Neither field, nor any 'risk_class'/'decision_type' concept, exists anywhere in the repo today. The only pre-existing thing named 'classification' (orchestrator/jev_route.py) is an unrelated dict with keys signals/confidence/key/usage/cache. This spec's scope and depends_on are both empty, so nothing produces this classification shape; the module will be untestable against real data and any future caller has to invent a type that matches nothing else in the codebase.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "Field access on ctx is inconsistent within the same function: hard_escalation uses attribute access (ctx.security_trigger, ctx.touches_auth, ctx.touches_data_deletion, ctx.spec_review_request_changes, ctx.auto_fix_rounds_used/auto_fix_rounds) alongside dict-style ctx.get(\"reescalation\"). evidence is likewise defined as a dict literal ({'n': int, 'noninferior': ..., 'reescalation_rate': float}) but the rules reference evidence.n, evidence.noninferior, evidence.reescalation_rate via attribute access. The sibling pure router decision.py (same package) always treats ctx as a plain dict via .get()/[]. Left unresolved, the executor must guess a type for ctx/evidence, and a dict-vs-object mismatch with the real ctx dicts already built in planner_runs.py (e.g. the scouts_done/held ctx blocks) will break integration even though unit tests with hand-built stubs would still pass.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "evidence is documented as coming 'from planner_scorecard.class_evidence', but there is no orchestrator/planner_scorecard.py module and no class_evidence function anywhere in the repo (only scorecard.py and sched_scorecard.py exist, neither defines class_evidence). Since decide() only consumes evidence as a parameter this doesn't block the tests in scope, but it's a wrong insertion-point reference that will mislead whoever wires the real caller.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Replace the load_cfg fallback with notify.notify_once ... to plain notify.notify(f\"pool.toml [planner.routing]...\") to match the actual daemon._load_scheduler_cfg pattern and preserve the module's no-bus-access guarantee.",
+      "Add explicit route and jev_signal parameters to record() (or store them on RouterDecision) so deterministic={'route': route.name, 'reason': route.reason} and jev=jev_signal are actually derivable from record()'s inputs.",
+      "Either point classification at an existing, already-produced shape (or add it to this spec's scope/depends_on as a small dataclass this task also defines), and specify explicitly whether classification/ctx/evidence are dicts (accessed via .get()/[]) or objects (dot access) \u2014 pick one convention consistent with decision.py's ctx dict convention \u2014 before writing tests.",
+      "Correct or drop the 'from planner_scorecard.class_evidence' provenance note, or add a stub/placeholder acknowledging that module doesn't exist yet."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998111.354468,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0681",
+      "claimed_at": 1789998111.354068
+    },
+    {
+      "ts": 1789998111.355475,
+      "account": "B"
+    },
+    {
+      "ts": 1789998111.7782211,
+      "pid": 84529,
+      "account": "B"
+    },
+    {
+      "ts": 1789998286.691278,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "load_cfg's fallback for an invalid mode/value is specified as notify.notify_once(f\"planner_routing:{key}\", ...), described as matching daemon._load_scheduler_cfg's pattern. It doesn't: daemon.py's actual fallback calls plain notify(msg) (stderr/webhook only). notify_once(task_id, transition, msg) calls bus.get(task_id) and bus.update(task_id, ...); with a synthetic id like 'planner_routing:mode' that is not a real bus task file, bus.get raises KeyError (orchestrator/bus.py:89-93), so load_cfg would crash on the very fallback path meant to fail safe. It also directly violates this module's own stated constraint ('no bus, pool or file reads') in the same spec paragraph.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "record(decision, *, subject, classification, root=None) is specified to call decision_log.record(..., deterministic={\"route\": route.name, \"reason\": route.reason}, jev=jev_signal, ...), but neither route nor jev_signal is a parameter of record() nor a field of RouterDecision (whose fields are tier, mode, hard, hold, hold_reason, reasons, soft_score, shadow_tier, candidates, evidence). As written, record() has no way to obtain route.name/route.reason or jev_signal to log them; the deterministic/jev logging described by the acceptance criteria cannot be implemented from the given signature.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "hard_escalation/soft_score/decide take a `classification` argument accessed via classification.risk_class and classification.decision_type (values 'high'/'low', 'architectural_replan'/'ambiguous_requirement'). Neither field, nor any 'risk_class'/'decision_type' concept, exists anywhere in the repo today. The only pre-existing thing named 'classification' (orchestrator/jev_route.py) is an unrelated dict with keys signals/confidence/key/usage/cache. This spec's scope and depends_on are both empty, so nothing produces this classification shape; the module will be untestable against real data and any future caller has to invent a type that matches nothing else in the codebase.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "Field access on ctx is inconsistent within the same function: hard_escalation uses attribute access (ctx.security_trigger, ctx.touches_auth, ctx.touches_data_deletion, ctx.spec_review_request_changes, ctx.auto_fix_rounds_used/auto_fix_rounds) alongside dict-style ctx.get(\"reescalation\"). evidence is likewise defined as a dict literal ({'n': int, 'noninferior': ..., 'reescalation_rate': float}) but the rules reference evidence.n, evidence.noninferior, evidence.reescalation_rate via attribute access. The sibling pure router decision.py (same package) always treats ctx as a plain dict via .get()/[]. Left unresolved, the executor must guess a type for ctx/evidence, and a dict-vs-object mismatch with the real ctx dicts already built in planner_runs.py (e.g. the scouts_done/held ctx blocks) will break integration even though unit tests with hand-built stubs would still pass.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "evidence is documented as coming 'from planner_scorecard.class_evidence', but there is no orchestrator/planner_scorecard.py module and no class_evidence function anywhere in the repo (only scorecard.py and sched_scorecard.py exist, neither defines class_evidence). Since decide() only consumes evidence as a parameter this doesn't block the tests in scope, but it's a wrong insertion-point reference that will mislead whoever wires the real caller.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Replace the load_cfg fallback with notify.notify_once ... to plain notify.notify(f\"pool.toml [planner.routing]...\") to match the actual daemon._load_scheduler_cfg pattern and preserve the module's no-bus-access guarantee.",
+          "Add explicit route and jev_signal parameters to record() (or store them on RouterDecision) so deterministic={'route': route.name, 'reason': route.reason} and jev=jev_signal are actually derivable from record()'s inputs.",
+          "Either point classification at an existing, already-produced shape (or add it to this spec's scope/depends_on as a small dataclass this task also defines), and specify explicitly whether classification/ctx/evidence are dicts (accessed via .get()/[]) or objects (dot access) \u2014 pick one convention consistent with decision.py's ctx dict convention \u2014 before writing tests.",
+          "Correct or drop the 'from planner_scorecard.class_evidence' provenance note, or add a stub/placeholder acknowledging that module doesn't exist yet."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998286.692868,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "load_cfg's fallback for an invalid mode/value is specified as notify.notify_once(f\"planner_routing:{key}\", ...), described as matching daemon._load_scheduler_cfg's pattern. It doesn't: daemon.py's actual fallback calls plain notify(msg) (stderr/webhook only). notify_once(task_id, transition, msg) calls bus.get(task_id) and bus.update(task_id, ...); with a synthetic id like 'planner_routing:mode' that is not a real bus task file, bus.get raises KeyError (orchestrator/bus.py:89-93), so load_cfg would crash on the very fallback path meant to fail safe. It also directly violates this module's own stated constraint ('no bus, pool or file reads') in the same spec paragraph.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "record(decision, *, subject, classification, root=None) is specified to call decision_log.record(..., deterministic={\"route\": route.name, \"reason\": route.reason}, jev=jev_signal, ...), but neither route nor jev_signal is a parameter of record() nor a field of RouterDecision (whose fields are tier, mode, hard, hold, hold_reason, reasons, soft_score, shadow_tier, candidates, evidence). As written, record() has no way to obtain route.name/route.reason or jev_signal to log them; the deterministic/jev logging described by the acceptance criteria cannot be implemented from the given signature.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "hard_escalation/soft_score/decide take a `classification` argument accessed via classification.risk_class and classification.decision_type (values 'high'/'low', 'architectural_replan'/'ambiguous_requirement'). Neither field, nor any 'risk_class'/'decision_type' concept, exists anywhere in the repo today. The only pre-existing thing named 'classification' (orchestrator/jev_route.py) is an unrelated dict with keys signals/confidence/key/usage/cache. This spec's scope and depends_on are both empty, so nothing produces this classification shape; the module will be untestable against real data and any future caller has to invent a type that matches nothing else in the codebase.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "Field access on ctx is inconsistent within the same function: hard_escalation uses attribute access (ctx.security_trigger, ctx.touches_auth, ctx.touches_data_deletion, ctx.spec_review_request_changes, ctx.auto_fix_rounds_used/auto_fix_rounds) alongside dict-style ctx.get(\"reescalation\"). evidence is likewise defined as a dict literal ({'n': int, 'noninferior': ..., 'reescalation_rate': float}) but the rules reference evidence.n, evidence.noninferior, evidence.reescalation_rate via attribute access. The sibling pure router decision.py (same package) always treats ctx as a plain dict via .get()/[]. Left unresolved, the executor must guess a type for ctx/evidence, and a dict-vs-object mismatch with the real ctx dicts already built in planner_runs.py (e.g. the scouts_done/held ctx blocks) will break integration even though unit tests with hand-built stubs would still pass.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "evidence is documented as coming 'from planner_scorecard.class_evidence', but there is no orchestrator/planner_scorecard.py module and no class_evidence function anywhere in the repo (only scorecard.py and sched_scorecard.py exist, neither defines class_evidence). Since decide() only consumes evidence as a parameter this doesn't block the tests in scope, but it's a wrong insertion-point reference that will mislead whoever wires the real caller.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789998111.354068,
+  "account": "B",
+  "pid": 84529,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "load_cfg's fallback for an invalid mode/value is specified as notify.notify_once(f\"planner_routing:{key}\", ...), described as matching daemon._load_scheduler_cfg's pattern. It doesn't: daemon.py's actual fallback calls plain notify(msg) (stderr/webhook only). notify_once(task_id, transition, msg) calls bus.get(task_id) and bus.update(task_id, ...); with a synthetic id like 'planner_routing:mode' that is not a real bus task file, bus.get raises KeyError (orchestrator/bus.py:89-93), so load_cfg would crash on the very fallback path meant to fail safe. It also directly violates this module's own stated constraint ('no bus, pool or file reads') in the same spec paragraph.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "record(decision, *, subject, classification, root=None) is specified to call decision_log.record(..., deterministic={\"route\": route.name, \"reason\": route.reason}, jev=jev_signal, ...), but neither route nor jev_signal is a parameter of record() nor a field of RouterDecision (whose fields are tier, mode, hard, hold, hold_reason, reasons, soft_score, shadow_tier, candidates, evidence). As written, record() has no way to obtain route.name/route.reason or jev_signal to log them; the deterministic/jev logging described by the acceptance criteria cannot be implemented from the given signature.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "hard_escalation/soft_score/decide take a `classification` argument accessed via classification.risk_class and classification.decision_type (values 'high'/'low', 'architectural_replan'/'ambiguous_requirement'). Neither field, nor any 'risk_class'/'decision_type' concept, exists anywhere in the repo today. The only pre-existing thing named 'classification' (orchestrator/jev_route.py) is an unrelated dict with keys signals/confidence/key/usage/cache. This spec's scope and depends_on are both empty, so nothing produces this classification shape; the module will be untestable against real data and any future caller has to invent a type that matches nothing else in the codebase.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "Field access on ctx is inconsistent within the same function: hard_escalation uses attribute access (ctx.security_trigger, ctx.touches_auth, ctx.touches_data_deletion, ctx.spec_review_request_changes, ctx.auto_fix_rounds_used/auto_fix_rounds) alongside dict-style ctx.get(\"reescalation\"). evidence is likewise defined as a dict literal ({'n': int, 'noninferior': ..., 'reescalation_rate': float}) but the rules reference evidence.n, evidence.noninferior, evidence.reescalation_rate via attribute access. The sibling pure router decision.py (same package) always treats ctx as a plain dict via .get()/[]. Left unresolved, the executor must guess a type for ctx/evidence, and a dict-vs-object mismatch with the real ctx dicts already built in planner_runs.py (e.g. the scouts_done/held ctx blocks) will break integration even though unit tests with hand-built stubs would still pass.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "evidence is documented as coming 'from planner_scorecard.class_evidence', but there is no orchestrator/planner_scorecard.py module and no class_evidence function anywhere in the repo (only scorecard.py and sched_scorecard.py exist, neither defines class_evidence). Since decide() only consumes evidence as a parameter this doesn't block the tests in scope, but it's a wrong insertion-point reference that will mislead whoever wires the real caller.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "id": "T-0212",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "E7: worker turn diet \u2014 allowedTools per role, bus-only MCP config, tool-call budget lines in prompts",
+  "spec": "Measured 2026-09-19: an execute run averages 2.46M cache-read tokens over ~30-40 turns at a ~24k-token baseline context per turn; a review 0.73M with up to 28 Bash calls; a probe showed --strict-mcp-config saves ~2k tokens per turn. spawn.TOOLS is defined per role but run_claude never passes it (dead config). Change orchestrator/spawn.py (after P7 T-0208):\n1. run_claude passes --allowedTools with TOOLS[role] (execute keeps Edit/Write; read-only roles keep --disallowedTools too).\n2. New tracked file .mcp.worker.json containing only the bus server; run_claude passes --strict-mcp-config --mcp-config .mcp.worker.json (path under ROOT) for every role, so workers never load github or orchestrator MCP schemas. Keep the .mcp.<role>.json override when it exists.\n3. Prompts: .orchestrator/prompts/execute.md gains 'Tool-call budget: read only files inside Scope first, then edit; do not re-read a file you already read; run the test script at most twice.' and review.md gains 'The diff is complete. Read a file only when a hunk depends on code outside it; at most 8 tool calls.' Keep the JSON return contract unchanged.\n4. Log num_turns from the claude JSON output into the run record (bus.log_run field turns) so the scorecard can show turns per run.\nTests in tests/test_spawn.py: argv contains --allowedTools with the role's list, --strict-mcp-config and the worker config path; the run record carries turns.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_run_claude_passes_allowed_tools, ::test_run_claude_uses_worker_mcp_config, ::test_run_record_has_turns pass",
+    ".mcp.worker.json exists, is tracked, and lists only the bus server",
+    "prompts/execute.md and prompts/review.md contain the budget lines and their tests in tests/test_spawn.py or tests/test_hooks.py still render",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    ".mcp.worker.json",
+    ".orchestrator/prompts/execute.md",
+    ".orchestrator/prompts/review.md",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [
+    "T-0208"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0212",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented T-0212: `run_claude` now actually uses the per-role `TOOLS` dict and scopes worker MCP access.\n\n**Changes:**\n1. `orchestrator/spawn.py` \u2014 `run_claude` adds `--allowedTools <TOOLS[role]>` and `--strict-mcp-config --mcp-config <path>` to the `claude` argv. The mcp-config path prefers `.mcp.<role>.json` when it exists (unchanged override behavior for scout/review/triage), else falls back to the new `.mcp.worker.json`. Replaced the old `shutil.copy(role_cfg, wt/.mcp.json)` mechanism, now redundant since the config is passed explicitly. `--disallowedTools` logic for non-execute roles is unchanged. Also logs `turns=out.get(\"num_turns\", 0)` into `bus.log_run`.\n2. `.mcp.worker.json` (new, tracked) \u2014 bus server only.\n3. `.orchestrator/prompts/execute.md` \u2014 added the tool-call budget line.\n4. `.orchestrator/prompts/review.md` \u2014 added the \"diff is complete... at most 8 tool calls\" line.\n5. `tests/test_spawn.py` \u2014 added `test_run_claude_passes_allowed_tools`, `test_run_claude_uses_worker_mcp_config` (+ a role-override variant using `triage` to avoid the `review` role's real secret-shelling out through the patched `Popen`), and `test_run_record_has_turns`.\n\n**Test output:** all 289 tests pass (no failures). `.claude/hooks/tests-green.sh .` exits 0.\n\nCommitted on `task/T-0212` as `bd0a8e1`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789811680.351288,
+      "pipeline": {
+        "dispatched_at": 1789811680.351221
+      }
+    },
+    {
+      "ts": 1789811680.409525,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789811680.416158,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789811681.537193,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0212",
+      "claimed_at": 1789811681.535732
+    },
+    {
+      "ts": 1789811681.540811,
+      "account": "B"
+    },
+    {
+      "ts": 1789811681.5525389,
+      "pid": 88769,
+      "account": "B"
+    },
+    {
+      "ts": 1789811988.849476,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented T-0212: `run_claude` now actually uses the per-role `TOOLS` dict and scopes worker MCP access.\n\n**Changes:**\n1. `orchestrator/spawn.py` \u2014 `run_claude` adds `--allowedTools <TOOLS[role]>` and `--strict-mcp-config --mcp-config <path>` to the `claude` argv. The mcp-config path prefers `.mcp.<role>.json` when it exists (unchanged override behavior for scout/review/triage), else falls back to the new `.mcp.worker.json`. Replaced the old `shutil.copy(role_cfg, wt/.mcp.json)` mechanism, now redundant since the config is passed explicitly. `--disallowedTools` logic for non-execute roles is unchanged. Also logs `turns=out.get(\"num_turns\", 0)` into `bus.log_run`.\n2. `.mcp.worker.json` (new, tracked) \u2014 bus server only.\n3. `.orchestrator/prompts/execute.md` \u2014 added the tool-call budget line.\n4. `.orchestrator/prompts/review.md` \u2014 added the \"diff is complete... at most 8 tool calls\" line.\n5. `tests/test_spawn.py` \u2014 added `test_run_claude_passes_allowed_tools`, `test_run_claude_uses_worker_mcp_config` (+ a role-override variant using `triage` to avoid the `review` role's real secret-shelling out through the patched `Popen`), and `test_run_record_has_turns`.\n\n**Test output:** all 289 tests pass (no failures). `.claude/hooks/tests-green.sh .` exits 0.\n\nCommitted on `task/T-0212` as `bd0a8e1`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789812148.9854562,
+      "pipeline": {
+        "dispatched_at": 1789811680.351221,
+        "gated_at": 1789812148.985327
+      }
+    },
+    {
+      "ts": 1789812184.8493261,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "sha": "6358799948d52b111967bcccd4edd4386843cb02"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789811680.351221,
+    "gated_at": 1789812148.985327
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789811681.535732,
+  "account": "B",
+  "pid": 88769,
+  "merged_into": "goal/T-0201",
+  "sha": "6358799948d52b111967bcccd4edd4386843cb02"
+}

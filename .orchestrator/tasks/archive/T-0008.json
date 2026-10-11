@@ -1,0 +1,187 @@
+{
+  "id": "T-0008",
+  "parent": "T-0005",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout (local tooling): Codex CLI model ids and usage-limit behaviour for Luna/Terra/Sol",
+  "spec": "Read-only. Do not start any Codex task (Codex is cooling until 2026-09-19 14:00; do not consume its quota). Using only help output and local config, answer: (1) `codex --version`; `codex --help`; `codex exec --help`: how is the model chosen (-m/--model, config.toml model key, profiles -p)? (2) Which model ids does the CLI accept or list (any `codex models`, `codex model list`, config docs, ~/.codex/config.toml, ~/.codex/models*.json, cache files)? Do ids matching gpt-luna*, gpt-terra*, gpt-sol*, gpt-6-astra appear anywhere on disk under ~/.codex (excluding auth.json, which you must not open)? (3) Is the ChatGPT usage limit per account or per model? Cite the CLI help, config docs, or the error text format observed 2026-09-16 (\"try again at Sep 19th, 2026 2:00 PM\") stored in README.md. (4) Does `codex exec` support a profile per model (config.toml [profiles.x] model=...) so per-model settings can be switched without editing the global config? Cite path:line of repo code that would change: orchestrator/executor.py `-m`, orchestrator/pool.py [codex] handling, .orchestrator/pool.toml. Mark anything you cannot verify as confidence \u22640.5.",
+  "inputs": [],
+  "acceptance": [
+    "no codex exec run is started (bus_read shows codex day_tasks unchanged)",
+    "model selection mechanism cited from help text or config",
+    "list of model ids found on disk or explicit 'none found'",
+    "usage-limit scope answered with evidence and confidence"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/pool.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "codex.config.toml.example"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0008",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Model selection: `-m/--model <MODEL>` global flag on both `codex` and `codex exec`; `-p/--profile <CONFIG_PROFILE_V2>` layers `$CODEX_HOME/<name>.config.toml` on top of the base config; `-c model=\"...\"` overrides config.toml dotted-path values (e.g. `-c model=\"o3\"` shown as example). No separate `codex models`/`codex model list` subcommand exists in the command list.",
+        "evidence": [
+          "codex --help output: Commands list (agents, exec, review, login, logout, mcp, plugin, app-server, remote-control, app, completion, update, doctor, sandbox, debug, apply, resume, queue, archive, delete, migrate-rollouts, unarchive, fork, cloud, exec-server, features, help) \u2014 no 'models' subcommand",
+          "codex --help: '-m, --model <MODEL>  Model the agent should use'",
+          "codex --help: '-p, --profile <CONFIG_PROFILE_V2>  Layer $CODEX_HOME/<name>.config.toml on top of the base user config'",
+          "codex --help: '-c, --config <key=value> ... Examples: - `-c model=\"o3\"`'"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "`gpt-6-astra` is the only one of the four target ids (gpt-luna*, gpt-terra*, gpt-sol*, gpt-6-astra) found on disk under ~/.codex; it appears in ~/.codex/config.toml ([tui.model_availability_nux] gpt-6-astra = 3) and in ~/.codex/models_cache.json. No gpt-luna*, gpt-terra*, or gpt-sol* strings found anywhere under ~/.codex (auth.json excluded/not opened) or in the repo.",
+        "evidence": [
+          "~/.codex/config.toml: '[tui.model_availability_nux]\\ngpt-6-astra = 3'",
+          "~/.codex/models_cache.json: grep match 'gpt-6-astra' (no luna/terra/sol matches)",
+          "repo grep across /Users/k3ntaw/code/orchestrator/wt/T-0008: only gpt-6-astra hits, in README.md:53, codex.config.toml.example:2, .orchestrator/pool.toml:21, orchestrator/executor.py:81"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Whether the ChatGPT usage limit is scoped per-account or per-model is not documented anywhere accessible \u2014 README.md only records the observed error text and reset format ('try again at Sep 19th, 2026 2:00 PM') as UNCONFIRMED, with no statement of scope, and no CLI help or config doc addresses it.",
+        "evidence": [
+          "README.md:55 \u2014 'usage-limit text and reset format observed 2026-09-16 (\"try again at Sep 19th, 2026 2:00 PM\")... `turn.completed` usage shape and thread survival across a limit hit: UNCONFIRMED until the window resets.'",
+          "codex --help / codex exec --help: no mention of usage-limit scope",
+          "no matches for 'per account'/'per model'/'usage limit' scope wording in repo or ~/.codex config/docs"
+        ],
+        "confidence": 0.3,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "`codex exec` supports per-profile config via `-p/--profile <name>`, which layers `$CODEX_HOME/<name>.config.toml` over the base config \u2014 this could hold a per-model `model = \"...\"` setting, letting model choice switch without editing the shared global config.toml. Current repo wiring does not yet use profiles: orchestrator/executor.py:81 passes model via `-m` reading `pool.cfg[\"codex\"].get(\"model\", \"gpt-6-astra\")`, orchestrator/pool.py has no [codex] profile-handling code (only day_tasks/running/cooldown accounting at pool.py:103-121), and .orchestrator/pool.toml:20-21 has a single flat `[codex]` table (`model = \"gpt-6-astra\"`) with no `[profiles.x]` subtables. No `$CODEX_HOME/<name>.config.toml` profile files exist on disk currently.",
+        "evidence": [
+          "codex exec --help: '-p, --profile <CONFIG_PROFILE_V2>  Layer $CODEX_HOME/<name>.config.toml on top of the base user config'",
+          "orchestrator/executor.py:81",
+          "orchestrator/pool.py:103-121 (codex_available/status, no profile logic)",
+          ".orchestrator/pool.toml:20-21 ([codex] model = \"gpt-6-astra\")",
+          "ls ~/.codex: no *.config.toml profile files present besides config.toml"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Per-account vs per-model usage-limit scope is undocumented; only confirmable by observing behavior across the 2026-09-19 14:00 reset with two different models, which requires consuming Codex quota (out of scope for this read-only task)."
+    ],
+    "suggested_next": [
+      "When Codex uncools after 2026-09-19 14:00, have Codex run one exec call with model=gpt-6-astra and, if any alternate id is ever confirmed valid, a second with a different model, to empirically test whether the reset clears both or just one \u2014 but only as a deliberate, budget-approved test, not incidentally."
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789656035.003884,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0008",
+      "claimed_at": 1789656035.003634
+    },
+    {
+      "ts": 1789656035.041188,
+      "pid": 83752,
+      "account": "B"
+    },
+    {
+      "ts": 1789656083.875872,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Model selection: `-m/--model <MODEL>` global flag on both `codex` and `codex exec`; `-p/--profile <CONFIG_PROFILE_V2>` layers `$CODEX_HOME/<name>.config.toml` on top of the base config; `-c model=\"...\"` overrides config.toml dotted-path values (e.g. `-c model=\"o3\"` shown as example). No separate `codex models`/`codex model list` subcommand exists in the command list.",
+            "evidence": [
+              "codex --help output: Commands list (agents, exec, review, login, logout, mcp, plugin, app-server, remote-control, app, completion, update, doctor, sandbox, debug, apply, resume, queue, archive, delete, migrate-rollouts, unarchive, fork, cloud, exec-server, features, help) \u2014 no 'models' subcommand",
+              "codex --help: '-m, --model <MODEL>  Model the agent should use'",
+              "codex --help: '-p, --profile <CONFIG_PROFILE_V2>  Layer $CODEX_HOME/<name>.config.toml on top of the base user config'",
+              "codex --help: '-c, --config <key=value> ... Examples: - `-c model=\"o3\"`'"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "`gpt-6-astra` is the only one of the four target ids (gpt-luna*, gpt-terra*, gpt-sol*, gpt-6-astra) found on disk under ~/.codex; it appears in ~/.codex/config.toml ([tui.model_availability_nux] gpt-6-astra = 3) and in ~/.codex/models_cache.json. No gpt-luna*, gpt-terra*, or gpt-sol* strings found anywhere under ~/.codex (auth.json excluded/not opened) or in the repo.",
+            "evidence": [
+              "~/.codex/config.toml: '[tui.model_availability_nux]\\ngpt-6-astra = 3'",
+              "~/.codex/models_cache.json: grep match 'gpt-6-astra' (no luna/terra/sol matches)",
+              "repo grep across /Users/k3ntaw/code/orchestrator/wt/T-0008: only gpt-6-astra hits, in README.md:53, codex.config.toml.example:2, .orchestrator/pool.toml:21, orchestrator/executor.py:81"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Whether the ChatGPT usage limit is scoped per-account or per-model is not documented anywhere accessible \u2014 README.md only records the observed error text and reset format ('try again at Sep 19th, 2026 2:00 PM') as UNCONFIRMED, with no statement of scope, and no CLI help or config doc addresses it.",
+            "evidence": [
+              "README.md:55 \u2014 'usage-limit text and reset format observed 2026-09-16 (\"try again at Sep 19th, 2026 2:00 PM\")... `turn.completed` usage shape and thread survival across a limit hit: UNCONFIRMED until the window resets.'",
+              "codex --help / codex exec --help: no mention of usage-limit scope",
+              "no matches for 'per account'/'per model'/'usage limit' scope wording in repo or ~/.codex config/docs"
+            ],
+            "confidence": 0.3,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "`codex exec` supports per-profile config via `-p/--profile <name>`, which layers `$CODEX_HOME/<name>.config.toml` over the base config \u2014 this could hold a per-model `model = \"...\"` setting, letting model choice switch without editing the shared global config.toml. Current repo wiring does not yet use profiles: orchestrator/executor.py:81 passes model via `-m` reading `pool.cfg[\"codex\"].get(\"model\", \"gpt-6-astra\")`, orchestrator/pool.py has no [codex] profile-handling code (only day_tasks/running/cooldown accounting at pool.py:103-121), and .orchestrator/pool.toml:20-21 has a single flat `[codex]` table (`model = \"gpt-6-astra\"`) with no `[profiles.x]` subtables. No `$CODEX_HOME/<name>.config.toml` profile files exist on disk currently.",
+            "evidence": [
+              "codex exec --help: '-p, --profile <CONFIG_PROFILE_V2>  Layer $CODEX_HOME/<name>.config.toml on top of the base user config'",
+              "orchestrator/executor.py:81",
+              "orchestrator/pool.py:103-121 (codex_available/status, no profile logic)",
+              ".orchestrator/pool.toml:20-21 ([codex] model = \"gpt-6-astra\")",
+              "ls ~/.codex: no *.config.toml profile files present besides config.toml"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Per-account vs per-model usage-limit scope is undocumented; only confirmable by observing behavior across the 2026-09-19 14:00 reset with two different models, which requires consuming Codex quota (out of scope for this read-only task)."
+        ],
+        "suggested_next": [
+          "When Codex uncools after 2026-09-19 14:00, have Codex run one exec call with model=gpt-6-astra and, if any alternate id is ever confirmed valid, a second with a different model, to empirically test whether the reset clears both or just one \u2014 but only as a deliberate, budget-approved test, not incidentally."
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789656035.003634,
+  "pid": 83752,
+  "account": "B"
+}

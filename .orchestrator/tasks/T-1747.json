@@ -1,0 +1,1276 @@
+{
+  "id": "T-1747",
+  "created_at": 1791527418.639056,
+  "parent": "T-1745",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again",
+  "spec": "Evidence (luna-inbox, 2026-10-09): T-0676 was dispatched at 06:48:39; the daemon restart at 06:49 (PR 48 deploy) killed\nits worker before it started work. The task stayed status=queued with pipeline.dispatched_at, dispatched_at_lease and\ndispatched_at_done set and no pid. orchestrator/daemon.py dispatch (around line 984) then skips it forever with reason \"other\"\nbecause it is not in the wave and has dispatched_at. It sat 70 min until the Planner cleared the stamps by hand. This has happened\nrepeatedly (T-0617, T-0618 and others on 2026-10-08).\nFix: on each tick (cheap, from the per-tick bus snapshot), a task with status queued, a dispatched_at stamp, and no live worker\n(no pid, or a pid that is not alive, and no worker_registry entry) for longer than [dispatch].stale_stamp_grace_s (default 120 s)\ngets its dispatched_at* stamps cleared and a one-line event \"stale dispatch stamp cleared (worker gone)\". Never touch a task with a\nlive worker or a running/held/done status. Also make the skip reason say \"stale_dispatch_stamp\" instead of \"other\" while the grace\nruns. Tests (tests/test_daemon.py): test_stale_dispatch_stamp_cleared_after_grace, test_live_worker_stamp_kept,\ntest_skip_reason_names_stale_stamp. Run: PYTHONPATH=tests uv run python -m unittest tests.test_daemon. Commit on the task branch.",
+  "inputs": [
+    "T-1746"
+  ],
+  "acceptance": [
+    "queued tasks with a dead worker's dispatch stamp dispatch again after the grace",
+    "live workers and non-queued tasks are untouched",
+    "the three named tests pass",
+    "tests.test_daemon passes"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/pool.py",
+    "tests/test_daemon.py",
+    "docs/daemon.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1747",
+  "codex_thread": null,
+  "result": {
+    "summary": "The implementation matches the acceptance criteria. Only daemon.py and tests/test_daemon.py changed, and docs/daemon.md and pool.py were not touched. Stamps are cleared only for queued, non-goal execute tasks that have no live worker, after the grace period. A live worker is detected from an in-process dispatch thread, a live pid on the task, or a registry entry that is non-terminal and has no pid or a live one. The clear is re-checked under bus.locked() to avoid races. The skip reason is 'stale_dispatch_stamp' while a dead stamp is inside the grace window, and 'other' for live workers. The three named tests exist as unittest methods and cover clearing after the grace, keeping live and non-queued tasks, and the skip reason. I did not run the suite.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 857,
+        "issue": "_dispatch_live only knows about dispatch threads in this process (_LIVE_DISPATCH), a live task pid, or a worker_registry entry. A worker started by a different process (daemon --once or a Planner-run pass) that has not yet written a registry entry or pid, such as a Codex MCP worker still in setup, would count as dead after 120s and be re-dispatched. The claim path probably sets status=running before this matters, so the exposure is small. I did not verify it.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 836,
+        "issue": "The new [dispatch].stale_stamp_grace_s setting is not documented. docs/daemon.md is in scope but was not updated, and pool.py has no default. The default exists only as the STALE_STAMP_GRACE_S constant.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 857,
+        "issue": "The clear logic requires `not pipeline.get('gated_at')`, which the spec does not mention. This is reasonable since a gated task is past dispatch, but no test covers it.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "7cbc35e09c20",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791527418.641172,
+      "reviewed_sha": "6a11de8553c267260d1f5da769672ce9967987b0"
+    },
+    {
+      "ts": 1791527422.044717,
+      "packet_meta": {
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 14781,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791527422.082156,
+      "packet_meta": {
+        "chars": 13931,
+        "est_tokens": 3482,
+        "presented_tokens": 3482,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "41b7635c7c18ceec1dc00645341e716ae0f64a657e37bae7858c932751174ac7"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 1321,
+            "est_tokens": 330,
+            "sha256": "89f0410f15c9c782dd7e870027f8f6f00811642a1db6fd7e2e0f22b99dfde47d"
+          },
+          "acceptance": {
+            "chars": 202,
+            "est_tokens": 50,
+            "sha256": "a3d2798bf807870d117b59b83bfcd76b635e89c8d54c7e665b19bcc9f5dc8f0b"
+          },
+          "scope": {
+            "chars": 97,
+            "est_tokens": 24,
+            "sha256": "88bcf0433579ba7cfcd717b9c1b47cccdc7493dc4daa91b56e403128e0afd9fc"
+          },
+          "diff": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "93bc429a78491b8306d67b4edb20bdb5e94f4c552b8f23310d0151f768cf4d13"
+          },
+          "changed tests": {
+            "chars": 72,
+            "est_tokens": 18,
+            "sha256": "c192fd56ce87011ded0f414d51d5d04a3b6aa3bdb7b60d63ba9fe7eaca900d10"
+          },
+          "gate": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "88976884a6094239b7cad9b1020392711ac20a5206f26a9c8845f62158da6f8d"
+          },
+          "security": {
+            "chars": 129,
+            "est_tokens": 32,
+            "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+          },
+          "evidence": {
+            "chars": 10868,
+            "est_tokens": 2717,
+            "sha256": "dbf276471aa38803df6fa121fa94ac62eb2072378c29b54325e69d21838aa2d1"
+          }
+        },
+        "hash": "7cbc35e09c20",
+        "version": "7cbc35e09c20",
+        "candidate_known": true,
+        "base": "6a11de8553c2",
+        "sources": "task@T-1746 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 3047,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 12104,
+        "routed_reduction_ratio": 0.7182104076425562,
+        "routed_hidden": 2,
+        "routed_ambiguous": 6,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "93bb61ed0749",
+          "dba6b16e8562",
+          "f0d8ce8fb40c",
+          "33c47b1b895b",
+          "c259c6e30ed0",
+          "3822a5f95e5c",
+          "cd5a0ec7eeab",
+          "dddb35a099a3",
+          "041199286363",
+          "051786ba0165",
+          "0768ddd89e7e",
+          "09a7a8aad3cb",
+          "0d2ec7051e6b",
+          "0fb2f39963fc",
+          "1010a8c11bac",
+          "10357d124edf",
+          "1a80d55206ca",
+          "1f015476798d",
+          "241cf717cdc5",
+          "257a130f0604",
+          "271ca802fd19",
+          "2767a663062c",
+          "276e9451cd82",
+          "2993e8419e50",
+          "2b052ca0d6a3",
+          "2b6f19c1117b",
+          "3037c6d26ebe",
+          "325d85b6f071",
+          "3a7ed61a955d",
+          "401ad36a477f",
+          "4147d847a166",
+          "429c400192ff",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "4e7c92225364",
+          "504365aa02ad",
+          "55d0ebe04a88",
+          "573b5b20bfad",
+          "575022ff3493",
+          "5893a1c64463",
+          "5b872ee10528",
+          "5e22799f1c53",
+          "622de2bd3ec8",
+          "65c4d2b5db00",
+          "667ed6b21b31",
+          "718b545b1eca",
+          "78211d826592",
+          "782271847472",
+          "78e8f01f83bd",
+          "7c4ec659bc5c",
+          "7dc2c9b70713",
+          "840298e6ec3b",
+          "85475df22f68",
+          "8e7dad660779",
+          "92431c7785cc",
+          "93c94ac0c027",
+          "93e547c9c5c8",
+          "96d5c49fda33",
+          "985ffb7f01b9",
+          "98b9b3872536",
+          "9909722c54fe",
+          "9990c33f0cb1",
+          "a36f287997e8",
+          "a48883e9da6e",
+          "a595cbbe1665",
+          "a64c9c5341ef",
+          "a98276b73bf8",
+          "acfaa314d8bc",
+          "ad6d660c058a",
+          "ae61acc3156e",
+          "b676757c3fa9",
+          "b8a747fc5a22",
+          "bb680aa235cd",
+          "bdb16848d342",
+          "c6139725224e",
+          "c7a225c8e15f",
+          "cc3f3bcac15a",
+          "ce80308dc309",
+          "d0b9e72fe363",
+          "d2cb7b81717c",
+          "d4f13d6f6419",
+          "d500754708e5",
+          "d5139aa32546",
+          "de1af9f22a51",
+          "df7350a0e379",
+          "e146114ba8ec",
+          "e175a2554b06",
+          "e2162c087043",
+          "e2c7a2ad69c6",
+          "e401fb2daf22",
+          "e4b388cad1ac",
+          "e57cf7bc69b8",
+          "e7aef1366419",
+          "e7f42c22107d",
+          "eebfc06013f4",
+          "f9c9ea20aac1",
+          "fd00d1d1f646"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 14781,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1791527429.4556959,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1747",
+      "claimed_at": 1791527429.4525282
+    },
+    {
+      "ts": 1791527429.464364,
+      "account": "B"
+    },
+    {
+      "ts": 1791527431.660057,
+      "pid": 91661,
+      "account": "B"
+    },
+    {
+      "ts": 1791527475.762939,
+      "packet_meta": {
+        "chars": 13931,
+        "est_tokens": 3482,
+        "presented_tokens": 3482,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "41b7635c7c18ceec1dc00645341e716ae0f64a657e37bae7858c932751174ac7"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 1321,
+            "est_tokens": 330,
+            "sha256": "89f0410f15c9c782dd7e870027f8f6f00811642a1db6fd7e2e0f22b99dfde47d"
+          },
+          "acceptance": {
+            "chars": 202,
+            "est_tokens": 50,
+            "sha256": "a3d2798bf807870d117b59b83bfcd76b635e89c8d54c7e665b19bcc9f5dc8f0b"
+          },
+          "scope": {
+            "chars": 97,
+            "est_tokens": 24,
+            "sha256": "88bcf0433579ba7cfcd717b9c1b47cccdc7493dc4daa91b56e403128e0afd9fc"
+          },
+          "diff": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "93bc429a78491b8306d67b4edb20bdb5e94f4c552b8f23310d0151f768cf4d13"
+          },
+          "changed tests": {
+            "chars": 72,
+            "est_tokens": 18,
+            "sha256": "c192fd56ce87011ded0f414d51d5d04a3b6aa3bdb7b60d63ba9fe7eaca900d10"
+          },
+          "gate": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "88976884a6094239b7cad9b1020392711ac20a5206f26a9c8845f62158da6f8d"
+          },
+          "security": {
+            "chars": 129,
+            "est_tokens": 32,
+            "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+          },
+          "evidence": {
+            "chars": 10868,
+            "est_tokens": 2717,
+            "sha256": "dbf276471aa38803df6fa121fa94ac62eb2072378c29b54325e69d21838aa2d1"
+          }
+        },
+        "hash": "7cbc35e09c20",
+        "version": "7cbc35e09c20",
+        "candidate_known": true,
+        "base": "6a11de8553c2",
+        "sources": "task@T-1746 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 3047,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 12104,
+        "routed_reduction_ratio": 0.7182104076425562,
+        "routed_hidden": 2,
+        "routed_ambiguous": 6,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "93bb61ed0749",
+          "dba6b16e8562",
+          "f0d8ce8fb40c",
+          "33c47b1b895b",
+          "c259c6e30ed0",
+          "3822a5f95e5c",
+          "cd5a0ec7eeab",
+          "dddb35a099a3",
+          "041199286363",
+          "051786ba0165",
+          "0768ddd89e7e",
+          "09a7a8aad3cb",
+          "0d2ec7051e6b",
+          "0fb2f39963fc",
+          "1010a8c11bac",
+          "10357d124edf",
+          "1a80d55206ca",
+          "1f015476798d",
+          "241cf717cdc5",
+          "257a130f0604",
+          "271ca802fd19",
+          "2767a663062c",
+          "276e9451cd82",
+          "2993e8419e50",
+          "2b052ca0d6a3",
+          "2b6f19c1117b",
+          "3037c6d26ebe",
+          "325d85b6f071",
+          "3a7ed61a955d",
+          "401ad36a477f",
+          "4147d847a166",
+          "429c400192ff",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "4e7c92225364",
+          "504365aa02ad",
+          "55d0ebe04a88",
+          "573b5b20bfad",
+          "575022ff3493",
+          "5893a1c64463",
+          "5b872ee10528",
+          "5e22799f1c53",
+          "622de2bd3ec8",
+          "65c4d2b5db00",
+          "667ed6b21b31",
+          "718b545b1eca",
+          "78211d826592",
+          "782271847472",
+          "78e8f01f83bd",
+          "7c4ec659bc5c",
+          "7dc2c9b70713",
+          "840298e6ec3b",
+          "85475df22f68",
+          "8e7dad660779",
+          "92431c7785cc",
+          "93c94ac0c027",
+          "93e547c9c5c8",
+          "96d5c49fda33",
+          "985ffb7f01b9",
+          "98b9b3872536",
+          "9909722c54fe",
+          "9990c33f0cb1",
+          "a36f287997e8",
+          "a48883e9da6e",
+          "a595cbbe1665",
+          "a64c9c5341ef",
+          "a98276b73bf8",
+          "acfaa314d8bc",
+          "ad6d660c058a",
+          "ae61acc3156e",
+          "b676757c3fa9",
+          "b8a747fc5a22",
+          "bb680aa235cd",
+          "bdb16848d342",
+          "c6139725224e",
+          "c7a225c8e15f",
+          "cc3f3bcac15a",
+          "ce80308dc309",
+          "d0b9e72fe363",
+          "d2cb7b81717c",
+          "d4f13d6f6419",
+          "d500754708e5",
+          "d5139aa32546",
+          "de1af9f22a51",
+          "df7350a0e379",
+          "e146114ba8ec",
+          "e175a2554b06",
+          "e2162c087043",
+          "e2c7a2ad69c6",
+          "e401fb2daf22",
+          "e4b388cad1ac",
+          "e57cf7bc69b8",
+          "e7aef1366419",
+          "e7f42c22107d",
+          "eebfc06013f4",
+          "f9c9ea20aac1",
+          "fd00d1d1f646"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 14781,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active",
+        "session_id": "daf4be32-868b-42a1-8bb9-7faa6ae65702"
+      }
+    },
+    {
+      "ts": 1791527475.959457,
+      "packet_meta": {
+        "chars": 13931,
+        "est_tokens": 3482,
+        "presented_tokens": 3482,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "41b7635c7c18ceec1dc00645341e716ae0f64a657e37bae7858c932751174ac7"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 1321,
+            "est_tokens": 330,
+            "sha256": "89f0410f15c9c782dd7e870027f8f6f00811642a1db6fd7e2e0f22b99dfde47d"
+          },
+          "acceptance": {
+            "chars": 202,
+            "est_tokens": 50,
+            "sha256": "a3d2798bf807870d117b59b83bfcd76b635e89c8d54c7e665b19bcc9f5dc8f0b"
+          },
+          "scope": {
+            "chars": 97,
+            "est_tokens": 24,
+            "sha256": "88bcf0433579ba7cfcd717b9c1b47cccdc7493dc4daa91b56e403128e0afd9fc"
+          },
+          "diff": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "93bc429a78491b8306d67b4edb20bdb5e94f4c552b8f23310d0151f768cf4d13"
+          },
+          "changed tests": {
+            "chars": 72,
+            "est_tokens": 18,
+            "sha256": "c192fd56ce87011ded0f414d51d5d04a3b6aa3bdb7b60d63ba9fe7eaca900d10"
+          },
+          "gate": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "88976884a6094239b7cad9b1020392711ac20a5206f26a9c8845f62158da6f8d"
+          },
+          "security": {
+            "chars": 129,
+            "est_tokens": 32,
+            "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+          },
+          "evidence": {
+            "chars": 10868,
+            "est_tokens": 2717,
+            "sha256": "dbf276471aa38803df6fa121fa94ac62eb2072378c29b54325e69d21838aa2d1"
+          }
+        },
+        "hash": "7cbc35e09c20",
+        "version": "7cbc35e09c20",
+        "candidate_known": true,
+        "base": "6a11de8553c2",
+        "sources": "task@T-1746 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 3047,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 12104,
+        "routed_reduction_ratio": 0.7182104076425562,
+        "routed_hidden": 2,
+        "routed_ambiguous": 6,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "93bb61ed0749",
+          "dba6b16e8562",
+          "f0d8ce8fb40c",
+          "33c47b1b895b",
+          "c259c6e30ed0",
+          "3822a5f95e5c",
+          "cd5a0ec7eeab",
+          "dddb35a099a3",
+          "041199286363",
+          "051786ba0165",
+          "0768ddd89e7e",
+          "09a7a8aad3cb",
+          "0d2ec7051e6b",
+          "0fb2f39963fc",
+          "1010a8c11bac",
+          "10357d124edf",
+          "1a80d55206ca",
+          "1f015476798d",
+          "241cf717cdc5",
+          "257a130f0604",
+          "271ca802fd19",
+          "2767a663062c",
+          "276e9451cd82",
+          "2993e8419e50",
+          "2b052ca0d6a3",
+          "2b6f19c1117b",
+          "3037c6d26ebe",
+          "325d85b6f071",
+          "3a7ed61a955d",
+          "401ad36a477f",
+          "4147d847a166",
+          "429c400192ff",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "4e7c92225364",
+          "504365aa02ad",
+          "55d0ebe04a88",
+          "573b5b20bfad",
+          "575022ff3493",
+          "5893a1c64463",
+          "5b872ee10528",
+          "5e22799f1c53",
+          "622de2bd3ec8",
+          "65c4d2b5db00",
+          "667ed6b21b31",
+          "718b545b1eca",
+          "78211d826592",
+          "782271847472",
+          "78e8f01f83bd",
+          "7c4ec659bc5c",
+          "7dc2c9b70713",
+          "840298e6ec3b",
+          "85475df22f68",
+          "8e7dad660779",
+          "92431c7785cc",
+          "93c94ac0c027",
+          "93e547c9c5c8",
+          "96d5c49fda33",
+          "985ffb7f01b9",
+          "98b9b3872536",
+          "9909722c54fe",
+          "9990c33f0cb1",
+          "a36f287997e8",
+          "a48883e9da6e",
+          "a595cbbe1665",
+          "a64c9c5341ef",
+          "a98276b73bf8",
+          "acfaa314d8bc",
+          "ad6d660c058a",
+          "ae61acc3156e",
+          "b676757c3fa9",
+          "b8a747fc5a22",
+          "bb680aa235cd",
+          "bdb16848d342",
+          "c6139725224e",
+          "c7a225c8e15f",
+          "cc3f3bcac15a",
+          "ce80308dc309",
+          "d0b9e72fe363",
+          "d2cb7b81717c",
+          "d4f13d6f6419",
+          "d500754708e5",
+          "d5139aa32546",
+          "de1af9f22a51",
+          "df7350a0e379",
+          "e146114ba8ec",
+          "e175a2554b06",
+          "e2162c087043",
+          "e2c7a2ad69c6",
+          "e401fb2daf22",
+          "e4b388cad1ac",
+          "e57cf7bc69b8",
+          "e7aef1366419",
+          "e7f42c22107d",
+          "eebfc06013f4",
+          "f9c9ea20aac1",
+          "fd00d1d1f646"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 14781,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active",
+        "session_id": "daf4be32-868b-42a1-8bb9-7faa6ae65702",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791527480.04706,
+      "status": "done",
+      "result": {
+        "summary": "The implementation matches the acceptance criteria. Only daemon.py and tests/test_daemon.py changed, and docs/daemon.md and pool.py were not touched. Stamps are cleared only for queued, non-goal execute tasks that have no live worker, after the grace period. A live worker is detected from an in-process dispatch thread, a live pid on the task, or a registry entry that is non-terminal and has no pid or a live one. The clear is re-checked under bus.locked() to avoid races. The skip reason is 'stale_dispatch_stamp' while a dead stamp is inside the grace window, and 'other' for live workers. The three named tests exist as unittest methods and cover clearing after the grace, keeping live and non-queued tasks, and the skip reason. I did not run the suite.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 857,
+            "issue": "_dispatch_live only knows about dispatch threads in this process (_LIVE_DISPATCH), a live task pid, or a worker_registry entry. A worker started by a different process (daemon --once or a Planner-run pass) that has not yet written a registry entry or pid, such as a Codex MCP worker still in setup, would count as dead after 120s and be re-dispatched. The claim path probably sets status=running before this matters, so the exposure is small. I did not verify it.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 836,
+            "issue": "The new [dispatch].stale_stamp_grace_s setting is not documented. docs/daemon.md is in scope but was not updated, and pool.py has no default. The default exists only as the STALE_STAMP_GRACE_S constant.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 857,
+            "issue": "The clear logic requires `not pipeline.get('gated_at')`, which the spec does not mention. This is reasonable since a gated task is past dispatch, but no test covers it.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "7cbc35e09c20",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791527480.050655,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791527480.063179,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 3,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 3,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "6a11de8553c267260d1f5da769672ce9967987b0",
+        "packet_version": "7cbc35e09c20",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 3,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 3,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "6a11de8553c267260d1f5da769672ce9967987b0",
+      "packet_version": "7cbc35e09c20",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "6a11de8553c267260d1f5da769672ce9967987b0",
+  "packet_meta": {
+    "chars": 13931,
+    "est_tokens": 3482,
+    "presented_tokens": 3482,
+    "sections": {
+      "_preamble": {
+        "chars": 128,
+        "est_tokens": 32,
+        "sha256": "41b7635c7c18ceec1dc00645341e716ae0f64a657e37bae7858c932751174ac7"
+      },
+      "skills": {
+        "chars": 56,
+        "est_tokens": 14,
+        "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+      },
+      "Trigger": {
+        "chars": 44,
+        "est_tokens": 11,
+        "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+      },
+      "Objective": {
+        "chars": 100,
+        "est_tokens": 25,
+        "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+      },
+      "Procedure": {
+        "chars": 142,
+        "est_tokens": 35,
+        "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+      },
+      "Tools": {
+        "chars": 33,
+        "est_tokens": 8,
+        "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+      },
+      "Evidence requirements": {
+        "chars": 83,
+        "est_tokens": 20,
+        "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+      },
+      "Output contract": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+      },
+      "Stop conditions": {
+        "chars": 77,
+        "est_tokens": 19,
+        "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+      },
+      "Failure/recovery": {
+        "chars": 71,
+        "est_tokens": 17,
+        "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+      },
+      "spec": {
+        "chars": 1321,
+        "est_tokens": 330,
+        "sha256": "89f0410f15c9c782dd7e870027f8f6f00811642a1db6fd7e2e0f22b99dfde47d"
+      },
+      "acceptance": {
+        "chars": 202,
+        "est_tokens": 50,
+        "sha256": "a3d2798bf807870d117b59b83bfcd76b635e89c8d54c7e665b19bcc9f5dc8f0b"
+      },
+      "scope": {
+        "chars": 97,
+        "est_tokens": 24,
+        "sha256": "88bcf0433579ba7cfcd717b9c1b47cccdc7493dc4daa91b56e403128e0afd9fc"
+      },
+      "diff": {
+        "chars": 235,
+        "est_tokens": 58,
+        "sha256": "93bc429a78491b8306d67b4edb20bdb5e94f4c552b8f23310d0151f768cf4d13"
+      },
+      "changed tests": {
+        "chars": 72,
+        "est_tokens": 18,
+        "sha256": "c192fd56ce87011ded0f414d51d5d04a3b6aa3bdb7b60d63ba9fe7eaca900d10"
+      },
+      "gate": {
+        "chars": 109,
+        "est_tokens": 27,
+        "sha256": "88976884a6094239b7cad9b1020392711ac20a5206f26a9c8845f62158da6f8d"
+      },
+      "security": {
+        "chars": 129,
+        "est_tokens": 32,
+        "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+      },
+      "evidence": {
+        "chars": 10868,
+        "est_tokens": 2717,
+        "sha256": "dbf276471aa38803df6fa121fa94ac62eb2072378c29b54325e69d21838aa2d1"
+      }
+    },
+    "hash": "7cbc35e09c20",
+    "version": "7cbc35e09c20",
+    "candidate_known": true,
+    "base": "6a11de8553c2",
+    "sources": "task@T-1746 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+    "candidate_tokens": 3047,
+    "skill_tokens_presented_l2": 178,
+    "routed_mode": "shadow",
+    "routed_tokens": 12104,
+    "routed_reduction_ratio": 0.7182104076425562,
+    "routed_hidden": 2,
+    "routed_ambiguous": 6,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "93bb61ed0749",
+      "dba6b16e8562",
+      "f0d8ce8fb40c",
+      "33c47b1b895b",
+      "c259c6e30ed0",
+      "3822a5f95e5c",
+      "cd5a0ec7eeab",
+      "dddb35a099a3",
+      "041199286363",
+      "051786ba0165",
+      "0768ddd89e7e",
+      "09a7a8aad3cb",
+      "0d2ec7051e6b",
+      "0fb2f39963fc",
+      "1010a8c11bac",
+      "10357d124edf",
+      "1a80d55206ca",
+      "1f015476798d",
+      "241cf717cdc5",
+      "257a130f0604",
+      "271ca802fd19",
+      "2767a663062c",
+      "276e9451cd82",
+      "2993e8419e50",
+      "2b052ca0d6a3",
+      "2b6f19c1117b",
+      "3037c6d26ebe",
+      "325d85b6f071",
+      "3a7ed61a955d",
+      "401ad36a477f",
+      "4147d847a166",
+      "429c400192ff",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "4e7c92225364",
+      "504365aa02ad",
+      "55d0ebe04a88",
+      "573b5b20bfad",
+      "575022ff3493",
+      "5893a1c64463",
+      "5b872ee10528",
+      "5e22799f1c53",
+      "622de2bd3ec8",
+      "65c4d2b5db00",
+      "667ed6b21b31",
+      "718b545b1eca",
+      "78211d826592",
+      "782271847472",
+      "78e8f01f83bd",
+      "7c4ec659bc5c",
+      "7dc2c9b70713",
+      "840298e6ec3b",
+      "85475df22f68",
+      "8e7dad660779",
+      "92431c7785cc",
+      "93c94ac0c027",
+      "93e547c9c5c8",
+      "96d5c49fda33",
+      "985ffb7f01b9",
+      "98b9b3872536",
+      "9909722c54fe",
+      "9990c33f0cb1",
+      "a36f287997e8",
+      "a48883e9da6e",
+      "a595cbbe1665",
+      "a64c9c5341ef",
+      "a98276b73bf8",
+      "acfaa314d8bc",
+      "ad6d660c058a",
+      "ae61acc3156e",
+      "b676757c3fa9",
+      "b8a747fc5a22",
+      "bb680aa235cd",
+      "bdb16848d342",
+      "c6139725224e",
+      "c7a225c8e15f",
+      "cc3f3bcac15a",
+      "ce80308dc309",
+      "d0b9e72fe363",
+      "d2cb7b81717c",
+      "d4f13d6f6419",
+      "d500754708e5",
+      "d5139aa32546",
+      "de1af9f22a51",
+      "df7350a0e379",
+      "e146114ba8ec",
+      "e175a2554b06",
+      "e2162c087043",
+      "e2c7a2ad69c6",
+      "e401fb2daf22",
+      "e4b388cad1ac",
+      "e57cf7bc69b8",
+      "e7aef1366419",
+      "e7f42c22107d",
+      "eebfc06013f4",
+      "f9c9ea20aac1",
+      "fd00d1d1f646"
+    ],
+    "prefix_sha": "a7fc6578794f",
+    "prefix_chars": 710,
+    "suffix_chars": 14781,
+    "dynamic_sections": [
+      "skills",
+      "Trigger",
+      "Objective",
+      "Procedure",
+      "Tools",
+      "Evidence requirements",
+      "Output contract",
+      "Stop conditions",
+      "Failure/recovery",
+      "spec",
+      "acceptance",
+      "scope",
+      "diff",
+      "changed tests",
+      "gate",
+      "security",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 390,
+    "instruction_tokens_modular": 390,
+    "role": "review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "specialist",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_routing_mode": "active",
+    "session_id": "daf4be32-868b-42a1-8bb9-7faa6ae65702",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791527429.4525282,
+  "account": "B",
+  "pid": 91661,
+  "pipeline": {
+    "skills_used": []
+  },
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 3,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 3,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "6a11de8553c267260d1f5da769672ce9967987b0",
+    "packet_version": "7cbc35e09c20",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 3,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 3,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "7cbc35e09c20",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

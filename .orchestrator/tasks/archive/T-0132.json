@@ -1,0 +1,162 @@
+{
+  "id": "T-0132",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): C-O9 daemon reconcile_dead re-gates orphaned executors (T-0130, executed by claude:sonnet)",
+  "spec": "Review the diff of task T-0130 (branch task/T-0130, worktree wt/T-0130, commit f3d1f10, base 4aaaa03 on goal/T-0073) against its acceptance criteria. Executor was claude:sonnet; this review runs on opus. Focus: (1) reconcile_dead() correctness: base computation via merge-base with goal/<parent> and the upstream fallback; ahead count; dirty detection; the three outcomes requeued|regated|held; (2) the regated result shape (orphaned true, commit sha, executed_by preserved) so gate() then runs tests-green and picks review_tier from the executor field; (3) no path where a dead scout/review/spec_review task changes behaviour; (4) 60 s grace kept; (5) exceptions from git in a missing or broken worktree fall back to requeue rather than crashing tick(); (6) tests exercise all four cases with real git worktrees or faithful fakes; (7) security: no shell literal built from task fields; notify() receives untrusted text only as an argument. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0130"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the seven focus points addressed with evidence from the diff",
+    "Security checklist applied"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0132",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 81,
+        "issue": "Dead fallback: the orphan check silently does not fire in the case it was written for. `git rev-parse task/<tid>@{upstream}` never resolves for these worktrees \u2014 spawn.ensure_worktree (spawn.py:60) creates them with `git worktree add <wt> -b task/<tid> <base>`, with no --track, so no upstream is configured (verified in this worktree: `git rev-parse 'task/T-0132@{upstream}'` -> fatal, rc=128; `git config branch.task/T-0132.remote` -> unset). So whenever goal/<parent> does not exist \u2014 a parentless execute task (stale() at daemon.py:125 explicitly allows those), or the first execute task of a goal, where spawn.base_for falls back to origin/main \u2014 base stays None and line 84-86 takes the old destructive requeue on a worktree that may hold a finished commit. That is exactly the T-0115 loss the docstring cites. Use a base that always resolves: merge-base against origin/main (or the worktree's `git rev-list --count HEAD ^origin/main`) when goal/<parent> is absent, and cover it with a test.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 102,
+        "issue": "New auto-merge risk. post_result(..., 'done') feeds gate() (daemon.py:283), which for complexity <= DIRECT_MERGE_MAX (3) merges directly with no reviewer as soon as tests-green passes. A worker that died mid-task having committed only part of the work leaves a clean worktree ahead of base; the acceptance criteria are unmet but the existing tests still pass, so partial work lands on goal/<parent> unreviewed. Before this diff that case merely requeued. The result carries `orphaned: True` but nothing ever reads it \u2014 grep shows no consumer. Make gate() force a review task when result.orphaned is set regardless of complexity, or post the orphan as held with the sha rather than done.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 71,
+        "issue": "The 'requeued' outcome is a dead end for execute tasks, and this diff now asserts it as correct behaviour in three places. status goes back to queued but pipeline.dispatched_at is left stamped; dispatch() only acts under `stamp(t['id'], 'dispatched_at')` (daemon.py:233), and stamp() returns False when the stage is already stamped. Nothing anywhere clears pipeline (grep for dispatched_at: only daemon.py:186 reads it and daemon.py:233 sets it). So a task requeued here sits queued forever and no executor ever retries it \u2014 including the new line 90-92 path, where the worker died before committing and the work still needs doing. Clear the dispatched_at stamp (and pid) on the requeue paths; test_reconcile_dead_requeues_when_no_commits_ahead should assert re-dispatch on the next tick, not just status == 'queued'.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 332,
+        "issue": "reconcile_dead() runs in tick()'s running-task loop, which sits outside the `for stage in (dispatch, gate, merge_reviewed)` try/except at daemon.py:333-337. It now issues four subprocess calls per task; a worktree removed between the Path.is_dir() check at line 70 and `_git_in` raises FileNotFoundError, and bus.get inside post_result raises KeyError if the task json vanished. Either aborts the whole tick before dispatch/gate/merge run. The pre-change one-liner could not raise from git. Wrap the call in try/except (print + continue), matching how the stage loop already degrades.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 348,
+        "issue": "Coverage gap that hides the finding above: every new test creates goal/T-0043 and relies on self.task()'s hard-coded parent='T-0043', so only the merge-base arm (daemon.py:77) is ever exercised. The branches the tests create (task/orphan-clean, task/orphan-dirty, task/rv) do not match task/<tid> for the real ids, which is why they pass despite the branch name being irrelevant to the code path \u2014 the upstream arm at daemon.py:81-83 and the no-parent case have zero coverage. Add a case with no goal/<parent> branch asserting what the fix should do there.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 94,
+        "issue": "`git status --porcelain` counts untracked files as dirty, so an executor that leaves a scratch note or any non-ignored artifact next to a good commit is held for a human instead of re-gated. The repo .gitignore covers __pycache__/, .venv/, .mcp.json, so this is not the common case, and erring toward held is defensible \u2014 but if the intent is 'uncommitted changes to the work', use `--untracked-files=no` or record why untracked counts. Non-blocking; a comment either way would settle it.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 60,
+        "issue": "Coverage note (verified, no change requested): full suite `python3 -m unittest tests.test_daemon` passes, 39 tests. Security checklist applied to this diff \u2014 all git invocations go through argv lists with no shell=True and the worktree path is only ever a cwd (no injection surface); executor-controlled data (filenames from status --porcelain, commit sha) reaches notify(), which caps at 200 chars and passes the message as an argv item to osascript rather than interpolating it into AppleScript source; resume_hint is truncated to 20 lines and the posted result is far under bus.MAX_RESULT_CHARS, so no unbounded blob can reach an external webhook or the Planner's context; no secrets, credentials, auth, billing or data-deletion surface is touched; provenance is honestly ['repo'] since the fact asserted (a commit in a repo worktree) is read from git. The int() parse at line 89 is guarded by isdigit(), and both merge-base and rev-list check returncode before using stdout.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789736979.0718029,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0132",
+      "claimed_at": 1789736979.071319
+    },
+    {
+      "ts": 1789736979.110375,
+      "pid": 32935,
+      "account": "B"
+    },
+    {
+      "ts": 1789737191.0145102,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 81,
+            "issue": "Dead fallback: the orphan check silently does not fire in the case it was written for. `git rev-parse task/<tid>@{upstream}` never resolves for these worktrees \u2014 spawn.ensure_worktree (spawn.py:60) creates them with `git worktree add <wt> -b task/<tid> <base>`, with no --track, so no upstream is configured (verified in this worktree: `git rev-parse 'task/T-0132@{upstream}'` -> fatal, rc=128; `git config branch.task/T-0132.remote` -> unset). So whenever goal/<parent> does not exist \u2014 a parentless execute task (stale() at daemon.py:125 explicitly allows those), or the first execute task of a goal, where spawn.base_for falls back to origin/main \u2014 base stays None and line 84-86 takes the old destructive requeue on a worktree that may hold a finished commit. That is exactly the T-0115 loss the docstring cites. Use a base that always resolves: merge-base against origin/main (or the worktree's `git rev-list --count HEAD ^origin/main`) when goal/<parent> is absent, and cover it with a test.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 102,
+            "issue": "New auto-merge risk. post_result(..., 'done') feeds gate() (daemon.py:283), which for complexity <= DIRECT_MERGE_MAX (3) merges directly with no reviewer as soon as tests-green passes. A worker that died mid-task having committed only part of the work leaves a clean worktree ahead of base; the acceptance criteria are unmet but the existing tests still pass, so partial work lands on goal/<parent> unreviewed. Before this diff that case merely requeued. The result carries `orphaned: True` but nothing ever reads it \u2014 grep shows no consumer. Make gate() force a review task when result.orphaned is set regardless of complexity, or post the orphan as held with the sha rather than done.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 71,
+            "issue": "The 'requeued' outcome is a dead end for execute tasks, and this diff now asserts it as correct behaviour in three places. status goes back to queued but pipeline.dispatched_at is left stamped; dispatch() only acts under `stamp(t['id'], 'dispatched_at')` (daemon.py:233), and stamp() returns False when the stage is already stamped. Nothing anywhere clears pipeline (grep for dispatched_at: only daemon.py:186 reads it and daemon.py:233 sets it). So a task requeued here sits queued forever and no executor ever retries it \u2014 including the new line 90-92 path, where the worker died before committing and the work still needs doing. Clear the dispatched_at stamp (and pid) on the requeue paths; test_reconcile_dead_requeues_when_no_commits_ahead should assert re-dispatch on the next tick, not just status == 'queued'.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 332,
+            "issue": "reconcile_dead() runs in tick()'s running-task loop, which sits outside the `for stage in (dispatch, gate, merge_reviewed)` try/except at daemon.py:333-337. It now issues four subprocess calls per task; a worktree removed between the Path.is_dir() check at line 70 and `_git_in` raises FileNotFoundError, and bus.get inside post_result raises KeyError if the task json vanished. Either aborts the whole tick before dispatch/gate/merge run. The pre-change one-liner could not raise from git. Wrap the call in try/except (print + continue), matching how the stage loop already degrades.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 348,
+            "issue": "Coverage gap that hides the finding above: every new test creates goal/T-0043 and relies on self.task()'s hard-coded parent='T-0043', so only the merge-base arm (daemon.py:77) is ever exercised. The branches the tests create (task/orphan-clean, task/orphan-dirty, task/rv) do not match task/<tid> for the real ids, which is why they pass despite the branch name being irrelevant to the code path \u2014 the upstream arm at daemon.py:81-83 and the no-parent case have zero coverage. Add a case with no goal/<parent> branch asserting what the fix should do there.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 94,
+            "issue": "`git status --porcelain` counts untracked files as dirty, so an executor that leaves a scratch note or any non-ignored artifact next to a good commit is held for a human instead of re-gated. The repo .gitignore covers __pycache__/, .venv/, .mcp.json, so this is not the common case, and erring toward held is defensible \u2014 but if the intent is 'uncommitted changes to the work', use `--untracked-files=no` or record why untracked counts. Non-blocking; a comment either way would settle it.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 60,
+            "issue": "Coverage note (verified, no change requested): full suite `python3 -m unittest tests.test_daemon` passes, 39 tests. Security checklist applied to this diff \u2014 all git invocations go through argv lists with no shell=True and the worktree path is only ever a cwd (no injection surface); executor-controlled data (filenames from status --porcelain, commit sha) reaches notify(), which caps at 200 chars and passes the message as an argv item to osascript rather than interpolating it into AppleScript source; resume_hint is truncated to 20 lines and the posted result is far under bus.MAX_RESULT_CHARS, so no unbounded blob can reach an external webhook or the Planner's context; no secrets, credentials, auth, billing or data-deletion surface is touched; provenance is honestly ['repo'] since the fact asserted (a commit in a repo worktree) is read from git. The int() parse at line 89 is guarded by isdigit(), and both merge-base and rev-list check returncode before using stdout.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789737191.0175219,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789736979.071319,
+  "pid": 32935,
+  "account": "B",
+  "review_verdict": "request_changes"
+}

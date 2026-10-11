@@ -1,0 +1,170 @@
+{
+  "id": "T-0531",
+  "created_at": 1789947636.7755961,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S2 v3: execution waves in daemon.dispatch behind [scheduler].mode = shadow|active|off \u2014 interference-compatible wave logged to runs/sched/waves.jsonl, applied only in active mode (spec reviews T-0523 and T-0525 folded in)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P3 (select the best set of mutually compatible ready tasks; respect depends_on, capacity, budgets, cooldowns, safety policy) and Evaluation (retain what baseline scheduling would have done). Base goal/T-0503 with S0a (schedlog, dispatch.jsonl considered rows with a capacity_reason local of cooldown|account_capacity|executor_capacity, first_ready_at) and S1 (interference.select_wave, pairwise, classify with a transitive _depends_on walk over the tasks dict) merged. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods.\nFacts: daemon.dispatch walks bus.read(status=\"queued\", role=\"execute\") + retry_held (budget-held tasks with no dispatched_at) in id order and dispatches first-come until free_slots; _load_review_cfg(pool) (daemon.py:217) shows the pool.toml table pattern but is called only from tick(), while the Daemon tests call daemon.dispatch(pool) directly. interference.select_wave(ready, running, tasks, capacity, order=None, graph=None, rules=None) -> {wave, deferred} takes and returns task ids; interference.pairwise(tasks_list) takes task dicts.\n1. _load_scheduler_cfg(pool): table [scheduler] with defaults mode = \"shadow\" (off|shadow|active), soft_conflict_policy = \"defer\", max_wave = 0 (0 = capacity); called at the top of dispatch(pool) itself so tests calling dispatch directly observe the mode. Add the table to .orchestrator/pool.toml with comments (default shadow: dispatch unchanged, waves only logged; active dispatches the wave; off disables both); touch install.py only if pool.toml is templated there.\n2. Extract the existing per-task eligibility into one side-effect-free helper _first_come_order(pool, candidates, slots) -> ordered ids that would dispatch this tick under the current rules (ready, non-stale, spec approved or below SPEC_REVIEW_MIN, fallback tier available in fallback mode, slot decrement); both the real off/shadow dispatch path and baseline_order call it, so the two orderings cannot diverge. Candidates = queued execute tasks plus the budget-held retries from retry_held (their held status is irrelevant to selection).\n3. Once per tick: running = execute tasks with status running plus dispatched-but-unclaimed ones; tasks = dict id -> task covering candidates, running, their goal siblings and the full transitive depends_on ancestry of every candidate and running task (walk depends_on through bus.get; missing ids are skipped, never raise). order = _wave_order(candidate_ids, tasks), a module-level hook returning its input unchanged (a later task replaces it). result = interference.select_wave(candidate_ids, running_ids, tasks, capacity=min(slots, max_wave or slots), order=order, rules={\"soft_conflict_policy\": ...}). predicted = interference.pairwise([tasks[i] for i in result[\"wave\"]]). When mode != off and candidates exist: schedlog.append(\"waves\", {\"ts\",\"mode\",\"ready\": candidate_ids,\"running\": running_ids,\"baseline_order\": _first_come_order(...),\"wave\",\"deferred\",\"predicted\",\"priority\": {},\"applied\": mode == \"active\"}).\n4. mode off or shadow: dispatch exactly as before. mode active: dispatch the wave in wave order and no other task this tick; each deferred candidate is recorded in the dispatch.jsonl considered row as skipped with reason \"predicted_interference\" for hard or soft deferrals and the existing capacity_reason value (cooldown|account_capacity|executor_capacity) for capacity deferrals. Invariants in every mode: never more dispatches than slots; never a task whose dependencies are not merged; never a hard-conflicting pair co-dispatched in active mode; spec-review creation and the review respawn loop unchanged.\n5. README Pipeline section: one paragraph on [scheduler] modes and the waves log.\n6. Tests in tests/test_daemon.py: ::test_scheduler_cfg_defaults, ::test_dispatch_shadow_logs_wave_and_keeps_first_come, ::test_dispatch_active_defers_hard_conflict_with_running_task, ::test_dispatch_active_respects_slots_and_dependencies, ::test_dispatch_mode_off_writes_no_wave_rows, ::test_dispatch_wave_includes_budget_retry_candidates, ::test_dispatch_active_capacity_deferral_keeps_capacity_reason, ::test_wave_tasks_cover_cross_goal_dependency_ancestry. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_scheduler_cfg_defaults and tests/test_daemon.py::test_dispatch_shadow_logs_wave_and_keeps_first_come pass: [scheduler] mode defaults to shadow, dispatch order and set are unchanged, and every tick with candidates appends a waves.jsonl row with ready, running, baseline_order (from the shared _first_come_order helper), wave, deferred, predicted and applied false",
+    "tests/test_daemon.py::test_dispatch_active_defers_hard_conflict_with_running_task, tests/test_daemon.py::test_dispatch_active_respects_slots_and_dependencies and tests/test_daemon.py::test_dispatch_active_capacity_deferral_keeps_capacity_reason pass: mode active dispatches only the selected wave, never a hard-conflicting pair together, never beyond free slots or unmet dependencies, and records deferred candidates in dispatch.jsonl as predicted_interference or the existing capacity_reason",
+    "tests/test_daemon.py::test_dispatch_mode_off_writes_no_wave_rows, tests/test_daemon.py::test_dispatch_wave_includes_budget_retry_candidates and tests/test_daemon.py::test_wave_tasks_cover_cross_goal_dependency_ancestry pass",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains eight tests"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "orchestrator/install.py",
+    "README.md",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0504",
+    "T-0506"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/interference.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/pool.py",
+      "orchestrator/bus.py",
+      "tests/test_daemon.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "_wave_order(candidate_ids, tasks) module hook returning an ordered id list (S3 replaces it); _first_come_order(pool, candidates, slots) side-effect-free; _load_scheduler_cfg(pool) called from dispatch; waves.jsonl row {ts, mode, ready, running, baseline_order, wave, deferred, predicted, priority, applied}; [scheduler] keys mode, soft_conflict_policy, max_wave",
+    "spec_review_round": 3,
+    "supersedes": "T-0524"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by S2 v4 after spec review T-0532 request_changes (round 3: candidate set must be the full eligible set so select_wave can backfill; drop goal siblings from the tasks dict; validate [scheduler].mode with a safe fallback). Planner waives a fourth round and dispatches v4 directly.",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1789947663.705368,
+      "pipeline": {
+        "spec_review_at": 1789947663.705326,
+        "spec_review_at_lease": 1789948563.705326
+      }
+    },
+    {
+      "ts": 1789947663.71019,
+      "pipeline": {
+        "spec_review_at": 1789947663.705326,
+        "spec_review_at_lease": 1789948563.705326,
+        "spec_review_at_done": 1789947663.7101078
+      }
+    },
+    {
+      "ts": 1789947925.2931242,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Point 3 never defines what `candidate_ids` (the `ready` argument passed to interference.select_wave) actually is. select_wave's own contract expects the FULL eligible, uncapped-by-slots set so it can backfill a slot freed by a hard/soft deferral with a later clean candidate (that's the whole value of 'select the best set of mutually compatible ready tasks' from the P3 brief). If an implementer instead feeds it the slots-capped output of `_first_come_order`/`baseline_order` (the only concretely-specified helper), a deferred conflict just shrinks the wave below capacity instead of being backfilled, and none of the eight named tests (capacity/dependency/hard-conflict-with-running/budget-retry/cross-goal-ancestry) would catch it.",
+          "severity": "high",
+          "line": 591
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Point 3 requires the `tasks` dict to also cover 'their goal siblings' for every candidate/running task, but select_wave/pairwise only ever compare candidate_ids \u222a running_ids against each other, and the transitive depends_on walk already resolves any id it encounters on demand via bus.get regardless of goal membership. As scoped, including goal siblings has no observable effect on wave/deferred/predicted output, so no listed test can verify it was implemented (or omitted) correctly -- it's either dead requirement or under-specified (if it's meant to feed something not otherwise described).",
+          "severity": "low",
+          "line": 591
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_load_scheduler_cfg is specified to default mode to \"shadow\" but the spec never asks it to validate the value against off|shadow|active, unlike _load_review_cfg's code_review handling (daemon.py:230-237) which notifies once and falls back to a safe default on an unrecognised value. A typo'd pool.toml mode would silently take whichever branch the mode==\"active\"/mode!=\"off\" comparisons happen to fall into instead of being surfaced.",
+          "severity": "low",
+          "line": 217
+        }
+      ]
+    },
+    {
+      "ts": 1789947941.887769,
+      "pipeline": {
+        "spec_review_at": 1789947663.705326,
+        "spec_review_at_lease": 1789948563.705326,
+        "spec_review_at_done": 1789947663.7101078,
+        "spec_review_held_at": 1789947941.8877199
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789947942.454727,
+      "pipeline": {
+        "spec_review_at": 1789947663.705326,
+        "spec_review_at_lease": 1789948563.705326,
+        "spec_review_at_done": 1789947663.7101078,
+        "spec_review_held_at": 1789947941.8877199,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789947942.479594,
+      "pipeline": {
+        "spec_review_at": 1789947663.705326,
+        "spec_review_at_lease": 1789948563.705326,
+        "spec_review_at_done": 1789947663.7101078,
+        "spec_review_held_at": 1789947941.8877199,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789947941.887769": true
+        }
+      }
+    },
+    {
+      "ts": 1789947975.235602,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by S2 v4 after spec review T-0532 request_changes (round 3: candidate set must be the full eligible set so select_wave can backfill; drop goal siblings from the tasks dict; validate [scheduler].mode with a safe fallback). Planner waives a fourth round and dispatches v4 directly.",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789947663.705326,
+    "spec_review_at_lease": 1789948563.705326,
+    "spec_review_at_done": 1789947663.7101078,
+    "spec_review_held_at": 1789947941.8877199,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789947941.887769": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Point 3 never defines what `candidate_ids` (the `ready` argument passed to interference.select_wave) actually is. select_wave's own contract expects the FULL eligible, uncapped-by-slots set so it can backfill a slot freed by a hard/soft deferral with a later clean candidate (that's the whole value of 'select the best set of mutually compatible ready tasks' from the P3 brief). If an implementer instead feeds it the slots-capped output of `_first_come_order`/`baseline_order` (the only concretely-specified helper), a deferred conflict just shrinks the wave below capacity instead of being backfilled, and none of the eight named tests (capacity/dependency/hard-conflict-with-running/budget-retry/cross-goal-ancestry) would catch it.",
+      "severity": "high",
+      "line": 591
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Point 3 requires the `tasks` dict to also cover 'their goal siblings' for every candidate/running task, but select_wave/pairwise only ever compare candidate_ids \u222a running_ids against each other, and the transitive depends_on walk already resolves any id it encounters on demand via bus.get regardless of goal membership. As scoped, including goal siblings has no observable effect on wave/deferred/predicted output, so no listed test can verify it was implemented (or omitted) correctly -- it's either dead requirement or under-specified (if it's meant to feed something not otherwise described).",
+      "severity": "low",
+      "line": 591
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_load_scheduler_cfg is specified to default mode to \"shadow\" but the spec never asks it to validate the value against off|shadow|active, unlike _load_review_cfg's code_review handling (daemon.py:230-237) which notifies once and falls back to a safe default on an unrecognised value. A typo'd pool.toml mode would silently take whichever branch the mode==\"active\"/mode!=\"off\" comparisons happen to fall into instead of being surfaced.",
+      "severity": "low",
+      "line": 217
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

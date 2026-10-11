@@ -1,0 +1,156 @@
+{
+  "id": "T-0663",
+  "created_at": 1789984758.537447,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R21: first-pass success is undefined for every task that passes the gate first time (gate_reds never stamped as 0); promotion.format_report kwarg clash; strategy first_pass_rate over known values only",
+  "spec": "Why: running the merged reports on live telemetry exposed three defects. (1) Phase I P0 metric: scorecard computes first_pass = fixes == 0 and reds == 0 only when reds is not None (scorecard.py:1027, 1147, 1306), but daemon.gate() stamps pipeline.gate_reds only on a red gate, so a task that passes first time has gate_reds None and first_pass None: T-0598 (green first try, merged) reports first_pass None and every strategy row shows first_pass 0.000. First-pass success, the roadmap's primary quality metric, is therefore undefined exactly for the successes. (2) `orchestrator promotion` crashes: promotion.format_report (promotion.py:173) passes **row and reasons= to str.format while row already has a reasons key (TypeError). (3) strategy.scorecard first_pass_rate divides by all rows so unknown (None) values count as failures.\nWhat (four small fixes, tests are unittest.TestCase methods, test modules import _harness first):\n1. daemon.gate(): when the gate is green, the stamped fields include gate_reds = pipeline.get(\"gate_reds\", 0) (explicit 0 when absent) next to first_green_at, so a first-pass task carries gate_reds 0; existing red-path counting unchanged.\n2. scorecard.py: in the three first_pass derivations treat reds as 0 when first_green_at is set and gate_reds is missing (a green gate with no recorded reds means none happened); keep None only when first_green_at is missing. Add tests: a merged task with first_green_at and no gate_reds counts as first_pass True in efficiency(), executor_economics() and by_task.\n3. promotion.format_report: build the reasons suffix from row.get(\"reasons\") and format without passing reasons twice (e.g. format(**{k: v for k, v in row.items() if k != \"reasons\"}, reasons=suffix)); test with a row that has a non-empty reasons list.\n4. strategy.scorecard: first_pass_rate = mean over rows whose first_pass is not None, with first_pass_defined_count reported; None when no row is defined; test with mixed None/True/False rows.",
+  "inputs": [
+    "T-0662"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_green_gate_stamps_gate_reds_zero \u2014 a green gate on a task without prior reds leaves pipeline.gate_reds 0 and first_green_at set",
+    "tests/test_scorecard.py::test_first_pass_defined_when_green_without_recorded_reds \u2014 a merged lineage root with first_green_at, no gate_reds and no fix rounds has first_pass True in efficiency()['tasks'], executor_economics and by_task",
+    "tests/test_promotion.py::test_format_report_with_reasons_does_not_raise \u2014 format_report on a row with reasons ['insufficient_evidence'] returns a line containing that reason",
+    "tests/test_strategy.py::test_first_pass_rate_ignores_unknown_values \u2014 rows with first_pass None, True, False yield first_pass_rate 0.5 and first_pass_defined_count 2"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/promotion.py",
+    "orchestrator/strategy.py",
+    "tests/test_daemon.py",
+    "tests/test_scorecard.py",
+    "tests/test_promotion.py",
+    "tests/test_strategy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0663",
+  "codex_thread": null,
+  "result": {
+    "summary": "All four fixes match spec and acceptance criteria. daemon.gate() now stamps gate_reds explicitly to 0 on a green gate with no prior reds, preserving existing red counts otherwise. scorecard.py's three first_pass sites correctly treat missing gate_reds as 0 when first_green_at is set, else None \u2014 verified against _efficiency_summary, executor_economics' first_pass_green_rate aggregation, and routing_eval, all of which are fed consistently by the same formula. promotion.format_report no longer double-passes 'reasons' to str.format (excluded via dict comprehension before merging in the formatted reasons string). strategy.scorecard's first_pass_rate now averages only over defined (non-None) first_pass values and reports first_pass_defined_count, matching the new mixed None/True/False test. New tests follow existing file conventions (metric_gate_task pattern in test_daemon.py, _harness import convention, field names already established elsewhere like first_pass_green_rate). No security-relevant surface touched \u2014 purely internal metrics/reporting logic, no external input or secrets involved.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "4011f3c0198d",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789984758.5385442,
+      "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+    },
+    {
+      "ts": 1789984762.026757,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0663",
+      "claimed_at": 1789984762.026367
+    },
+    {
+      "ts": 1789984762.028074,
+      "account": "B"
+    },
+    {
+      "ts": 1789984762.6314251,
+      "pid": 91201,
+      "account": "B"
+    },
+    {
+      "ts": 1789984863.214423,
+      "status": "done",
+      "result": {
+        "summary": "All four fixes match spec and acceptance criteria. daemon.gate() now stamps gate_reds explicitly to 0 on a green gate with no prior reds, preserving existing red counts otherwise. scorecard.py's three first_pass sites correctly treat missing gate_reds as 0 when first_green_at is set, else None \u2014 verified against _efficiency_summary, executor_economics' first_pass_green_rate aggregation, and routing_eval, all of which are fed consistently by the same formula. promotion.format_report no longer double-passes 'reasons' to str.format (excluded via dict comprehension before merging in the formatted reasons string). strategy.scorecard's first_pass_rate now averages only over defined (non-None) first_pass values and reports first_pass_defined_count, matching the new mixed None/True/False test. New tests follow existing file conventions (metric_gate_task pattern in test_daemon.py, _harness import convention, field names already established elsewhere like first_pass_green_rate). No security-relevant surface touched \u2014 purely internal metrics/reporting logic, no external input or secrets involved.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "4011f3c0198d",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789984863.216456,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789984863.266937,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+        "packet_version": "4011f3c0198d",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+      "packet_version": "4011f3c0198d",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+  "claimed_at": 1789984762.026367,
+  "account": "B",
+  "pid": 91201,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+    "packet_version": "4011f3c0198d",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "4011f3c0198d",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

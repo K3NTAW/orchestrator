@@ -1,0 +1,49 @@
+{
+  "id": "T-1458",
+  "created_at": 1790874447.1183722,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "Fix rounds for incomplete and failed execute tasks: failure kind 'incomplete' for execute_incomplete holds, and auto_fix_round also files routine rounds for failed execute tasks (tests_red, non-JSON, dispatch error)",
+  "spec": "Goal T-1403, wave 2, plan label B5. Evidence: plan.md backlog 2026-09-27 (luna A2 T-0465 ended status failed and\nsat ~2 h with 16 uncommitted files; nothing files a fix round or a decision Planner for a failed execute task).\nB4v2 (T-1453) turns a dead Claude run into a hold 'execute_incomplete: ...' with resume_hint\n{dirty_in_scope, dirty_out_of_scope, head, partial_output}; this task makes the daemon act on it.\n\nFacts (goal/T-1403 at 92c1a98 plus T-1453 and T-1456 merged before this task; re-check line numbers):\n- failures.py:122-178 failure_kind(task, worktree, ...) reads task.hold_reason only (124); returns conflict,\n  environment, permissions, quota, invalid_spec, unknown, flaky or code_defect. decision/planner_runs read\n  pipeline.failure_kind (planner_runs.py:1020).\n- daemon.py:148-225 auto_fix_round(pool) iterates bus.read(status='held', role='execute') only; routine is True\n  for code_defect+gate_red with parsed test ids, or code_defect+review request_changes with in-scope comments;\n  it files 'fix round n' through bus.create_task with _fix_round_spec (daemon.py, grep 'def _fix_round_spec')\n  rendering .orchestrator/prompts/fix-round.md with fields {branch} {failed_acceptance} {failure_kind}\n  {failure_text} {head_sha} {held_id} {n} {original_acceptance} {review_comments} {root_id} {root_title}.\n- planner_runs._held_at (planner_runs.py:141-150) keys the round on the latest status=held event ts.\n- Failed execute tasks today: merge.py tests_red (reason 'tests_red', resume_hint.failures = stderr tail),\n  rebase_conflict, spawn.py 'non-JSON output (rc=...)' (when B4v2's derive switch is off or the worktree is\n  not git), daemon.py:602 'dispatch error: ...', spawn.py:1720 'post_result failed: ...'; supersede notes also\n  use status failed with a free-text reason (bus_read shows 'superseded by ...', 'not run: ...',\n  'parent_merged').\n\nChange:\n1. failures.failure_kind: reason = hold_reason or task['reason'] (failed tasks). Before the conflict check:\n   reason starting 'execute_incomplete' -> 'incomplete'. Everything else unchanged.\n2. daemon.auto_fix_round: candidates = held execute tasks (as today) + failed execute tasks with a parent whose\n   reason does not start with 'superseded', 'not run', 'parent_merged' or 'cancelled', that are not merged and\n   not stale. For a failed task the round key is the ts of its latest status=failed event (fallback created_at);\n   add daemon._failed_at(t) next to the use of planner_runs._held_at.\n   routine additionally when kind == 'incomplete' (any reason) or when the task is failed with reason\n   'tests_red' and _test_ids(resume_hint.failures) parses at least one id (treated like gate_red). A failed\n   task with reason starting 'non-JSON', 'dispatch error' or 'post_result failed' and kind unknown is routine\n   as kind 'incomplete' too (re-run the work). rebase_conflict stays non-routine (E10 adds rebase rounds).\n   pipeline.failure_kind is written for failed tasks exactly as for held ones.\n3. _fix_round_spec / fix-round.md: new field {incomplete_note}: empty unless kind is incomplete, else a\n   paragraph: the previous run ended '<reason>'; commits so far are on task/<held id> (head <sha>); uncommitted\n   leftovers, if any, are listed (dirty_in_scope / dirty_out_of_scope from resume_hint) and remain in\n   <held worktree path> (read them with `git -C <path> diff` and `git -C <path> status`); finish the\n   acceptance, commit, do not run the full gate. failure_text for incomplete rounds is the partial_output when\n   present.\n4. The cap ([daemon].auto_fix_rounds) and the repeated-signature guard apply unchanged; a failed task that gets\n   a fix round is set status held, hold_reason 'failed: <reason>' (so lineage, root and _held_at behave as for\n   holds) in the same bus.locked() block that creates the round.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_failures.py failure_kind tests (grep 'failure_kind')\npass unchanged (they use hold_reason); tests/test_daemon.py auto_fix_round tests (grep 'auto_fix_round') build held\ntasks only and must pass unchanged; the fix-round prompt tests (grep 'fix-round' / '_fix_round_spec') pin the\nrendered text: update them for the new field. Run tests/test_failures.py and tests/test_daemon.py.\n\nDepends on B6 T-1456 (daemon.py chain; B4v2 T-1453 is already merged by then or this task waits). Out of scope:\nspawn.py, merge.py, planner_runs.py, decision.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_failures.py::test_failure_kind_incomplete_for_execute_incomplete_hold_and_failed_reason: passes: failure_kind returns 'incomplete' for hold_reason 'execute_incomplete: no commits' and for a failed task (hold_reason None, reason 'execute_incomplete: uncommitted changes outside scope'); a failed task with reason 'tests_red' and resume_hint.failures naming tests/test_x.py::test_y classifies as code_defect or flaky exactly like gate_red",
+    "tests/test_daemon.py::test_auto_fix_round_files_rounds_for_incomplete_and_failed_execute_tasks: passes: auto_fix_round files 'fix round 1' for a held task 'execute_incomplete: no commits' (spec contains the held worktree path and the dirty paths from resume_hint, failure_kind incomplete), for a failed task with reason 'non-JSON output (rc=143): ' (set held 'failed: non-JSON ...' in the same pass), and for a failed task with reason tests_red whose resume_hint.failures parse to test ids; files nothing for failed tasks whose reason starts with 'superseded', 'not run', 'parent_merged' or 'cancelled', nor for rebase_conflict; the auto_fix_rounds cap and the repeated-signature guard still hold",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/failures.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_failures.py"
+  ],
+  "depends_on": [
+    "T-1456",
+    "T-1453"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B5",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790878815.911349,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1474 (2026-10-01 wave 2 respec)"
+    }
+  ],
+  "hold_reason": "superseded by T-1474 (2026-10-01 wave 2 respec)"
+}

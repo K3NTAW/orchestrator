@@ -1,0 +1,173 @@
+{
+  "id": "T-0103",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "C-O3 v3: `orchestrator goal start|status|list|stop` \u2014 headless goal entry point (all edits from spec reviews T-0081, T-0096, T-0097 applied)",
+  "spec": "Supersedes T-0095. Why: a goal starts today by a human opening an interactive Planner; Phase C needs a machine-callable entry point per target repo. Module orchestrator/goals.py. Contract: every public function returns a dict (or list) in every non-exceptional case; cli.py owns exit codes. goals.py reads target state only from <repo_path>/.orchestrator (tasks/*.json via json, pool.toml via tomllib, its own flock on <repo_path>/.orchestrator/bus.lock for every goals.json read-modify-write); it must not import orchestrator.bus, orchestrator.pool, orchestrator.daemon or the ROOT/STATE names from orchestrator; it may import orchestrator.install and spawn.trust_workspace only. repo_path is os.path.realpath'd once and that value is used for cwd, ORCH_ROOT and trust.\nPRECHECKS (before any write): repo_path is a git toplevel with HEAD attached and no rebase/merge in progress (refuse otherwise); target pool.toml exists or install is about to create it; after install, the pool.toml has [[claude_accounts]] with id == account_id and [models].planner (refuse with {\"launched\": false, \"reason\": ...} otherwise). Add `planner = \"claude-fable-5-1\"` under [models] and `[secrets.planner] GH_WRITE_TOKEN = \"env:GH_WRITE_TOKEN\"` to this repo's pool.toml so installs carry them.\nstart(repo_path, goal_text, account_id=\"A\", reinstall=False) -> dict: (a) run install.install(repo_path) when <repo_path>/.orchestrator/pool.toml is missing or reinstall=True, catching SystemExit into the dict shape; keep the report; (b) scaffold commit: paths = [.orchestrator, .claude, skills, .gitignore, .mcp.planner.json, .mcp.review.json, .mcp.scout.json, .mcp.triage.json]; run `git status --porcelain --ignored -- <paths>`; if any line is `!!` (ignored) refuse with {\"launched\": false, \"reason\": \"<path> is gitignored in the target; worktrees would lack the scaffold\"}; else `git add -- <exactly the paths the status output names>` and commit \"orchestrator: scaffold (goal start)\" with the install report lines in the body; failure \u2192 refuse; record the sha as `commit` (None when nothing to commit); (c) GOAL task: subprocess `uv run --project <this repo> python -m orchestrator.goals_create` is NOT available, so run `uv run --project <this repo> python - ` with the script on stdin and goal_text passed via env ORCH_GOAL_TEXT and repo via ORCH_ROOT (never interpolated into code), check=False; the script creates a triage task (complexity 5, acceptance [\"Planner closes the goal with a PR\"], scope [\"**\"]) and prints its id; non-zero exit or unparseable id \u2192 refuse; (d) account row \u2192 spawn.trust_workspace(account.config_dir, repo_path); env = os.environ + CLAUDE_CONFIG_DIR + ORCH_ROOT=repo_path + CLAUDE_CODE_OAUTH_TOKEN from the account's oauth_token_env when set + [secrets.planner] resolved by goals.py itself with the same two forms spawn uses (env:NAME, or a shell command) \u2014 implement the tiny resolver locally, do not call spawn.secrets_for_role; (e) prompt = \"Skill(orchestrate) with the goal: \" + goal_text + \"\\nThe GOAL task is \" + goal_id + \"; use it as the parent of every task you create and post the PR url as its result before you finish.\"; command = [\"claude\", \"-p\", prompt, \"--model\", models.planner, \"--output-format\", \"json\", \"--max-budget-usd\", str(limits.max_budget_usd.get(\"planner\", 10)), \"--mcp-config\", \".mcp.planner.json\", \"--strict-mcp-config\", \"--append-system-prompt\", <contents of .orchestrator/prompts/planner.md>, \"--dangerously-skip-permissions\"]; mkdir -p runs; Popen(start_new_session=True, cwd=repo_path, stdout+stderr \u2192 runs/planner-<goal_id>.log); (f) under the flock append {goal_id, repo, text, pid, pid_start (from _proc_start), started_at, account, commit, status \"running\", spend_counted: false} to <repo_path>/.orchestrator/runs/goals.json; return {\"launched\": true, goal_id, pid, log, commit, install: report, note: \"goal-Planner spend is not counted against any account budget\"}.\n_proc_start(pid) -> epoch | None: /proc/<pid>/stat on linux, `ps -o lstart= -p <pid>` with LC_ALL=C parsed \"%a %b %e %H:%M:%S %Y\" on darwin, None elsewhere. _alive(pid): three lines with os.kill(pid, 0). identity(record) = _alive(pid) and (pid_start is None or abs(_proc_start(pid) - pid_start) < 5).\nstatus(repo_path, goal_id=None) -> list[dict]: per record: GOAL task status; children (parent == goal_id) grouped by status with hold_reason; merged shas; pr_url when the GOAL result names one; planner_alive via identity (None with a note when _proc_start is unavailable); under the flock, a record still \"running\" whose identity fails is marked \"exited\" with exited_at. list_goals(repo_path) applies the same reconciliation. stop(repo_path, goal_id): identity passes \u2192 os.killpg(os.getpgid(pid), SIGTERM), mark \"stopped\"; identity fails \u2192 mark \"stopped\" without signalling; unknown id \u2192 {\"error\": \"unknown goal\"}.\n.orchestrator/prompts/planner.md = the \"You are the Planner\" header plus the Never and Always lists copied from CLAUDE.md, plus: \"Headless: no human is in this session. When a step needs the human, write it under 'Needs the human' in plan.md and finish. The GOAL task id is given in the prompt: parent every task on it and post the PR url as its result.\"\ncli.py: `goal start <repo> <text> [--account A] [--reinstall]` (prints the dict fields and `revert: git revert <commit>` when a commit was made; exit 2 when not launched), `goal status <repo> [id] [--json]`, `goal list <repo>` (\"no goals\" when empty), `goal stop <repo> <id>`; the `install` command's next-step line now points at `orchestrator goal start <target> \"<goal>\"`.\nTests, tests/test_goals.py, target = harness.scratch_repo (a real git repo; its .gitignore covers .orchestrator/ and .claude, which is exactly the refusal case): start_refuses_when_scaffold_paths_are_gitignored (real git, Popen patched, assert not called); start_commits_scaffold_and_records_sha (scratch repo with the ignore lines removed, real git add/commit, assert sha in return and in goals.json); start_refuses_unknown_account_and_missing_planner_model_before_any_write (no install, no commit, no task); start_creates_goal_task_via_stdin_script_with_env (subprocess.run patched: assert stdin script, env ORCH_GOAL_TEXT == text, env ORCH_ROOT == repo_path, goal_text absent from argv and script); start_launches_claude_with_expected_flags_and_env (assert --append-system-prompt with planner.md text, --strict-mcp-config, --mcp-config, goal id in the prompt, no --append-system-prompt-file, CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN when configured, cwd == realpath, start_new_session); start_marks_workspace_trusted; status_reconciles_exited_and_checks_pid_identity (_proc_start patched); stop_uses_killpg_only_when_identity_matches; planner_md_matches_claude_md_lists (Never/Always blocks equal). No README change (C-O5 documents the flow); no new dependency.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_goals.py has the nine named tests and they are green; none asserts --append-system-prompt-file",
+    "goals.py imports nothing from orchestrator except install and spawn.trust_workspace (grep for 'from orchestrator' and 'import orchestrator' shows only those), and goal_text never appears inside a python -c or stdin script string (grep the source for f-strings around the script)",
+    "The launch never happens when a precheck fails, when a scaffold path is gitignored, when the commit fails, or when the GOAL-task subprocess fails; each returns launched false with a reason",
+    "pool.toml gains [models] planner and [secrets.planner]; existing pool tests green",
+    "`uv run orchestrator goal start /nonexistent x` exits 2 with one line; `goal list <scratch repo>` prints 'no goals'",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "tests/test_goals.py",
+    ".orchestrator/prompts/planner.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2700,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_goals.py",
+    "supersedes": "T-0095"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789734390.10383,
+      "pipeline": {
+        "spec_review_at": 1789734390.103768
+      }
+    },
+    {
+      "ts": 1789734560.579238,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Adding top-level [models] and [secrets.planner] tables is consumed by orchestrator.pool (out of scope, not importable by goals.py per the contract). Nothing in the spec confirms Pool's TOML loader tolerates additive/unknown top-level tables. The acceptance criterion 'existing pool tests green' assumes this without a test that actually loads the new pool.toml through Pool().",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "goals.py takes its own flock on <repo_path>/.orchestrator/bus.lock, a path/lock scheme owned by orchestrator.bus (not importable here). This is a hardcoded-path coupling with a file outside scope: if bus.py's lock path or locking granularity changes, goals.py's RMW of goals.json silently stops coordinating with bus's own task writes, with no shared test to catch drift.",
+          "severity": "medium",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Goal-Planner subprocess spend/usage is explicitly excluded from Pool's budget accounting ('spend is not counted against any account budget'), and goals.py cannot import pool/daemon to register the account as busy. The daemon can concurrently schedule other roles onto the same Claude account while a goal-Planner is burning that account's real rate-limit window, with only a soft per-run $ cap as mitigation.",
+          "severity": "medium",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Secret resolution (env:NAME / shell-command forms) must be reimplemented locally because goals.py may not call spawn.secrets_for_role. This duplicates an unguarded external call (arbitrary shell command execution driven by pool.toml content) into a second code path, so any future security hardening of secret resolution in spawn.py must be replicated here or the two implementations drift.",
+          "severity": "medium",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "The GOAL-task-creation script is passed to a subprocess as an embedded string literal that talks to orchestrator.bus's task-creation API. No import-time reference ties it to bus.py's real function signature, and the only test (start_creates_goal_task_via_stdin_script_with_env) mocks subprocess.run \u2014 a future change to bus.py's task schema could silently break real goal creation while this test keeps passing.",
+          "severity": "medium",
+          "line": 0
+        },
+        {
+          "path": "tests/test_goals.py",
+          "issue": "The acceptance criterion for injection-safety only requires grepping for f-strings around the embedded script ('none asserts --append-system-prompt-file' / 'grep the source for f-strings'). This checks one specific interpolation technique, not the actual invariant (goal_text never lands in the script text) \u2014 string concatenation or .format() could satisfy the letter of the check while still embedding untrusted goal_text into code that gets executed.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Every goals.json record carries 'spend_counted: false' but no function in this spec ever reads or flips it, and no acceptance criterion covers it \u2014 speculative schema for a feature not built in this task.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/prompts/planner.md",
+          "issue": "The spec says planner.md's Never/Always block is 'copied from CLAUDE.md' without naming which CLAUDE.md file (multiple exist across worktrees/repo root). The matching test (planner_md_matches_claude_md_lists) needs an unambiguous source path to be reproducible outside this worktree.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789734571.336747,
+      "pipeline": {
+        "spec_review_at": 1789734390.103768,
+        "spec_review_held_at": 1789734571.3366568
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789734710.321666,
+      "status": "failed",
+      "reason": "superseded by C-O3 v4 after spec review T-0104",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789734390.103768,
+    "spec_review_held_at": 1789734571.3366568
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Adding top-level [models] and [secrets.planner] tables is consumed by orchestrator.pool (out of scope, not importable by goals.py per the contract). Nothing in the spec confirms Pool's TOML loader tolerates additive/unknown top-level tables. The acceptance criterion 'existing pool tests green' assumes this without a test that actually loads the new pool.toml through Pool().",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "goals.py takes its own flock on <repo_path>/.orchestrator/bus.lock, a path/lock scheme owned by orchestrator.bus (not importable here). This is a hardcoded-path coupling with a file outside scope: if bus.py's lock path or locking granularity changes, goals.py's RMW of goals.json silently stops coordinating with bus's own task writes, with no shared test to catch drift.",
+      "severity": "medium",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Goal-Planner subprocess spend/usage is explicitly excluded from Pool's budget accounting ('spend is not counted against any account budget'), and goals.py cannot import pool/daemon to register the account as busy. The daemon can concurrently schedule other roles onto the same Claude account while a goal-Planner is burning that account's real rate-limit window, with only a soft per-run $ cap as mitigation.",
+      "severity": "medium",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Secret resolution (env:NAME / shell-command forms) must be reimplemented locally because goals.py may not call spawn.secrets_for_role. This duplicates an unguarded external call (arbitrary shell command execution driven by pool.toml content) into a second code path, so any future security hardening of secret resolution in spawn.py must be replicated here or the two implementations drift.",
+      "severity": "medium",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "The GOAL-task-creation script is passed to a subprocess as an embedded string literal that talks to orchestrator.bus's task-creation API. No import-time reference ties it to bus.py's real function signature, and the only test (start_creates_goal_task_via_stdin_script_with_env) mocks subprocess.run \u2014 a future change to bus.py's task schema could silently break real goal creation while this test keeps passing.",
+      "severity": "medium",
+      "line": 0
+    },
+    {
+      "path": "tests/test_goals.py",
+      "issue": "The acceptance criterion for injection-safety only requires grepping for f-strings around the embedded script ('none asserts --append-system-prompt-file' / 'grep the source for f-strings'). This checks one specific interpolation technique, not the actual invariant (goal_text never lands in the script text) \u2014 string concatenation or .format() could satisfy the letter of the check while still embedding untrusted goal_text into code that gets executed.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Every goals.json record carries 'spend_counted: false' but no function in this spec ever reads or flips it, and no acceptance criterion covers it \u2014 speculative schema for a feature not built in this task.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/prompts/planner.md",
+      "issue": "The spec says planner.md's Never/Always block is 'copied from CLAUDE.md' without naming which CLAUDE.md file (multiple exist across worktrees/repo root). The matching test (planner_md_matches_claude_md_lists) needs an unambiguous source path to be reproducible outside this worktree.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": null,
+  "reason": "superseded by C-O3 v4 after spec review T-0104"
+}

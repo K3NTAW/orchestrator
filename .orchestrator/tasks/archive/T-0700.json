@@ -1,0 +1,719 @@
+{
+  "id": "T-0700",
+  "created_at": 1789998850.332588,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "Q4 v3: orchestrator/planner_router.py \u2014 Planner tier router: modes off|shadow|active, hard vs soft Fable escalation, evidence gate, Fable reserve, hold instead of silent downgrade; decision_log kind planner_route (P5, P9, P11, P17, P18)",
+  "spec": "Why: decision.route (orchestrator/decision.py) decides routine/investigate/escalate and names escalate_tier fable; planner_runs.launch_routed (lines 1090-1110) resolves that alias to [models].planner. There is no Opus tier between investigate (sonnet) and escalate (fable), no hard/soft split, no evidence gate, no Fable reserve and no hold path (brief P5, P9, P11, P17, P18). Spec reviews T-0681 and of T-0692 are folded in (plain notify with a module-level warned set, record() inputs, dict access, classification producer, extra as a dict, numeric band fallback, candidates content, reasons in the hard branch, reserve helper, jev_mode ownership).\nWhat: new pure module orchestrator/planner_router.py plus one new entry \"planner_route\" in decision_log.KINDS. No bus, pool or file reads; inputs never mutated. Every structured input is a plain dict read with .get(): ctx (decision.route's ctx dict, see decision.py docstring; callers add ctx[\"complexity\"] = task complexity for held, goal complexity otherwise), classification (planner_taxonomy.classify output from orchestrator/planner_taxonomy.py on goal/T-0674: keys decision_type, architectural, ambiguous, risk_class none|low|high, signals, band, task_class), evidence ({\"n\": int, \"noninferior\": True|False|None, \"reescalation_rate\": float}; produced later by planner_scorecard.class_evidence in this goal; consumed only), availability ({tier: {\"available\": bool, \"reason\": str}, \"fable_reserve_ok\": bool}), jev_signal ({\"soft_adjust\": float} or None). route is decision.Route (attributes name, reason, evidence, tier) or a dict with those keys; a tiny _get(obj, key, default) helper reads both.\n- load_cfg(pool_cfg) -> dict: the ONE reader of pool.toml [planner.routing] for every module in this goal. Keys and defaults: mode \"shadow\" (off|shadow|active), default_tier \"opus\", escalation_tier \"fable\", hard_complexity_min 9, hard_security True, hard_spec_review_request_changes_min 2, hard_ambiguous True, min_samples 20, shadow_sample_rate 1.0, fable_reserve_share 0.2, jev_mode \"shadow\" (off|shadow|active; read by jev_planner through this dict), soft_threshold 0.5. Module docstring carries a table key -> consumer (mode/default_tier/escalation_tier/hard_*/min_samples/soft_threshold: this module; shadow_sample_rate: this module and planner_shadow.eligible; fable_reserve_share: fable_reserve_ok below, called by planner_runs when it builds availability; jev_mode: jev_planner). An invalid mode or jev_mode, or a non-numeric number, -> default plus one plain notify.notify(f\"pool.toml [planner.routing].{key} invalid ({value!r}); using {default!r}\") per key per process via a module-level set _WARNED; never raises, never touches the bus.\n- fable_reserve_ok(headroom_share, cfg) -> bool: headroom_share None -> True (unlimited budget); else headroom_share >= cfg[\"fable_reserve_share\"].\n- BAND_FLOOR = {\"1-3\": 1, \"4-6\": 4, \"7-10\": 7}; effective_complexity(classification, ctx) -> int: ctx[\"complexity\"] when it is an int, else BAND_FLOOR.get(classification band, 0). With the default hard_complexity_min 9 a missing ctx complexity can never hard-escalate on band alone (floor 7).\n- @dataclass(frozen=True) RouterDecision: tier (str), mode (str), hard (bool), hold (bool), hold_reason (str|None), reasons (tuple[str, ...]), hard_reasons (tuple[str, ...]), soft_score (float), shadow_tier (str|None), candidates (tuple[str, ...]) = (default_tier, escalation_tier) always, evidence (dict), decision_type (str).\n- hard_escalation(classification, ctx, route, cfg) -> list[str]: route name != \"escalate\" -> []; route reason startswith \"unknown:\" or == \"routes_disabled\" -> \"unknown_risk\"; effective_complexity >= hard_complexity_min -> \"complexity\"; hard_security and (risk_class == \"high\" or ctx security_trigger or touches_auth or touches_data_deletion) -> \"security\"; hard_ambiguous and decision_type in (\"architectural_replan\", \"ambiguous_requirement\") -> \"architectural_or_ambiguous\"; ctx spec_review_request_changes >= hard_spec_review_request_changes_min -> \"repeated_spec_rejection\"; auto_fix_rounds_used and auto_fix_rounds both ints and used >= cap -> \"lineage_cap\"; ctx reescalation truthy -> \"reescalation\".\n- soft_score(classification, ctx, evidence, jev_signal=None) -> float in [0, 1]: +0.3 architectural; +0.2 effective_complexity in (7, 8); +0.2 evidence reescalation_rate > 0.2; +0.2 evidence noninferior is False; +0.1 risk_class low; plus jev soft_adjust clamped to [-0.2, 0.2]; clamp to [0, 1]. Tokens/usd never inputs (docstring).\n- decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0) -> RouterDecision, rules in order: route name != \"escalate\" -> tier = route tier or \"fable\", reasons (\"not_escalate_route\",), hard False, unchanged in every mode. mode off -> tier route tier or \"fable\", reasons (\"mode_off\",), shadow_tier None. hard_reasons non-empty -> hard True, tier escalation_tier, reasons = hard_reasons; escalation tier unavailable -> hold True, hold_reason f\"fable_unavailable:{reason}\", reasons = hard_reasons + (\"hold\",) (never downgrade, jev ignored). mode shadow -> tier escalation_tier, reasons (\"shadow_production_fable\",); shadow_tier default_tier when default tier available and sample <= shadow_sample_rate, else None with reason shadow_default_unavailable or sampled_out appended. mode active, not hard: default_tier when evidence noninferior is True and n >= min_samples and soft_score < soft_threshold (\"evidence_noninferior\"); elif availability fable_reserve_ok is False and noninferior is not False -> default_tier (\"fable_reserve_low\"); else escalation_tier (\"insufficient_evidence\" when noninferior is None or n < min_samples, else \"soft_escalation\"); a chosen tier that is unavailable falls back to the other available tier for soft decisions (append \"fallback:<tier>_unavailable\"); none available -> hold, hold_reason \"no_planner_tier_available\".\n- record(decision, *, subject, route, jev_signal=None, root=None) -> decision_log.record(kind=\"planner_route\", subject=goal id, candidates=list(decision.candidates), hard_constraints=list(decision.hard_reasons), deterministic={\"route\": route name, \"reason\": route reason}, historical=dict(decision.evidence), jev=jev_signal, selected=\"hold\" if decision.hold else decision.tier, rejected=[c for c in candidates if c != selected], reason=\";\".join(decision.reasons), mode=decision.mode, extra={\"decision_type\": decision.decision_type, \"hold_reason\": decision.hold_reason, \"shadow_tier\": decision.shadow_tier, \"soft_score\": decision.soft_score}, root=root).\n- explain(decision) -> one line. decision_log.py change: append \"planner_route\" to KINDS only.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_router.py::test_mode_off_reproduces_route_tier \u2014 mode off returns the route tier (fable) with reasons ('mode_off',), shadow_tier None, hold False for every decision type; a non-escalate route returns its own tier unchanged in every mode; candidates is always (opus, fable)",
+    "tests/test_planner_router.py::test_hard_escalation_never_downgrades_and_holds_when_fable_unavailable \u2014 complexity 9, security, ambiguous_requirement and repeated_spec_rejection each yield tier fable, hard True and reasons == hard_reasons in active mode even with noninferior evidence and jev soft_adjust -0.2; with fable unavailable the decision is hold True with hold_reason starting fable_unavailable; a ctx without complexity and band 7-10 does not hard-escalate on complexity",
+    "tests/test_planner_router.py::test_shadow_mode_keeps_fable_and_sets_shadow_tier \u2014 shadow mode yields tier fable and shadow_tier opus for a soft decision, shadow_tier None for a hard decision, when opus is unavailable, or when sample exceeds shadow_sample_rate",
+    "tests/test_planner_router.py::test_active_mode_requires_evidence_and_ignores_tokens \u2014 active with n 25 noninferior True picks opus; n 5 picks fable with reason insufficient_evidence; noninferior False picks fable; evidence carrying tokens_saved 1e9 changes nothing; fable_reserve_ok False with noninferior None picks opus with reason fable_reserve_low; fable_reserve_ok(0.1, cfg) is False and fable_reserve_ok(None, cfg) is True",
+    "tests/test_planner_router.py::test_load_cfg_defaults_and_record_kind \u2014 missing table gives every documented default; an invalid mode falls back to shadow with exactly one notify.notify call across two load_cfg calls and no bus access; record(decision, subject, route, jev_signal) appends a decision_log row of kind planner_route whose candidates, rejected, deterministic.route, jev and extra.decision_type are set, readable by decision_log.explain under a sandbox root"
+  ],
+  "scope": [
+    "orchestrator/planner_router.py",
+    "orchestrator/decision_log.py",
+    "tests/test_planner_router.py"
+  ],
+  "depends_on": [
+    "T-0675"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_taxonomy.py",
+      "orchestrator/decision.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/daemon.py",
+      "orchestrator/notify.py",
+      "orchestrator/planner_runs.py",
+      "orchestrator/attribution.py",
+      "orchestrator/allocation.py",
+      "tests/test_planner_taxonomy.py",
+      "tests/test_decision.py",
+      "tests/test_decision_log.py",
+      "tests/test_allocation.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "load_cfg(pool_cfg) -> dict is the single reader of [planner.routing]: mode shadow|off|active (default shadow), default_tier opus, escalation_tier fable, hard_complexity_min 9, hard_security true, hard_spec_review_request_changes_min 2, hard_ambiguous true, min_samples 20, shadow_sample_rate 1.0, fable_reserve_share 0.2, jev_mode shadow, soft_threshold 0.5. fable_reserve_ok(headroom_share, cfg) -> bool. effective_complexity(classification, ctx) -> int via BAND_FLOOR. RouterDecision(tier, mode, hard, hold, hold_reason, reasons, hard_reasons, soft_score, shadow_tier, candidates=(default, escalation), evidence, decision_type). decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0) -> RouterDecision; all structured inputs are dicts. record(decision, *, subject, route, jev_signal=None, root=None) writes decision_log kind planner_route. Tiers are aliases resolved by the caller: fable -> [models].planner, opus -> [models].opus."
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0700",
+  "codex_thread": "01a0c441-347a-7892-bdb8-154837a24f00",
+  "result": {
+    "summary": "Implemented Planner routing modes, hard escalation holds, evidence gates, reserve handling, and decision logging.\nGate: passed, 952 tests; working tree clean.\nCommit: `4d4f30a1959740f29c033180f5be5567ee752e73`\n\nFiles changed:\n- `orchestrator/planner_router.py`: +209\n- `orchestrator/decision_log.py`: +1\n- `tests/test_planner_router.py`: +194\n\nFailures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c441-347a-7892-bdb8-154837a24f00",
+    "usage": {
+      "input_tokens": 478733,
+      "cached_input_tokens": 431616,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7131,
+      "reasoning_output_tokens": 320,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998862.6681,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042
+      }
+    },
+    {
+      "ts": 1789998862.70931,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252
+      }
+    },
+    {
+      "ts": 1789998862.715086,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932
+      }
+    },
+    {
+      "ts": 1789998984.793142,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "decide() rule 1 sets tier = route.tier or \"fable\" for any non-escalate route. decision.route() only sets tier for \"investigate\" (sonnet) and \"escalate\" (fable); \"routine\" and \"none\" routes get tier=None, so this line silently defaults them to fable. Currently harmless because planner_runs.tick() (line 1360) filters out routine/none before any router call, but that filtering lives in a file this task cannot touch and a future Wave B wiring mistake would route free/cheap decisions to the expensive tier without any test in this module catching it.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "BAND_FLOOR fallback of 0 for an unrecognized/None band means effective_complexity is 0 whenever both ctx[\"complexity\"] is absent and classification[\"band\"] is None (attribution.band returns None for complexity=None). That silently disables the complexity hard-escalation path rather than failing closed, but it is explicitly covered by acceptance criterion 2 (\"a ctx without complexity and band 7-10 does not hard-escalate\"), so this is a documented design choice, not an oversight \u2014 flagging only so the reviewer of the merged diff confirms the fail-open default here is intentional given decision.py fails closed elsewhere (unknown ctx fields -> escalate).",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789998989.244543,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859
+      }
+    },
+    {
+      "ts": 1789998990.2040792,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301
+      }
+    },
+    {
+      "ts": 1789999002.492492,
+      "packet_meta": {
+        "chars": 4244,
+        "est_tokens": 1061,
+        "hash": "99023a77146c",
+        "version": "99023a77146c",
+        "base": "c9609a52c7d1",
+        "sources": "pool.toml@1e9fb4e32b17 gotchas@03c421c0a109 memory@notes",
+        "policy_version": "1e9fb4e32b17",
+        "gotchas": "03c421c0a109"
+      }
+    },
+    {
+      "ts": 1789999002.4938738,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0700",
+      "claimed_at": 1789999002.493729
+    },
+    {
+      "ts": 1789999002.4948428,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789999314.7014232,
+      "codex_thread": "01a0c441-347a-7892-bdb8-154837a24f00",
+      "codex_thread_head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+    },
+    {
+      "ts": 1789999314.706721,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1789999314.7094479,
+      "status": "done",
+      "result": {
+        "summary": "Implemented Planner routing modes, hard escalation holds, evidence gates, reserve handling, and decision logging.\nGate: passed, 952 tests; working tree clean.\nCommit: `4d4f30a1959740f29c033180f5be5567ee752e73`\n\nFiles changed:\n- `orchestrator/planner_router.py`: +209\n- `orchestrator/decision_log.py`: +1\n- `tests/test_planner_router.py`: +194\n\nFailures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c441-347a-7892-bdb8-154837a24f00",
+        "usage": {
+          "input_tokens": 478733,
+          "cached_input_tokens": 431616,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7131,
+          "reasoning_output_tokens": 320,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789999336.718532,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789999430.41781,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789999430.682859,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        }
+      }
+    },
+    {
+      "ts": 1789999430.7400398,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        },
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73"
+      }
+    },
+    {
+      "ts": 1789999430.7470138,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        },
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+        "gated_at_done": 1789999430.746906
+      }
+    },
+    {
+      "ts": 1789999566.259129,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789999680.724925,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        },
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+        "gated_at_done": 1789999430.746906,
+        "merged_at": 1789999680.724684,
+        "merged_at_lease": 1790000580.724684
+      }
+    },
+    {
+      "ts": 1789999775.058103,
+      "status": "done",
+      "merged_into": "goal/T-0674",
+      "sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+      "merged_at": 1789999775.057018,
+      "changed_files": [
+        "orchestrator/decision_log.py",
+        "orchestrator/planner_router.py",
+        "tests/test_planner_router.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        },
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+        "gated_at_done": 1789999430.746906,
+        "merged_at": 1789999680.724684,
+        "merged_at_lease": 1790000580.724684
+      }
+    },
+    {
+      "ts": 1789999775.6443362,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        },
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+        "gated_at_done": 1789999430.746906,
+        "merged_at": 1789999680.724684,
+        "merged_at_lease": 1790000580.724684,
+        "accepted_at": 1789999775.643936
+      }
+    },
+    {
+      "ts": 1789999775.738962,
+      "pipeline": {
+        "first_ready_at": 1789998862.668042,
+        "spec_review_at": 1789998862.709252,
+        "spec_review_at_lease": 1789999762.709252,
+        "spec_review_at_done": 1789998862.714932,
+        "dispatched_at": 1789998989.2444859,
+        "dispatched_at_lease": 1789999889.2444859,
+        "dispatched_at_done": 1789998990.2039301,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789999430.417676,
+        "gated_at_lease": 1790000330.417676,
+        "first_green_at": 1789999430.417093,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0700",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789999430.682498,
+          "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+        },
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+        "gated_at_done": 1789999430.746906,
+        "merged_at": 1789999680.724684,
+        "merged_at_lease": 1790000580.724684,
+        "accepted_at": 1789999775.643936,
+        "merged_at_done": 1789999775.738803
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789998862.668042,
+    "spec_review_at": 1789998862.709252,
+    "spec_review_at_lease": 1789999762.709252,
+    "spec_review_at_done": 1789998862.714932,
+    "dispatched_at": 1789998989.2444859,
+    "dispatched_at_lease": 1789999889.2444859,
+    "dispatched_at_done": 1789998990.2039301,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "154686a6f114496158ceb45a46d8e049d74c46b2",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789999430.417676,
+    "gated_at_lease": 1790000330.417676,
+    "first_green_at": 1789999430.417093,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0700",
+      "goal_head": "goal/T-0674",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1789999430.682498,
+      "head": "4d4f30a1959740f29c033180f5be5567ee752e73"
+    },
+    "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+    "gated_at_done": 1789999430.746906,
+    "merged_at": 1789999680.724684,
+    "merged_at_lease": 1790000580.724684,
+    "accepted_at": 1789999775.643936,
+    "merged_at_done": 1789999775.738803
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "decide() rule 1 sets tier = route.tier or \"fable\" for any non-escalate route. decision.route() only sets tier for \"investigate\" (sonnet) and \"escalate\" (fable); \"routine\" and \"none\" routes get tier=None, so this line silently defaults them to fable. Currently harmless because planner_runs.tick() (line 1360) filters out routine/none before any router call, but that filtering lives in a file this task cannot touch and a future Wave B wiring mistake would route free/cheap decisions to the expensive tier without any test in this module catching it.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "BAND_FLOOR fallback of 0 for an unrecognized/None band means effective_complexity is 0 whenever both ctx[\"complexity\"] is absent and classification[\"band\"] is None (attribution.band returns None for complexity=None). That silently disables the complexity hard-escalation path rather than failing closed, but it is explicitly covered by acceptance criterion 2 (\"a ctx without complexity and band 7-10 does not hard-escalate\"), so this is a documented design choice, not an oversight \u2014 flagging only so the reviewer of the merged diff confirms the fail-open default here is intentional given decision.py fails closed elsewhere (unknown ctx fields -> escalate).",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "packet_meta": {
+    "chars": 4244,
+    "est_tokens": 1061,
+    "hash": "99023a77146c",
+    "version": "99023a77146c",
+    "base": "c9609a52c7d1",
+    "sources": "pool.toml@1e9fb4e32b17 gotchas@03c421c0a109 memory@notes",
+    "policy_version": "1e9fb4e32b17",
+    "gotchas": "03c421c0a109"
+  },
+  "claimed_at": 1789999002.493729,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "4d4f30a1959740f29c033180f5be5567ee752e73",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0674",
+  "sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+  "merged_at": 1789999775.057018,
+  "changed_files": [
+    "orchestrator/decision_log.py",
+    "orchestrator/planner_router.py",
+    "tests/test_planner_router.py"
+  ]
+}

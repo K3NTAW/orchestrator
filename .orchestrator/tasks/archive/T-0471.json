@@ -1,0 +1,148 @@
+{
+  "id": "T-0471",
+  "parent": "T-0445",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 5,
+  "title": "P3: Jev executor classification in shadow mode \u2014 orchestrator/jev_route.py asks a small batched set of typed questions about a task (redacted spec, acceptance, scope, complexity, class, memory titles), caches and invalidates by content key, is skipped whenever it cannot change the decision, fails open, and records one shadow row per dispatch (eligible candidates, baseline executor, hypothetical executor, signals, scorecard evidence, latency, usage); pool.toml [jev.routing] mode off|shadow|active with active behaving as shadow until P5; actual routing never changes",
+  "spec": "Phase I P3 (brief .orchestrator/phase-i-program.md, sections P3 and Safety invariants). Base goal/T-0445 after P2b (T-0466) merges (P0 attribution and stamps, P1 packets, P2a executor_economics and scores(rank_by) are merged). Scout facts (T-0448): dispatch chain daemon.dispatch -> spawn_async(_dispatch_worker) -> executor.start -> pool.pick_executor(role, complexity, scores, task) (daemon.py:492-538, executor.py:243-256); pick_executor filters enabled, role, not cooling, complexity range, running < max_parallel, day budget, then ranks by scorecard cost when class_success >= floor else weight*score (pool.py:522-554); scores come from scorecard.scores(scorecard.build()) in executor.start; H4 reservation after selection (executor.py:251-256); jev.ask(state, questions, *, model, timeout_s, task) fails open (returns None) on disabled, missing key, budget exhausted, HTTP errors, timeouts, malformed answers (jev.py:181-256); noul/choice/score wrappers and votes (jev.py:259-289); daily budget in jev_state.json under flock (jev.py:125-148); redact() strips secrets and only spec[:1500], acceptance, scope and redacted tool input are ever sent (jev.py:34-60, jev_gate.py:114-218); jev_gate caches by sha1 of tool input with an mtime check (jev_gate.py:145-199).\n1. pool.eligible_executors(role, complexity, task=None) -> list: the exact filter half of pick_executor (enabled, role, not cooling, complexity range, running < max_parallel, day budget, quota group), extracted so pick_executor calls it and behaviour is byte-identical (test: pick_executor results unchanged on the existing test matrix).\n2. orchestrator/jev_route.py: QUESTIONS = seven typed noul questions with stable keys: localized_simple, substantial_reasoning, large_context, debugging_reproduction, architectural, elevated_risk, stronger_executor_helps. classify(task, pool, eligible, root=STATE) -> dict or None: returns None without any network call when [jev.routing].mode == \"off\", jev is disabled, the daily budget is exhausted, len(eligible) < 2, or a valid cached classification exists (then the cache entry is returned with cache=\"hit\"); otherwise one jev.ask call with all questions batched, state built only from redact(spec[:1500]), acceptance, scope paths, complexity, task_class and up to 10 memory titles (never file contents, never diffs), timeout from [jev].timeout_s; result {signals: {key: p}, confidence, latency_ms, usage, cache: \"miss\", key}. Cache key = sha1 over spec, acceptance, scope, complexity and task_class; stored in .orchestrator/runs/jev/route_cache.json under a lock, invalidated automatically when the key changes (a spec edit or re-scope) and by age > [jev.routing].cache_ttl_s (default 86400). Every failure path (None from jev.ask, exception, malformed shape, missing keys) returns None and the caller proceeds exactly as today.\n3. hypothetical(eligible, signals, evidence) -> executor id or None: a documented, deliberately simple heuristic for shadow only: prefer the strongest-scored eligible executor when substantial_reasoning, architectural or stronger_executor_helps >= 0.6, prefer the cheapest (lowest expected_cost, else lowest weight) eligible when localized_simple >= 0.7 and elevated_risk < 0.3, else the baseline; never an executor outside eligible. evidence = per-candidate scorecard.class_success and expected_cost (existing functions) plus the P2a economics row when present.\n4. Shadow row: in daemon.dispatch (or _dispatch_worker just before executor.start, whichever lets the baseline choice be read without changing it), when mode is shadow or active: eligible = pool.eligible_executors(...), classification = classify(...), baseline = the executor executor.start actually chose (read back from the task after start, or from pick_executor with the same inputs before start), hyp = hypothetical(...). Write one row via bus.log_run with role \"jev_route\" (attribution maps jev_route -> bucket jev), task, goal_id, mode, eligible, baseline, hypothetical, agrees (bool), signals, confidence, evidence, latency_ms, usage, cache, error (when classification failed) and also stamp pipeline.jev_route = {baseline, hypothetical, key} on the task so P4 can join outcomes. Routing itself is untouched: executor.start and pick_executor receive no new arguments in P3. mode \"active\" is accepted by config validation but behaves as shadow and notifies once \"jev routing active requested; active ranking lands in P5\" (H4 notify-once helper).\n5. pool.toml: [jev.routing] mode = \"shadow\" (this repo collects evidence; code default when the table is absent is \"off\"), cache_ttl_s = 86400, questions listed in a comment, and a comment stating hard constraints stay authoritative and that shadow never changes routing. README: one paragraph under Jev.\nTests tests/test_jev_route.py (jev.ask mocked; no network): test_mode_off_makes_no_call_and_no_row, test_single_eligible_skips_call, test_multiple_eligible_batches_all_questions_in_one_call, test_budget_exhausted_and_disabled_skip_call, test_timeout_and_malformed_fail_open_to_none, test_cache_hit_skips_call_and_invalidates_on_spec_change_and_ttl, test_state_contains_no_file_contents_and_is_redacted, test_hypothetical_never_outside_eligible; tests/test_daemon.py: test_shadow_dispatch_never_changes_chosen_executor (same executor with mode off and shadow for the same inputs), test_shadow_row_written_with_baseline_hypothetical_and_evidence, test_active_mode_behaves_as_shadow_and_notifies_once, test_classification_failure_still_dispatches_baseline; tests/test_pool.py: test_eligible_executors_matches_pick_executor_filter. Existing tests green; .claude/hooks/tests-green.sh exits 0; commit with the task id including every named test; report sha and failures only.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_route.py::test_mode_off_makes_no_call_and_no_row, test_single_eligible_skips_call, test_multiple_eligible_batches_all_questions_in_one_call, test_budget_exhausted_and_disabled_skip_call, test_timeout_and_malformed_fail_open_to_none, test_cache_hit_skips_call_and_invalidates_on_spec_change_and_ttl, test_state_contains_no_file_contents_and_is_redacted, test_hypothetical_never_outside_eligible pass",
+    "tests/test_daemon.py::test_shadow_dispatch_never_changes_chosen_executor, test_shadow_row_written_with_baseline_hypothetical_and_evidence, test_active_mode_behaves_as_shadow_and_notifies_once, test_classification_failure_still_dispatches_baseline pass",
+    "tests/test_pool.py::test_eligible_executors_matches_pick_executor_filter passes and every existing pick_executor test is unchanged",
+    "pool.toml [jev.routing] mode = shadow with cache_ttl_s and comments; code default off; README paragraph present; no repository file contents are ever sent to Jev",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "orchestrator/attribution.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_jev_route.py",
+    "tests/test_daemon.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [
+    "T-0466"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2400,
+    "task_class": "routing"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0471",
+  "codex_thread": "01a0c06e-b3af-7632-beaa-ef9f84c887fd",
+  "result": {
+    "summary": "Summary: Implemented Jev shadow routing, caching, evidence logging, task stamps, eligibility extraction, active-mode notification, documentation, and all named tests.\n\nFiles changed: 9 files, 369 insertions, 5 deletions. Commit: `5e6e7a5c903f1afbbee41e108810995fb03fb58c`\n\nTests: `.claude/hooks/tests-green.sh` passed: `722 tests`, 114s. `scripts/tests_green.sh` and `scripts/failures_only.sh` were absent; failures-only output is empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c06e-b3af-7632-beaa-ef9f84c887fd",
+    "usage": {
+      "input_tokens": 2326261,
+      "cached_input_tokens": 2260992,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 12102,
+      "reasoning_output_tokens": 2182
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789934873.5403771,
+      "pipeline": {
+        "dispatched_at": 1789934873.540313
+      }
+    },
+    {
+      "ts": 1789934875.2594519,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0471",
+      "claimed_at": 1789934875.259056
+    },
+    {
+      "ts": 1789934875.2613199,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789935387.008034,
+      "codex_thread": "01a0c06e-b3af-7632-beaa-ef9f84c887fd"
+    },
+    {
+      "ts": 1789935387.0110688,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented Jev shadow routing, caching, evidence logging, task stamps, eligibility extraction, active-mode notification, documentation, and all named tests.\n\nFiles changed: 9 files, 369 insertions, 5 deletions. Commit: `5e6e7a5c903f1afbbee41e108810995fb03fb58c`\n\nTests: `.claude/hooks/tests-green.sh` passed: `722 tests`, 114s. `scripts/tests_green.sh` and `scripts/failures_only.sh` were absent; failures-only output is empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c06e-b3af-7632-beaa-ef9f84c887fd",
+        "usage": {
+          "input_tokens": 2326261,
+          "cached_input_tokens": 2260992,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 12102,
+          "reasoning_output_tokens": 2182
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789935509.78956,
+      "pipeline": {
+        "dispatched_at": 1789934873.540313,
+        "gated_at": 1789935509.789417,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789935650.7006679,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789935665.0524402,
+      "pipeline": {
+        "dispatched_at": 1789934873.540313,
+        "gated_at": 1789935509.789417,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789935665.052314
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0484 (request_changes)"
+    },
+    {
+      "ts": 1789936593.456639,
+      "status": "done",
+      "merged_into": "goal/T-0445",
+      "merged_via": "fix round T-0485 416b97f (Planner decision over review T-0486, which diffed HEAD against itself)",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789934873.540313,
+    "gated_at": 1789935509.789417,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789935665.052314
+  },
+  "claimed_at": 1789934875.259056,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0445",
+  "merged_via": "fix round T-0485 416b97f (Planner decision over review T-0486, which diffed HEAD against itself)"
+}

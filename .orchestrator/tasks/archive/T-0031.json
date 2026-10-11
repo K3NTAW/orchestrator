@@ -1,0 +1,87 @@
+{
+  "id": "T-0031",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Review B3 (T-0018): scorecard build/scores/write, review verdict capture, merge hook, cli scorecard",
+  "spec": "Adversarial review of the commit(s) on task/T-0018 (your worktree is based on that branch; verify `ls orchestrator/scorecard.py` first). Focus: (1) build() tolerates malformed jsonl lines, missing fields, tasks without executor, and an empty runs dir; keys executors consistently (run field executor vs task executor vs claude:<tier>); (2) scores(): neutral 1.0 below min_runs, success-rate based above, \u00d70.5 after \u22653 usage-limit hits today; no division by zero; returns a plain dict of floats; (3) merge.py calls scorecard.write inside try/except and a scorecard failure can never change the merge result; (4) spawn.run_worker review path writes review_verdict on both the review task and the reviewed task and does not break when the result JSON has no verdict; (5) executor.start's scores lookup matches what B2 left there (getattr(pool,'scores',dict)()): either scorecard supplies a zero-arg callable or the call site was changed consistently; (6) cli scorecard output: header + one line per executor, --json valid; (7) tests assert behaviour with synthetic runs/tasks under TMP. Run `uv run python -m unittest tests/test_orchestrator.py` and report the result line. Return ONLY {\"verdict\":\"approve|request_changes\",\"comments\":[...]} under 3,000 chars.",
+  "inputs": [
+    "T-0018"
+  ],
+  "acceptance": [
+    "verdict with line-anchored comments",
+    "test result line reported",
+    "result under 3,000 chars"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "orchestrator/merge.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0031",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 83,
+        "issue": "build() counts review_request_changes on every task file with review_verdict=='request_changes', but spawn.py (run_worker, lines 216 and 219) stamps review_verdict onto BOTH the review task itself and the reviewed (inputs[0]) task. Review tasks have no 'executor' field, so key_of() falls back to f'claude:{tier}', and since bus.create_task defaults tier='sonnet' (bus.py:45), a review done at sonnet tier lands in the same 'claude:sonnet' bucket as real Claude-fallback execute runs. Every request_changes verdict therefore gets double-counted: once correctly on the executor that wrote the code, once spuriously polluting the 'claude:sonnet' bucket's displayed review_request_changes. Doesn't corrupt scores() (which ignores this field) but corrupts the metric `orchestrator scorecard` shows for that bucket. Filter to the reviewed task only, e.g. skip rows where role=='review', or only increment when iterating tasks whose id came from inputs[0].",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789660735.6233358,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0031",
+      "claimed_at": 1789660735.6232278
+    },
+    {
+      "ts": 1789660735.655197,
+      "pid": 81677,
+      "account": "A"
+    },
+    {
+      "ts": 1789660881.5166998,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 83,
+            "issue": "build() counts review_request_changes on every task file with review_verdict=='request_changes', but spawn.py (run_worker, lines 216 and 219) stamps review_verdict onto BOTH the review task itself and the reviewed (inputs[0]) task. Review tasks have no 'executor' field, so key_of() falls back to f'claude:{tier}', and since bus.create_task defaults tier='sonnet' (bus.py:45), a review done at sonnet tier lands in the same 'claude:sonnet' bucket as real Claude-fallback execute runs. Every request_changes verdict therefore gets double-counted: once correctly on the executor that wrote the code, once spuriously polluting the 'claude:sonnet' bucket's displayed review_request_changes. Doesn't corrupt scores() (which ignores this field) but corrupts the metric `orchestrator scorecard` shows for that bucket. Filter to the reviewed task only, e.g. skip rows where role=='review', or only increment when iterating tasks whose id came from inputs[0].",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789660735.6232278,
+  "pid": 81677,
+  "account": "A"
+}

@@ -1,0 +1,182 @@
+{
+  "id": "T-0910",
+  "created_at": 1790112517.7826188,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Active path 2: tool_disclosure active passes the minimal allowlist to Claude workers, with a bus-event escalation when a hidden tool is needed (v2)",
+  "spec": "Today (T-0802) tool_disclosure mode \"active\" is treated as shadow. Build the real active branch. Facts: spawn.run_worker builds the per-role Claude Code allowlist from the table at spawn.py:24-31 and passes it to the worker launch; tool_catalog.minimal_set(task, role) returns keep/drop/mandatory; Codex executors are untouched (their tools are the CLI's).\nDo:\n1. Active: when promotion.mode(\"tool_disclosure\") == \"active\", run_worker passes the minimal set's `keep` list (mandatory always included) as the allowlist for review, spec_review, scout, challenge and the Claude execute fallback; the legacy full list is still logged in the tool_disclosure decision row as candidates, and the decision's selected becomes the kept list.\n2. Escalation path (P11): the worker prompt gains one line telling the worker that if it needs a tool outside its allowlist it must post `bus_post_result` with status \"held\" and reason starting \"needs_tool:<tool id>\"; daemon (or spawn.run_worker's result handling) recognises that reason, records a decision_log row kind \"tool_disclosure\" reason \"hidden_tool_requested\", and re-spawns the worker once with the full legacy allowlist (respawn capped at one per task; the second attempt logs \"tool_escalation_used\" in the task pipeline). Scorecard: hidden_tool_recovery_rate per role = escalations / active spawns; `scorecard --economy` shows it.\n3. Safety: mandatory tools (Read for all, Bash(git *) for review/scout, tests-green + Edit/Write for execute, bus_post_result for all) can never be dropped; a docs-only execute keeps Edit/Write.\nTests: tests/test_spawn.py::test_active_allowlist_is_minimal_set_with_mandatory, ::test_hidden_tool_request_respawns_once_with_full_allowlist; tests/test_tool_catalog.py::test_mandatory_never_dropped_in_active; docs/context-economy/06-tool-disclosure.md Active section with the revert path.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-23 03:35) after spec review T-0908 (request_changes), binding on top of v1:\n- The escalation respawn is synchronous inside spawn.run_worker: after run_claude returns, a helper `_hidden_tool_request(task_id)` reads bus.get(task_id) and returns the tool id when the worker posted status \"held\" with a reason starting \"needs_tool:\"; run_worker calls it BEFORE the generic done/failed post_result branches for every role (mirroring the existing review-role guard), and on a hit runs run_claude once more with the full legacy allowlist, then continues with the normal result handling of that second run. orchestrator/daemon.py leaves the scope; no daemon retry path is added.\n- Budget and timeout for the second attempt come out of the original reservation: max_budget_usd for the retry = original cap minus the first attempt's spend (from its usage/usd), timeout = original timeout minus elapsed; when either remainder is below 10% of the original the respawn is skipped and the task is held with reason \"needs_tool:<id> (no budget for respawn)\" for the Planner. No second pool.reserve().\n- hidden_tool_recovery_rate is a key inside context_scorecard.build()'s existing by_role_task_class rows (escalations / active spawns for that row), so `scorecard --economy` shows it without touching cli.py; cli.py stays out of scope.\n- tests/test_spawn.py::test_hidden_tool_request_respawns_once_with_full_allowlist must drive run_worker with run_claude patched: first call posts the needs_tool hold and returns, second call receives the legacy allowlist and a reduced max_budget_usd; a third call never happens. Add ::test_respawn_skipped_when_budget_remainder_too_small.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_active_allowlist_is_minimal_set_with_mandatory passes",
+    "tests/test_spawn.py::test_hidden_tool_request_respawns_once_with_full_allowlist passes",
+    "tests/test_tool_catalog.py::test_mandatory_never_dropped_in_active passes",
+    "docs/context-economy/06-tool-disclosure.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_respawn_skipped_when_budget_remainder_too_small passes"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/tool_catalog.py",
+    "orchestrator/context_scorecard.py",
+    ".orchestrator/prompts/review.md",
+    ".orchestrator/prompts/scout.md",
+    ".orchestrator/prompts/spec-review.md",
+    ".orchestrator/prompts/challenge.md",
+    "tests/test_spawn.py",
+    "tests/test_tool_catalog.py",
+    "docs/context-economy/06-tool-disclosure.md"
+  ],
+  "depends_on": [
+    "T-0855"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790112552.10078,
+      "pipeline": {
+        "first_ready_at": 1790112552.100746
+      }
+    },
+    {
+      "ts": 1790112552.1555798,
+      "pipeline": {
+        "first_ready_at": 1790112552.100746,
+        "spec_review_at": 1790112552.155533,
+        "spec_review_at_lease": 1790113452.155533
+      }
+    },
+    {
+      "ts": 1790112552.1618738,
+      "pipeline": {
+        "first_ready_at": 1790112552.100746,
+        "spec_review_at": 1790112552.155533,
+        "spec_review_at_lease": 1790113452.155533,
+        "spec_review_at_done": 1790112552.16179
+      }
+    },
+    {
+      "ts": 1790114814.3566332,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "pool.release() is called once in spawn.run_worker's finally with only the second (retry) run's usage; the first attempt's actual spend never reaches reservation_history/goal spend, undercounting goal_budget_usd accounting whenever escalation fires",
+          "severity": "med",
+          "line": 341
+        },
+        {
+          "path": ".orchestrator/prompts/review.md",
+          "issue": "spec requires workers to post a 'needs_tool:<id>' reason via bus_post_result, but bus_post_result has no top-level reason param and the spec doesn't name the result-dict key _hidden_tool_request must parse; four prompt files plus spawn.py must agree on undefined wording with no shared constant",
+          "severity": "med",
+          "line": 1
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "spec's 'first attempt's spend (from its usage/usd)' doesn't match any real field; actual cost is r['output']['total_cost_usd'], not r['usage']['usd'] or r['output']['usd']",
+          "severity": "low",
+          "line": 1059
+        },
+        {
+          "path": "orchestrator/context_scorecard.py",
+          "issue": "tool_escalation_used pipeline logging and hidden_tool_recovery_rate have no acceptance test, so the gate can't verify they were implemented",
+          "severity": "low",
+          "line": 148
+        }
+      ]
+    },
+    {
+      "ts": 1790114831.2268212,
+      "pipeline": {
+        "first_ready_at": 1790112552.100746,
+        "spec_review_at": 1790112552.155533,
+        "spec_review_at_lease": 1790113452.155533,
+        "spec_review_at_done": 1790112552.16179,
+        "spec_review_held_at": 1790114831.226775
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790114832.484041,
+      "pipeline": {
+        "first_ready_at": 1790112552.100746,
+        "spec_review_at": 1790112552.155533,
+        "spec_review_at_lease": 1790113452.155533,
+        "spec_review_at_done": 1790112552.16179,
+        "spec_review_held_at": 1790114831.226775,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790114832.837068,
+      "pipeline": {
+        "first_ready_at": 1790112552.100746,
+        "spec_review_at": 1790112552.155533,
+        "spec_review_at_lease": 1790113452.155533,
+        "spec_review_at_done": 1790112552.16179,
+        "spec_review_held_at": 1790114831.226775,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790114831.2268212": true
+        }
+      }
+    },
+    {
+      "ts": 1790114841.436026,
+      "status": "failed",
+      "reason": "superseded 04:45 by T-0918 (v3, Planner-approved)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790112552.100746,
+    "spec_review_at": 1790112552.155533,
+    "spec_review_at_lease": 1790113452.155533,
+    "spec_review_at_done": 1790112552.16179,
+    "spec_review_held_at": 1790114831.226775,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790114831.2268212": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "pool.release() is called once in spawn.run_worker's finally with only the second (retry) run's usage; the first attempt's actual spend never reaches reservation_history/goal spend, undercounting goal_budget_usd accounting whenever escalation fires",
+      "severity": "med",
+      "line": 341
+    },
+    {
+      "path": ".orchestrator/prompts/review.md",
+      "issue": "spec requires workers to post a 'needs_tool:<id>' reason via bus_post_result, but bus_post_result has no top-level reason param and the spec doesn't name the result-dict key _hidden_tool_request must parse; four prompt files plus spawn.py must agree on undefined wording with no shared constant",
+      "severity": "med",
+      "line": 1
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "spec's 'first attempt's spend (from its usage/usd)' doesn't match any real field; actual cost is r['output']['total_cost_usd'], not r['usage']['usd'] or r['output']['usd']",
+      "severity": "low",
+      "line": 1059
+    },
+    {
+      "path": "orchestrator/context_scorecard.py",
+      "issue": "tool_escalation_used pipeline logging and hidden_tool_recovery_rate have no acceptance test, so the gate can't verify they were implemented",
+      "severity": "low",
+      "line": 148
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 04:45 by T-0918 (v3, Planner-approved)"
+}

@@ -1,0 +1,124 @@
+{
+  "id": "T-0390",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4: pre-dispatch budget reservations with leases \u2014 parallel workers cannot start beyond an account's daily token budget or a goal's role budget; expired leases never hide a live worker's spend; quota holds produce no repair task and one notification per transition",
+  "spec": "Build on goal/T-0353 after H5a (T-0358: running counts from bus). Handover section 5. Evidence (scout T-0354): daemon.free_slots (daemon.py:446-467) counts concurrency slots only; pool.pick (pool.py:198-216) checks day_tokens at pick time with no reservation, so a burst of dispatches in one tick can together exceed the budget; daemon.tick (daemon.py:1052-1059) calls notify() every tick while a cooling or budget condition holds.\n1. pool.py: a reservation ledger in pool_state.json: reservations[run_key] = {account or executor id, role, task, goal, est_tokens, est_usd, claimed_at, lease_until}. reserve(run_key, account_id, role, task) estimates est from [limits].max_budget_usd[role] converted with the account's configured usd-per-token ratio when present, else from the median tokens of that role's last 20 run rows, else the role cap in usd only; it refuses (returns None) when day_tokens plus the sum of live reservations would exceed daily_budget_tokens, or when the goal's spend plus live reservations for that role exceed the role budget already used by the review policy. release(run_key, actual_usage) reconciles: replaces the estimate with actual usage in the ledger's history counter and removes the reservation. heartbeat(run_key) extends lease_until; a reservation whose lease expired but whose worker pid is alive (bus task still running with a live pid) stays counted; only dead-and-expired reservations are dropped, by the daemon's sweep, and logged.\n2. Callers: spawn.run_worker and executor.start reserve before launching and release in their finally path (with the usage they logged); the daemon's dispatch and the review spawn skip a dispatch whose reservation was refused and leave the task queued with pipeline.hold_note = \"budget\" (no hold_reason change, no repair task); reconcile_dead and sweep_leases release reservations of dead runs.\n3. Notifications: daemon keeps a small notified_state map (cooling, daily budget, codex cooling, budget refusals) and calls notify() only when a condition's boolean flips; the map lives in memory plus pool_state so a restart does not re-announce an unchanged state. A quota or cooling hold never creates a fix round.\nTests: tests/test_pool.py::test_parallel_reservations_cannot_exceed_daily_budget (two reserve calls, second refused), ::test_expired_lease_with_live_pid_still_counts, ::test_release_reconciles_estimate_with_actual; tests/test_daemon.py::test_budget_refusal_leaves_task_queued_without_repair, ::test_notify_once_per_transition. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0362"
+  ],
+  "acceptance": [
+    "tests/test_pool.py::test_parallel_reservations_cannot_exceed_daily_budget, ::test_expired_lease_with_live_pid_still_counts and ::test_release_reconciles_estimate_with_actual pass",
+    "tests/test_daemon.py::test_budget_refusal_leaves_task_queued_without_repair and ::test_notify_once_per_transition pass",
+    "spawn.run_worker and executor.start reserve before launch and release in finally (grep shows both call sites)",
+    "pool.toml documents the reservation estimate rule and that reservations = false in [limits] disables the ledger (rollback)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0390",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_pool.py",
+        "line": 0,
+        "issue": "Acceptance requires tests/test_pool.py::test_parallel_reservations_cannot_exceed_daily_budget, ::test_expired_lease_with_live_pid_still_counts, and ::test_release_reconciles_estimate_with_actual to pass, and tests/test_daemon.py::test_budget_refusal_leaves_task_queued_without_repair / ::test_notify_once_per_transition. None of these tests exist anywhere in the repo (grep for all five names across tests/ returns zero matches) and the diff touches no test file. The reservation ledger, sweep, and notify-once-per-transition logic ship with zero test coverage.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 273,
+        "issue": "role_cap is read from `self.cfg.get(\"review\", {}).get(\"max_budget_usd\", {})`, but `max_budget_usd` is only defined under `[limits]` in pool.toml \u2014 `[review]` has no such key. `role_cap` is therefore always None, so the per-goal cap check `if role_cap and goal_spend + goal_reserved + est_usd > role_cap` never triggers. This silently disables the goal-level half of the oversubscription guard the PR claims to add (pool.toml's own new comment says reservations 'prevent same-tick launches from oversubscribing daily/goal limits'); only the daily per-account check remains functional.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "line": 214,
+        "issue": "When daemon.dispatch() reserves a budget slot under a Claude account id in fallback mode, then executor.start()'s own pool.pick_executor also fails and _exhausted() hits the `tier is None or pool.pick(\"execute\") is None` branch (no fallback tier available), the task is marked held but the reservation created by dispatch() under the same run_key is never released \u2014 it only clears once sweep_reservations' lease (default 900s) expires. Until then it counts against that account's live-reservation total, reducing effective headroom for other queued tasks with no compensating action.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789906744.431891,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0390",
+      "claimed_at": 1789906744.431422
+    },
+    {
+      "ts": 1789906744.433237,
+      "account": "B"
+    },
+    {
+      "ts": 1789906744.467859,
+      "pid": 52792,
+      "account": "B"
+    },
+    {
+      "ts": 1789906881.104362,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_pool.py",
+            "line": 0,
+            "issue": "Acceptance requires tests/test_pool.py::test_parallel_reservations_cannot_exceed_daily_budget, ::test_expired_lease_with_live_pid_still_counts, and ::test_release_reconciles_estimate_with_actual to pass, and tests/test_daemon.py::test_budget_refusal_leaves_task_queued_without_repair / ::test_notify_once_per_transition. None of these tests exist anywhere in the repo (grep for all five names across tests/ returns zero matches) and the diff touches no test file. The reservation ledger, sweep, and notify-once-per-transition logic ship with zero test coverage.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 273,
+            "issue": "role_cap is read from `self.cfg.get(\"review\", {}).get(\"max_budget_usd\", {})`, but `max_budget_usd` is only defined under `[limits]` in pool.toml \u2014 `[review]` has no such key. `role_cap` is therefore always None, so the per-goal cap check `if role_cap and goal_spend + goal_reserved + est_usd > role_cap` never triggers. This silently disables the goal-level half of the oversubscription guard the PR claims to add (pool.toml's own new comment says reservations 'prevent same-tick launches from oversubscribing daily/goal limits'); only the daily per-account check remains functional.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 214,
+            "issue": "When daemon.dispatch() reserves a budget slot under a Claude account id in fallback mode, then executor.start()'s own pool.pick_executor also fails and _exhausted() hits the `tier is None or pool.pick(\"execute\") is None` branch (no fallback tier available), the task is marked held but the reservation created by dispatch() under the same run_key is never released \u2014 it only clears once sweep_reservations' lease (default 900s) expires. Until then it counts against that account's live-reservation total, reducing effective headroom for other queued tasks with no compensating action.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789906881.106074,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789906744.431422,
+  "account": "B",
+  "pid": 52792,
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,83 @@
+{
+  "id": "T-0058",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "review: B3: per-executor scorecard from runs + tasks; review verdict capture; `orchestrator scorecard`; Pool.scores()",
+  "spec": "Why: routing must adjust from live outcomes. Scout T-0013: status/rounds/merged_into/sha exist on task json; duration_s/tokens/usd/outcome in runs jsonl; missing: review verdict field, complexity in logs (B2 adds), any rollup by executor. Depends on B1 and B2 merged into goal/T-0005.\n\nWhat (\u22645 files: orchestrator/scorecard.py (new), orchestrator/cli.py, orchestrator/merge.py, orchestrator/spawn.py, tests/test_orchestrator.py):\n1. orchestrator/scorecard.py \u2014 `def build(root=STATE) -> dict`: read runs/*.jsonl and tasks/T-*.json; key by executor id (run field `executor`, falling back to task[\"executor\"] or f\"claude:{tier}\"); per executor: merged (tasks with merged_into), failed (status failed), held_usage_limit (runs outcome in usage_limit/rate_limit), rounds_avg (task rounds over done tasks), wall_s (sum duration_s), tokens {in, out, cache_read}, usd (sum), review_request_changes (tasks with review_verdict == \"request_changes\"), by_complexity {\"1-3\",\"4-6\",\"7-10\": {merged, failed}}. `def scores(card, min_runs=5) -> dict[str, float]`: success = merged/(merged+failed); score = 0.5 + success when runs \u2265 min_runs else 1.0 (neutral); executors with \u22653 usage-limit hits today get \u00d70.5. `def write(card)` \u2192 STATE/scorecard.json with a `generated_at` ISO timestamp (Europe/Zurich offset is fine via datetime.now().astimezone()).\n2. spawn.run_worker review path: parse `verdict` from the review result JSON and `bus.update(task_id, review_verdict=...)`; also for the reviewed task (inputs[0]) set review_verdict.\n3. merge.merge: after a successful fast-forward call scorecard.write(scorecard.build()) inside try/except (never fail a merge on scorecard errors).\n4. pool.py must NOT be edited here; instead `Pool.scores` is provided via a thin module-level function in scorecard.py that executor.py already looks up with getattr \u2014 so add in executor.start: `scores = scorecard.scores(scorecard.build())` guarded by try/except \u2192 {} (edit executor.py ONLY for that 3-line call; it is in scope for that reason). cli.py: `orchestrator scorecard [--by executor|tier] [--json]` prints a table (one line per executor: id merged failed rounds_avg wall_s usd hits score) or JSON.\n5. tests: synthesize a runs jsonl and two task jsons under TMP (one merged, one failed, one usage_limit run) and assert build() counts and scores() (neutral below min_runs; below-1 for a failing executor when min_runs=1).\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"scorecard: per-executor outcomes from runs+tasks, review verdict capture, scores() feed pick_executor, cli scorecard\" with a revert-path body.",
+  "inputs": [
+    "T-0018"
+  ],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new scorecard tests",
+    "uv run orchestrator scorecard prints one line per executor id present in runs/tasks (header + N lines) and --json is valid JSON",
+    "after a merge() .orchestrator/scorecard.json exists with generated_at",
+    "executor.start passes scores from the scorecard into pick_executor (test with min_runs=1 shows a failing executor scoring below 1.0)",
+    "git diff --stat limited to orchestrator/scorecard.py, orchestrator/cli.py, orchestrator/merge.py, orchestrator/spawn.py, orchestrator/executor.py, tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "orchestrator/merge.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_orchestrator.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0058",
+  "codex_thread": null,
+  "result": {
+    "summary": "stale: created by the daemon smoke run for already-merged work (T-0018 merged via fix round T-0034). Superseded by T-0063 guards.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789674077.7394938,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0058",
+      "claimed_at": 1789674077.739224
+    },
+    {
+      "ts": 1789674077.7685308,
+      "pid": 45686,
+      "account": "A"
+    },
+    {
+      "ts": 1789674092.75513,
+      "status": "done",
+      "result": {
+        "summary": "Verdict: request_changes. The diff is empty, so none of the five acceptance criteria (new scorecard module, CLI command, merge integration, executor wiring, passing tests) are met.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789678767.4739552,
+      "status": "failed",
+      "result": {
+        "summary": "stale: created by the daemon smoke run for already-merged work (T-0018 merged via fix round T-0034). Superseded by T-0063 guards.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789674077.739224,
+  "pid": 45686,
+  "account": "A"
+}

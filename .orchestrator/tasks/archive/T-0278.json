@@ -1,0 +1,110 @@
+{
+  "id": "T-0278",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G1a: every run row carries goal_id and normalised token buckets (uncached input, cache read, cache write, output, reasoning) through one bus.normalize_usage(); Jev usage rows carry task and goal ids",
+  "spec": "Scout T-0261 (goal/T-0260): bus.log_run appends any fields (bus.py about line 206); spawn.py logs usd, turns, input/output/cache_read/cache_creation tokens for Claude runs (about line 171); executor.py Codex rows carry input_tokens, output_tokens and cached_input_tokens mapped to cache_read_input_tokens, never usd and never reasoning (executor._tokens about line 65 and its three log_run calls); jev._log_usage rows (runs/jev/<date>.jsonl) carry caller, input_tokens, model, latency_ms, ok, votes but no task or goal id (jev.py about line 151). Nothing in the repo mentions reasoning tokens.\nChange:\n1. bus.normalize_usage(provider, usage) -> dict with keys input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens. Claude usage: input_tokens is uncached input, cache_read_input_tokens and cache_creation_input_tokens map to the cache buckets, output_tokens to output, reasoning 0 unless a reasoning field exists. Codex --json usage: input_tokens includes cached_input_tokens, so input_uncached = input_tokens - cached_input_tokens, cache_read = cached_input_tokens, cache_write 0, output = output_tokens, reasoning = reasoning_output_tokens if present (kept as its own bucket, not added again to output; document the assumption that Codex folds reasoning into output_tokens and record reasoning_output_tokens only as an informational bucket that total_tokens excludes). total_tokens = input_uncached + cache_read + cache_write + output.\n2. bus.log_run: when a task id is given, add goal_id = the task's parent (or the task id itself for a goal task) and provider; call sites in spawn.py and executor.py pass the raw usage through normalize_usage and log the normalised keys next to the raw ones (raw keys stay for old readers).\n3. jev._log_usage: add task (ORCH_TASK_ID or the caller-supplied task id) and goal_id (parent lookup via bus, fail-open when the bus is unavailable) to every usage row; jev_gate and jev_rank pass the task id they already know.\n4. Tests in tests/test_bus.py: test_normalize_usage_claude, test_normalize_usage_codex (cached subtracted, reasoning separate), test_log_run_adds_goal_id; tests/test_jev.py: test_usage_row_has_task_and_goal. Keep every existing test green.",
+  "inputs": [
+    "T-0264"
+  ],
+  "acceptance": [
+    "tests/test_bus.py::test_normalize_usage_claude, ::test_normalize_usage_codex, ::test_log_run_adds_goal_id pass",
+    "tests/test_jev.py::test_usage_row_has_task_and_goal passes",
+    "a Claude run row and a Codex run row written through spawn.py and executor.py both contain goal_id, provider and the six normalised token keys (proven by tests with monkeypatched subprocess output)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/jev.py",
+    "tests/test_bus.py",
+    "tests/test_jev.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0278",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/bus.py",
+        "line": 232,
+        "issue": "log_run now calls bus.get(task_id) with no guard. Previously log_run was a pure best-effort file append that could never fail; now it can raise KeyError (missing task file) or OSError/json.JSONDecodeError (corrupt file). The most dangerous call site is spawn.py:308, inside `except Exception as e:` \u2014 a fallback logger that runs specifically because something already went wrong. If that original failure was e.g. a deleted/corrupt task file, log_run's new get() call raises again, unhandled, before the following bus.update(task_id, status='failed', ...) ever runs \u2014 the task is left stuck instead of marked failed, and the real error is masked by a crash inside the logger. jev.py's own _log_usage wraps the identical bus.get(task) call in try/except (KeyError, OSError, ValueError, json.JSONDecodeError) for exactly this reason; bus.py's log_run needs the same guard (or to swallow lookup failures and just log without goal_id/provider).",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_executor.py",
+        "line": 98,
+        "issue": "Acceptance criterion 3 ('a Claude run row and a Codex run row written through spawn.py and executor.py both contain goal_id, provider and the six normalised token keys, proven by tests with monkeypatched subprocess output') is not actually proven. test_executor.py and test_spawn.py already monkeypatch subprocess and assert specific fields on the runs/*.jsonl line (e.g. task/outcome/reason, num_turns), but none of them were extended to assert goal_id, provider, or the six normalize_usage keys on a row produced via run_claude/_run. The new tests (test_bus.py, test_jev.py) only exercise bus.log_run and jev.ask directly, not the spawn.py/executor.py paths the criterion names.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789845117.640723,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0278",
+      "claimed_at": 1789845117.640427
+    },
+    {
+      "ts": 1789845117.642068,
+      "account": "A"
+    },
+    {
+      "ts": 1789845117.672887,
+      "pid": 91232,
+      "account": "A"
+    },
+    {
+      "ts": 1789845292.7795799,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/bus.py",
+            "line": 232,
+            "issue": "log_run now calls bus.get(task_id) with no guard. Previously log_run was a pure best-effort file append that could never fail; now it can raise KeyError (missing task file) or OSError/json.JSONDecodeError (corrupt file). The most dangerous call site is spawn.py:308, inside `except Exception as e:` \u2014 a fallback logger that runs specifically because something already went wrong. If that original failure was e.g. a deleted/corrupt task file, log_run's new get() call raises again, unhandled, before the following bus.update(task_id, status='failed', ...) ever runs \u2014 the task is left stuck instead of marked failed, and the real error is masked by a crash inside the logger. jev.py's own _log_usage wraps the identical bus.get(task) call in try/except (KeyError, OSError, ValueError, json.JSONDecodeError) for exactly this reason; bus.py's log_run needs the same guard (or to swallow lookup failures and just log without goal_id/provider).",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_executor.py",
+            "line": 98,
+            "issue": "Acceptance criterion 3 ('a Claude run row and a Codex run row written through spawn.py and executor.py both contain goal_id, provider and the six normalised token keys, proven by tests with monkeypatched subprocess output') is not actually proven. test_executor.py and test_spawn.py already monkeypatch subprocess and assert specific fields on the runs/*.jsonl line (e.g. task/outcome/reason, num_turns), but none of them were extended to assert goal_id, provider, or the six normalize_usage keys on a row produced via run_claude/_run. The new tests (test_bus.py, test_jev.py) only exercise bus.log_run and jev.ask directly, not the spawn.py/executor.py paths the criterion names.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789845292.7809432,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789845117.640427,
+  "account": "A",
+  "pid": 91232,
+  "review_verdict": "request_changes"
+}

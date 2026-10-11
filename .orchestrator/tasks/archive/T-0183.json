@@ -1,0 +1,123 @@
+{
+  "id": "T-0183",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "C-O5 fix round 3: git identity in the container, read-only orchestrator install with protected container paths, complete executor.env template, enforced installer checksums, ~/.config ownership (from review T-0181)",
+  "spec": "Fix round for T-0178 (branch task/T-0178 at 156e120). Work in this task's worktree, cut from task/T-0178. Review T-0181 (opus) requested changes; items come from it. Scope: Dockerfile, docker-compose.executor.yml, docs/executor-host.md, .orchestrator/protected-paths.txt. Build natively only (no --platform emulation).\n\n1 HIGH git identity: goals.py runs `git commit` in every cloned target and the container has no identity. Dockerfile: `RUN git config --system user.name \"orchestrator-executor\" && git config --system user.email \"orchestrator@localhost\"` as a baked default, and the runbook's executor.env template documents GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL as optional overrides (git honours them over config). Verify after the native build: `docker run --rm orch-exec:test sh -c 'cd /tmp && git init -q t && cd t && git commit -q --allow-empty -m x && git log -1 --format=%an'` prints the name.\n\n2 MED read-only install: `COPY . /opt/orchestrator` owned by root:root (no --chown), then `uv sync --frozen` as root and `chown -R orch:orch /opt/orchestrator/.venv` so orch can run but not rewrite the orchestrator code or hooks; WORKDIR and entrypoint unchanged. protected-paths.txt: add the container paths `/opt/orchestrator/.claude`, `/opt/orchestrator/orchestrator`, `/opt/orchestrator/.orchestrator/protected-paths.txt` (same format as the existing lines). Verify: `docker run --rm orch-exec:test sh -c 'touch /opt/orchestrator/orchestrator/x' ` fails with permission denied while `uv run orchestrator --help` (or `python -c \"import orchestrator\"`) works.\n\n3 MED runbook executor.env template: add GH_WRITE_TOKEN (used by pool.toml [secrets.planner]) with a one-line note on what it is for (the Planner opens the goal PR) and how to mint a fine-grained token limited to the target repos; keep every value as `<paste here>`.\n\n4 LOW Dockerfile installer integrity: add `ARG UV_INSTALL_SHA256=\"\"` and `ARG CLAUDE_INSTALL_SHA256=\"\"`; when non-empty, `echo \"<sha>  <file>\" | sha256sum -c` before executing the downloaded script, else only log the hash (comment says so). Move `COPY . /opt/orchestrator` below all installer RUN layers so source edits do not re-download installers.\n\n5 LOW Dockerfile: `RUN install -d -o orch -g orch /home/orch/.config /home/orch/.local /home/orch/.cache` before the mounts so the gh bind-mount parent is orch-owned.\n\nRe-run: native `docker build` (image size, four versions, arch), the two verification commands above, `docker compose -f docker-compose.executor.yml config` with dummy executor.env/.env/ORCH_CREDS/ORCH_NET (no ports, six mounts), objective secret grep clean, `uv run python -m unittest discover -q tests` green. Commit on the task branch (only the four scoped files). Finish with: summary, files changed, build evidence, failures-only test output.",
+  "inputs": [
+    "T-0178",
+    "T-0181"
+  ],
+  "acceptance": [
+    "Baked git identity present and overridable via GIT_* env; the empty-commit check inside the image prints the author name",
+    "/opt/orchestrator is root-owned and not writable by orch while the venv works; protected-paths.txt lists the three container paths",
+    "executor.env template includes GH_WRITE_TOKEN with its purpose; all values remain placeholders",
+    "Installer scripts verified by sha256sum -c when the ARGs are set, logged otherwise; COPY sits below the installer layers",
+    "~/.config, ~/.local and ~/.cache pre-created for orch",
+    "Native docker build succeeds with four versions; compose config validates with six mounts and no ports; secret grep clean; unit tests green; committed on the task branch; only the four scoped files change"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    "docs/executor-host.md",
+    ".orchestrator/protected-paths.txt"
+  ],
+  "depends_on": [
+    "T-0178"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3000,
+    "no_new_dependencies": true,
+    "fix_round_for": "T-0178",
+    "worktree_base": "task/T-0178",
+    "spec_review": "waived: fix round whose spec is the T-0181 comment list"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0183",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed cleanly on `task/T-0183`.\n\n## Summary\n\nFixed all 5 review items from T-0181 in `Dockerfile`, `docs/executor-host.md`, and `.orchestrator/protected-paths.txt` (`docker-compose.executor.yml` needed no content changes, only re-verification).\n\n1. **Git identity**: baked `git config --system user.name/email` as root; runbook documents `GIT_AUTHOR_NAME/EMAIL`, `GIT_COMMITTER_NAME/EMAIL` as optional overrides.\n2. **Read-only install**: `COPY` (no `--chown`) + `uv sync --frozen` run as root, then only `.venv` is `chown`'d to `orch`; added the three container paths to `protected-paths.txt`.\n3. **GH_WRITE_TOKEN**: added to the executor.env template with purpose (Planner opens the goal PR) and fine-grained-token guidance.\n4. **Installer integrity**: added `UV_INSTALL_SHA256`/`CLAUDE_INSTALL_SHA256` ARGs, verified via `sha256sum -c` when set else logged; moved `COPY` below all installer layers.\n5. **Pre-created** `/home/orch/.config`, `.local`, `.cache` before any mounts.\n\nOne fix beyond the spec's literal wording was needed to make it actually work: running `uv sync --frozen` as root inside `/home/orch/.cache/uv` (via `$HOME`) left root-owned cache files that blocked `orch` from writing at runtime, breaking `uv run orchestrator --help`. Fixed by pointing that build step at `UV_CACHE_DIR=/root/.cache/uv` instead.\n\n**Build evidence** (native arm64, no emulation): image built successfully, 1.61GB, arch `arm64`; four tool versions confirmed (`uv 0.12.16`, `Claude Code 2.1.276`, `codex-cli 0.155.0`, `Python 3.12.3`); git-identity check printed `orchestrator-executor orchestrator@localhost`; write to `/opt/orchestrator/orchestrator/x` failed with permission denied while `uv run orchestrator --help` succeeded; `docker compose config` validated with six mounts and no ports; secret grep on the diff was clean.\n\n**Test output**: `.claude/hooks/tests-green.sh` and `uv run python -m unittest discover -q tests` \u2014 191 tests, all passed, no failures.\n\nCommitted as `88c0798` on `task/T-0183`. Nothing left outstanding on this spec.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789755672.976149,
+      "spec_review_verdict": "approve",
+      "spec_review_note": "waived: fix round",
+      "pipeline": {
+        "spec_review_at": 1789755672.976039,
+        "gated_at": 1789755672.976039,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789755678.7390661,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789755678.741002,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0183",
+      "claimed_at": 1789755678.740923
+    },
+    {
+      "ts": 1789755678.7523148,
+      "pid": 62721,
+      "account": "B"
+    },
+    {
+      "ts": 1789756034.6195798,
+      "status": "done",
+      "result": {
+        "summary": "Committed cleanly on `task/T-0183`.\n\n## Summary\n\nFixed all 5 review items from T-0181 in `Dockerfile`, `docs/executor-host.md`, and `.orchestrator/protected-paths.txt` (`docker-compose.executor.yml` needed no content changes, only re-verification).\n\n1. **Git identity**: baked `git config --system user.name/email` as root; runbook documents `GIT_AUTHOR_NAME/EMAIL`, `GIT_COMMITTER_NAME/EMAIL` as optional overrides.\n2. **Read-only install**: `COPY` (no `--chown`) + `uv sync --frozen` run as root, then only `.venv` is `chown`'d to `orch`; added the three container paths to `protected-paths.txt`.\n3. **GH_WRITE_TOKEN**: added to the executor.env template with purpose (Planner opens the goal PR) and fine-grained-token guidance.\n4. **Installer integrity**: added `UV_INSTALL_SHA256`/`CLAUDE_INSTALL_SHA256` ARGs, verified via `sha256sum -c` when set else logged; moved `COPY` below all installer layers.\n5. **Pre-created** `/home/orch/.config`, `.local`, `.cache` before any mounts.\n\nOne fix beyond the spec's literal wording was needed to make it actually work: running `uv sync --frozen` as root inside `/home/orch/.cache/uv` (via `$HOME`) left root-owned cache files that blocked `orch` from writing at runtime, breaking `uv run orchestrator --help`. Fixed by pointing that build step at `UV_CACHE_DIR=/root/.cache/uv` instead.\n\n**Build evidence** (native arm64, no emulation): image built successfully, 1.61GB, arch `arm64`; four tool versions confirmed (`uv 0.12.16`, `Claude Code 2.1.276`, `codex-cli 0.155.0`, `Python 3.12.3`); git-identity check printed `orchestrator-executor orchestrator@localhost`; write to `/opt/orchestrator/orchestrator/x` failed with permission denied while `uv run orchestrator --help` succeeded; `docker compose config` validated with six mounts and no ports; secret grep on the diff was clean.\n\n**Test output**: `.claude/hooks/tests-green.sh` and `uv run python -m unittest discover -q tests` \u2014 191 tests, all passed, no failures.\n\nCommitted as `88c0798` on `task/T-0183`. Nothing left outstanding on this spec.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789756435.067583,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789756460.268759,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "74e183008db93184a6579833e356fec03cdff3f9"
+    },
+    {
+      "ts": 1789756483.183666,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "74e183008db93184a6579833e356fec03cdff3f9"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_note": "waived: fix round",
+  "pipeline": {
+    "spec_review_at": 1789755672.976039,
+    "gated_at": 1789755672.976039,
+    "gated_by": "planner-pre-stamp: gate and review by hand"
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789755678.740923,
+  "pid": 62721,
+  "account": "B",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0073",
+  "sha": "74e183008db93184a6579833e356fec03cdff3f9"
+}

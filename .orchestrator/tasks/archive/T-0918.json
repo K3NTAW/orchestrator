@@ -1,0 +1,1175 @@
+{
+  "id": "T-0918",
+  "created_at": 1790114841.4338791,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "Active path 2: tool_disclosure active passes the minimal allowlist to Claude workers, with a bus-event escalation when a hidden tool is needed (v3)",
+  "spec": "Today (T-0802) tool_disclosure mode \"active\" is treated as shadow. Build the real active branch. Facts: spawn.run_worker builds the per-role Claude Code allowlist from the table at spawn.py:24-31 and passes it to the worker launch; tool_catalog.minimal_set(task, role) returns keep/drop/mandatory; Codex executors are untouched (their tools are the CLI's).\nDo:\n1. Active: when promotion.mode(\"tool_disclosure\") == \"active\", run_worker passes the minimal set's `keep` list (mandatory always included) as the allowlist for review, spec_review, scout, challenge and the Claude execute fallback; the legacy full list is still logged in the tool_disclosure decision row as candidates, and the decision's selected becomes the kept list.\n2. Escalation path (P11): the worker prompt gains one line telling the worker that if it needs a tool outside its allowlist it must post `bus_post_result` with status \"held\" and reason starting \"needs_tool:<tool id>\"; daemon (or spawn.run_worker's result handling) recognises that reason, records a decision_log row kind \"tool_disclosure\" reason \"hidden_tool_requested\", and re-spawns the worker once with the full legacy allowlist (respawn capped at one per task; the second attempt logs \"tool_escalation_used\" in the task pipeline). Scorecard: hidden_tool_recovery_rate per role = escalations / active spawns; `scorecard --economy` shows it.\n3. Safety: mandatory tools (Read for all, Bash(git *) for review/scout, tests-green + Edit/Write for execute, bus_post_result for all) can never be dropped; a docs-only execute keeps Edit/Write.\nTests: tests/test_spawn.py::test_active_allowlist_is_minimal_set_with_mandatory, ::test_hidden_tool_request_respawns_once_with_full_allowlist; tests/test_tool_catalog.py::test_mandatory_never_dropped_in_active; docs/context-economy/06-tool-disclosure.md Active section with the revert path.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-23 03:35) after spec review T-0908 (request_changes), binding on top of v1:\n- The escalation respawn is synchronous inside spawn.run_worker: after run_claude returns, a helper `_hidden_tool_request(task_id)` reads bus.get(task_id) and returns the tool id when the worker posted status \"held\" with a reason starting \"needs_tool:\"; run_worker calls it BEFORE the generic done/failed post_result branches for every role (mirroring the existing review-role guard), and on a hit runs run_claude once more with the full legacy allowlist, then continues with the normal result handling of that second run. orchestrator/daemon.py leaves the scope; no daemon retry path is added.\n- Budget and timeout for the second attempt come out of the original reservation: max_budget_usd for the retry = original cap minus the first attempt's spend (from its usage/usd), timeout = original timeout minus elapsed; when either remainder is below 10% of the original the respawn is skipped and the task is held with reason \"needs_tool:<id> (no budget for respawn)\" for the Planner. No second pool.reserve().\n- hidden_tool_recovery_rate is a key inside context_scorecard.build()'s existing by_role_task_class rows (escalations / active spawns for that row), so `scorecard --economy` shows it without touching cli.py; cli.py stays out of scope.\n- tests/test_spawn.py::test_hidden_tool_request_respawns_once_with_full_allowlist must drive run_worker with run_claude patched: first call posts the needs_tool hold and returns, second call receives the legacy allowlist and a reduced max_budget_usd; a third call never happens. Add ::test_respawn_skipped_when_budget_remainder_too_small.\n\nSPEC v3 (2026-09-23 04:45) after spec review T-0912 (round 2; four points folded in, further review waived by the Planner, verdict set to approve):\n- The needs_tool signal is a result-dict key: the worker posts bus_post_result(status=\"held\", result={\"reason\": \"needs_tool:<tool id>\"}); a module constant spawn.NEEDS_TOOL_PREFIX = \"needs_tool:\" is the single source of the wording, and the four prompt files carry the same literal sentence (\"post bus_post_result with status held and result reason needs_tool:<tool id>\"); _hidden_tool_request reads bus.get(task_id)[\"result\"][\"reason\"].\n- Spend accounting: the first attempt's actual cost is r[\"output\"].get(\"total_cost_usd\", 0); both attempts' usage are summed and released once through the existing pool.release() call in run_worker's finally (additive usage dict), so reservation history and goal spend count both runs.\n- Acceptance tests added: tests/test_spawn.py::test_escalation_stamps_tool_escalation_used_and_sums_usage (pipeline gains tool_escalation_used; the released usage equals attempt 1 + attempt 2); tests/test_context_scorecard.py::test_hidden_tool_recovery_rate_in_by_role_task_class.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_active_allowlist_is_minimal_set_with_mandatory passes",
+    "tests/test_spawn.py::test_hidden_tool_request_respawns_once_with_full_allowlist passes",
+    "tests/test_tool_catalog.py::test_mandatory_never_dropped_in_active passes",
+    "docs/context-economy/06-tool-disclosure.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_respawn_skipped_when_budget_remainder_too_small passes",
+    "tests/test_spawn.py::test_escalation_stamps_tool_escalation_used_and_sums_usage passes",
+    "tests/test_context_scorecard.py::test_hidden_tool_recovery_rate_in_by_role_task_class passes"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/tool_catalog.py",
+    "orchestrator/context_scorecard.py",
+    ".orchestrator/prompts/review.md",
+    ".orchestrator/prompts/scout.md",
+    ".orchestrator/prompts/spec-review.md",
+    ".orchestrator/prompts/challenge.md",
+    "tests/test_spawn.py",
+    "tests/test_tool_catalog.py",
+    "docs/context-economy/06-tool-disclosure.md",
+    "tests/test_context_scorecard.py"
+  ],
+  "depends_on": [
+    "T-0855"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0918",
+  "codex_thread": "01a0cb29-8ffb-7d11-ae2e-144904dad251",
+  "result": {
+    "summary": "Summary: Activated minimal Claude tool allowlists with one-shot hidden-tool escalation, budget safeguards, usage accounting, pipeline telemetry, scorecard metrics, tests, and documentation.\n\nFiles changed: 11 scoped files, 196 insertions, 22 deletions.\n\nGate result: `.claude/hooks/tests-green.sh .` passed \u2014 1,143 tests.\n\nCommit: `2b36177753d99e9fa91bfca78c897c0b8b40a8ca`\n\nFailures-only test output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0cb29-8ffb-7d11-ae2e-144904dad251",
+    "usage": {
+      "input_tokens": 1170115,
+      "cached_input_tokens": 1124480,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7557,
+      "reasoning_output_tokens": 574,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790114841.435196,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 04:45: two spec-review rounds (T-0908, T-0912); round-2 points folded into v3; further review waived"
+    },
+    {
+      "ts": 1790114871.038402,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364
+      }
+    },
+    {
+      "ts": 1790114871.039713,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676
+      }
+    },
+    {
+      "ts": 1790114873.858946,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312
+      }
+    },
+    {
+      "ts": 1790114892.0338209,
+      "packet_meta": {
+        "chars": 6655,
+        "est_tokens": 1663,
+        "presented_tokens": 1663,
+        "sections": {
+          "_preamble": {
+            "chars": 150,
+            "est_tokens": 37,
+            "sha256": "4f9e4c6942925eabe917e3fd08ff66a338aa8fb530327a3aed3955d06cf62e29"
+          },
+          "objective": {
+            "chars": 4984,
+            "est_tokens": 1246,
+            "sha256": "ce9b16e7e520be7aca711967f2d571bba2b70c26ac7947cb2491d892fa4afaa0"
+          },
+          "acceptance": {
+            "chars": 633,
+            "est_tokens": 158,
+            "sha256": "0a29bf7269be40025d944bb55946ebb66af2425af81a9e0ca1c37de7e30dd224"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "78625556652efbb0cedf3cfaca6c69b59f571056873c744bf20a090fbbc73f60"
+          },
+          "write_scope": {
+            "chars": 379,
+            "est_tokens": 94,
+            "sha256": "6ebfb7aa0d4ee4738f597bc7c21be9de733d2d01557a15e9ee35d3cd3c7d49bc"
+          },
+          "read_scope": {
+            "chars": 115,
+            "est_tokens": 28,
+            "sha256": "f3d6dc6b252778a6b8aeb2225d031a83384ba0006e74533e5260adbe52b53195"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "3778bbe8f6064a355454dc5c55ddddc1de547a3e9d7557340f1feda2c9b52bec"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "55448f72239b",
+        "version": "55448f72239b",
+        "candidate_known": true,
+        "base": "91553afa603d",
+        "sources": "pool.toml@6169e347305f gotchas@a220b06692ef memory@notes over cap by 1855 chars: acceptance kept whole",
+        "policy_version": "6169e347305f",
+        "gotchas": "a220b06692ef",
+        "candidate_tokens": 2639,
+        "routed_tokens": 16383,
+        "routed_reduction_ratio": 0.9436124870406635,
+        "routed_hidden": 5,
+        "routed_ambiguous": 22,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "76bad10bb68c",
+          "2b5c22452ab3",
+          "7f4a11d058cb",
+          "be0de96df57c",
+          "2312539af81d",
+          "c0a90da96c40",
+          "b795a3e88e30",
+          "fb323e0a4ce8",
+          "ba3eeada0425",
+          "eee3d3976539",
+          "6f75dbaf2ed5",
+          "99243a17c422",
+          "4bdf10b52a71",
+          "6ff7b02d86ec",
+          "247d6c9488f8",
+          "6ccbcc08b8e0",
+          "8128c19216f5",
+          "542b4d4be0e4",
+          "a57f3b4147b0",
+          "60094942b7f7",
+          "50403e2578bf",
+          "c33b52884204",
+          "504365aa02ad",
+          "8264bd29f19f",
+          "08903d59eba4",
+          "032987faefbf",
+          "094127e4cf9e",
+          "61537f7c7364",
+          "dad20d6c3c9f",
+          "0692cd54347d",
+          "82a73db20c9a",
+          "ae8d91b568be",
+          "8a4f918459f5",
+          "aa5a6d317088",
+          "79c3dd5e9a85",
+          "4154a6110f37",
+          "9b81013f60f1",
+          "2f1bddc5d2a7",
+          "3a33f9e3024a",
+          "de743ff00300",
+          "9a6ec82e41e5",
+          "3d64a83f7a4e",
+          "8f25b90af381",
+          "a0b135b2403a",
+          "483d2a55c516",
+          "48ddfed46dda",
+          "9a9d88eb0ef7",
+          "574a21b4d3a6",
+          "91e68a81d190",
+          "c11a0f4340db",
+          "8aed661e8999",
+          "f82868680c75",
+          "02c02099db40",
+          "e32074570efe",
+          "20ce1682a6c7",
+          "7cb6c57007e1",
+          "ffe0efea548b",
+          "ec2c8fa7375b",
+          "843a994c2829",
+          "c781fefb4957",
+          "e4c630cc87b3",
+          "47ec4cd5d02a",
+          "b44cdc4019d8",
+          "66ab1306ccfc",
+          "f5e9df567728",
+          "461132b06b06",
+          "669cef77d8ef",
+          "cc9eccd61e92",
+          "3be7d28daede",
+          "8b57ac0f37a7",
+          "153f8acc8756",
+          "be699d73269b",
+          "e9e1cc85805f",
+          "36658caf3ebc",
+          "1d2385a14c13"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401
+      }
+    },
+    {
+      "ts": 1790114892.035084,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0918",
+      "claimed_at": 1790114892.034952
+    },
+    {
+      "ts": 1790114892.0359008,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790115254.09983,
+      "codex_thread": "01a0cb29-8ffb-7d11-ae2e-144904dad251",
+      "codex_thread_head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+    },
+    {
+      "ts": 1790115254.109504,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790115254.1126919,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Activated minimal Claude tool allowlists with one-shot hidden-tool escalation, budget safeguards, usage accounting, pipeline telemetry, scorecard metrics, tests, and documentation.\n\nFiles changed: 11 scoped files, 196 insertions, 22 deletions.\n\nGate result: `.claude/hooks/tests-green.sh .` passed \u2014 1,143 tests.\n\nCommit: `2b36177753d99e9fa91bfca78c897c0b8b40a8ca`\n\nFailures-only test output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0cb29-8ffb-7d11-ae2e-144904dad251",
+        "usage": {
+          "input_tokens": 1170115,
+          "cached_input_tokens": 1124480,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7557,
+          "reasoning_output_tokens": 574,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790115267.561028,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790115371.730052,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790115372.235235,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        }
+      }
+    },
+    {
+      "ts": 1790115372.314625,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+      }
+    },
+    {
+      "ts": 1790115372.3238752,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472
+      }
+    },
+    {
+      "ts": 1790115444.327688,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-0920"
+    },
+    {
+      "ts": 1790115445.197559,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790115445.617125,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790115444.327688": true
+        }
+      }
+    },
+    {
+      "ts": 1790115717.347898,
+      "status": "done",
+      "result": {
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790115766.514015,
+      "status": "held",
+      "result": {
+        "summary": "Summary: Activated minimal Claude tool allowlists with one-shot hidden-tool escalation, budget safeguards, usage accounting, pipeline telemetry, scorecard metrics, tests, and documentation.\n\nFiles changed: 11 scoped files, 196 insertions, 22 deletions.\n\nGate result: `.claude/hooks/tests-green.sh .` passed \u2014 1,143 tests.\n\nCommit: `2b36177753d99e9fa91bfca78c897c0b8b40a8ca`\n\nFailures-only test output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0cb29-8ffb-7d11-ae2e-144904dad251",
+        "usage": {
+          "input_tokens": 1170115,
+          "cached_input_tokens": 1124480,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7557,
+          "reasoning_output_tokens": 574,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790115794.872878,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790115444.327688": true,
+          "1790115766.514015": true
+        }
+      }
+    },
+    {
+      "ts": 1790115997.5397499,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790116007.3188322,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158,
+        "failure_kind": "invalid_spec",
+        "auto_fix_skipped": {
+          "1790115444.327688": true,
+          "1790115766.514015": true
+        }
+      }
+    },
+    {
+      "ts": 1790116894.613878,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158,
+        "failure_kind": "invalid_spec",
+        "auto_fix_skipped": {
+          "1790115444.327688": true,
+          "1790115766.514015": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790117140.093366,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "merged_via": "fix round T-0928 a4c553caf205c87ea27ab5b5110b338ea9b446a7",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790114871.038364,
+        "dispatched_at": 1790114871.039676,
+        "dispatched_at_lease": 1790115771.039676,
+        "dispatched_at_done": 1790114873.8588312,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "1e445b8eba965251a33ee8a779637141143537e1",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0467391304347826
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790115371.72988,
+        "gated_at_lease": 1790116271.72988,
+        "first_green_at": 1790115371.728949,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0918",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790115372.2348568,
+          "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+        },
+        "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+        "gated_at_done": 1790115372.3237472,
+        "review_held_at": 1790115444.3275158,
+        "failure_kind": "invalid_spec",
+        "auto_fix_skipped": {
+          "1790115444.327688": true,
+          "1790115766.514015": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790117140.091603
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 04:45: two spec-review rounds (T-0908, T-0912); round-2 points folded into v3; further review waived",
+  "pipeline": {
+    "first_ready_at": 1790114871.038364,
+    "dispatched_at": 1790114871.039676,
+    "dispatched_at_lease": 1790115771.039676,
+    "dispatched_at_done": 1790114873.8588312,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "1e445b8eba965251a33ee8a779637141143537e1",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0467391304347826
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790115371.72988,
+    "gated_at_lease": 1790116271.72988,
+    "first_green_at": 1790115371.728949,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0918",
+      "goal_head": "goal/T-0760",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790115372.2348568,
+      "head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca"
+    },
+    "reviewed_sha": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+    "gated_at_done": 1790115372.3237472,
+    "review_held_at": 1790115444.3275158,
+    "failure_kind": "invalid_spec",
+    "auto_fix_skipped": {
+      "1790115444.327688": true,
+      "1790115766.514015": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790117140.091603
+  },
+  "packet_meta": {
+    "chars": 6655,
+    "est_tokens": 1663,
+    "presented_tokens": 1663,
+    "sections": {
+      "_preamble": {
+        "chars": 150,
+        "est_tokens": 37,
+        "sha256": "4f9e4c6942925eabe917e3fd08ff66a338aa8fb530327a3aed3955d06cf62e29"
+      },
+      "objective": {
+        "chars": 4984,
+        "est_tokens": 1246,
+        "sha256": "ce9b16e7e520be7aca711967f2d571bba2b70c26ac7947cb2491d892fa4afaa0"
+      },
+      "acceptance": {
+        "chars": 633,
+        "est_tokens": 158,
+        "sha256": "0a29bf7269be40025d944bb55946ebb66af2425af81a9e0ca1c37de7e30dd224"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "78625556652efbb0cedf3cfaca6c69b59f571056873c744bf20a090fbbc73f60"
+      },
+      "write_scope": {
+        "chars": 379,
+        "est_tokens": 94,
+        "sha256": "6ebfb7aa0d4ee4738f597bc7c21be9de733d2d01557a15e9ee35d3cd3c7d49bc"
+      },
+      "read_scope": {
+        "chars": 115,
+        "est_tokens": 28,
+        "sha256": "f3d6dc6b252778a6b8aeb2225d031a83384ba0006e74533e5260adbe52b53195"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "3778bbe8f6064a355454dc5c55ddddc1de547a3e9d7557340f1feda2c9b52bec"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "55448f72239b",
+    "version": "55448f72239b",
+    "candidate_known": true,
+    "base": "91553afa603d",
+    "sources": "pool.toml@6169e347305f gotchas@a220b06692ef memory@notes over cap by 1855 chars: acceptance kept whole",
+    "policy_version": "6169e347305f",
+    "gotchas": "a220b06692ef",
+    "candidate_tokens": 2639,
+    "routed_tokens": 16383,
+    "routed_reduction_ratio": 0.9436124870406635,
+    "routed_hidden": 5,
+    "routed_ambiguous": 22,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "76bad10bb68c",
+      "2b5c22452ab3",
+      "7f4a11d058cb",
+      "be0de96df57c",
+      "2312539af81d",
+      "c0a90da96c40",
+      "b795a3e88e30",
+      "fb323e0a4ce8",
+      "ba3eeada0425",
+      "eee3d3976539",
+      "6f75dbaf2ed5",
+      "99243a17c422",
+      "4bdf10b52a71",
+      "6ff7b02d86ec",
+      "247d6c9488f8",
+      "6ccbcc08b8e0",
+      "8128c19216f5",
+      "542b4d4be0e4",
+      "a57f3b4147b0",
+      "60094942b7f7",
+      "50403e2578bf",
+      "c33b52884204",
+      "504365aa02ad",
+      "8264bd29f19f",
+      "08903d59eba4",
+      "032987faefbf",
+      "094127e4cf9e",
+      "61537f7c7364",
+      "dad20d6c3c9f",
+      "0692cd54347d",
+      "82a73db20c9a",
+      "ae8d91b568be",
+      "8a4f918459f5",
+      "aa5a6d317088",
+      "79c3dd5e9a85",
+      "4154a6110f37",
+      "9b81013f60f1",
+      "2f1bddc5d2a7",
+      "3a33f9e3024a",
+      "de743ff00300",
+      "9a6ec82e41e5",
+      "3d64a83f7a4e",
+      "8f25b90af381",
+      "a0b135b2403a",
+      "483d2a55c516",
+      "48ddfed46dda",
+      "9a9d88eb0ef7",
+      "574a21b4d3a6",
+      "91e68a81d190",
+      "c11a0f4340db",
+      "8aed661e8999",
+      "f82868680c75",
+      "02c02099db40",
+      "e32074570efe",
+      "20ce1682a6c7",
+      "7cb6c57007e1",
+      "ffe0efea548b",
+      "ec2c8fa7375b",
+      "843a994c2829",
+      "c781fefb4957",
+      "e4c630cc87b3",
+      "47ec4cd5d02a",
+      "b44cdc4019d8",
+      "66ab1306ccfc",
+      "f5e9df567728",
+      "461132b06b06",
+      "669cef77d8ef",
+      "cc9eccd61e92",
+      "3be7d28daede",
+      "8b57ac0f37a7",
+      "153f8acc8756",
+      "be699d73269b",
+      "e9e1cc85805f",
+      "36658caf3ebc",
+      "1d2385a14c13"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401
+  },
+  "claimed_at": 1790114892.034952,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "2b36177753d99e9fa91bfca78c897c0b8b40a8ca",
+  "hold_reason": null,
+  "review_verdict": "request_changes",
+  "merged_into": "goal/T-0760",
+  "merged_via": "fix round T-0928 a4c553caf205c87ea27ab5b5110b338ea9b446a7"
+}

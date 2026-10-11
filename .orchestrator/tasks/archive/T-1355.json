@@ -1,0 +1,487 @@
+{
+  "id": "T-1355",
+  "created_at": 1790193250.541465,
+  "parent": "T-1334",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2 v6: Dispatch provider=\"claude\" executor rows through run_worker with the row's model, capacity-aware",
+  "spec": "Respec of T-1348: depends_on moved to S1 v6 T-1352 and acceptance ids rewritten to the gate-parseable tests/x.py::test_name form (acceptance.py:8 does not read Class::test). Spec otherwise unchanged. Goal T-1334. After S1, pick_executor can return a provider=\"claude\" row, but executor.start (executor.py:487) sends every non-codex pick to _exhausted() (fallback tier by complexity), and the daemon's dispatch capacity (capacity.snapshot / eligible_executors_from_snapshot, capacity.py:54, used at daemon.py:806) treats every row like a Codex row. Plug and play means a Claude row runs as itself within Claude capacity.\n\n1. orchestrator/executor.py start(): when ex.provider == \"claude\": acct = pool.pick(\"execute\") (re-checked here: S1 eligibility reserves nothing); None -> bus.update status held, hold_reason \"no account with headroom\", return {\"status\": \"held\"}. Else bus.update(task, executor=ex.id, tier=ex.id); ex.roll_day(); ex.day_tasks += 1; pool.save(); run spawn.run_worker(task_id, account_id=acct.id) in a background thread registered in _fallback_threads exactly like _exhausted() (executor.py:535-569); handed_off=True so the dispatch reservation passes to run_worker. Return {\"status\": \"dispatched\", \"executor\": ex.id, \"provider\": \"claude\"}. No fallback/review_rule fields. ex None keeps _exhausted(). Unknown provider -> held, hold_reason \"unknown executor provider <p>\".\n2. orchestrator/spawn.py run_worker: model (spawn.py:1538) = the row model when pool.executor_identity(t[\"tier\"]) is provider \"claude\" with a model, else cfg[\"models\"][t[\"tier\"]] as today. Execute branch (spawn.py:1564): executor = row id for a row-routed task, legacy f\"claude:{tier}\" otherwise; the \"Claude fallback executor (Codex is unavailable)\" line only for legacy, row-routed gets \"You are the routed executor\". executed_by (spawn.py:1657) uses t[\"executor\"]. Claim stays \"claude:<acct>\" (spawn.py:1603).\n3. orchestrator/capacity.py: snapshot rows carry provider; in eligible_executors_from_snapshot a claude row additionally needs snapshot[\"claude_workers_free\"] > 0 and at least one account with headroom in snapshot[\"accounts\"] (use fields the snapshot already has). Codex rows unchanged.\n4. orchestrator/daemon.py _codex_available (daemon.py:454, drives fallback mode): a claude row counts only when not cooling and pool.pick(\"execute\") returns an account.\n5. Fix rounds: executor.resume_plan returns fresh for non-codex parents (executor.py:279); keep it, test it.\n6. README.md \"Executors and routing\" (README.md:278): provider=\"claude\" rows (id, full model id, quota_group, roles, complexity band), Claude headroom from [[claude_accounts]], reviewer never runs the executing model, plug-and-play recipe: add a row to add a model; enabled=false on every codex row to run without Codex.\nTest behaviour per acceptance id: test_start_runs_claude_row_with_its_model (only a claude row eligible -> run_worker called with account_id, executor and tier = row id, _exhausted not called); test_claude_row_holds_without_headroom (every account cooling -> held, 'no account with headroom'); test_fix_round_for_claude_row_is_fresh (resume_plan -> mode fresh); test_run_worker_uses_row_model (claude --model = row model, executor = row id; legacy tier 'sonnet' still via [models]); test_claude_row_needs_claude_capacity (snapshot excludes a claude row when claude_workers_free is 0 or no account has headroom; codex rows unchanged). Define each as a method in a unittest.TestCase.\nNo .orchestrator/pool.toml edit (Planner adds the opus55 row after merge). No new dependencies. Additive; git revert restores Codex-only dispatch. 8 files: one behaviour, not split.",
+  "inputs": [
+    "T-1353"
+  ],
+  "acceptance": [
+    "tests/test_executor.py::test_start_runs_claude_row_with_its_model",
+    "tests/test_executor.py::test_claude_row_holds_without_headroom",
+    "tests/test_executor.py::test_fix_round_for_claude_row_is_fresh",
+    "tests/test_spawn.py::test_run_worker_uses_row_model",
+    "tests/test_capacity.py::test_claude_row_needs_claude_capacity",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_executor.py",
+    "tests/test_spawn.py",
+    "tests/test_capacity.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1355",
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790193252.093151,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5668,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790193252.097555,
+      "packet_meta": {
+        "chars": 4929,
+        "est_tokens": 1232,
+        "presented_tokens": 1232,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "9a4be54bfb1a589634b0e0967bb1c93c5ff9b58ef88afbc013008d1aab176876"
+          },
+          "spec": {
+            "chars": 3661,
+            "est_tokens": 915,
+            "sha256": "d9987be625cfaf1bb28e9aa47aaccd6ba370dbbab31417dc9437f1e67e71ecd6"
+          },
+          "acceptance": {
+            "chars": 384,
+            "est_tokens": 96,
+            "sha256": "2c6f788d0a4fcf021ef47a0295e283d6887d6c574de39f8e7dd3c258cb6233b4"
+          },
+          "scope": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "019fee6344491464080f13de95bd90a06e2280162d062802b4ea4a4c01412976"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 490,
+            "est_tokens": 122,
+            "sha256": "c90dfe4c2adef0f373db1ee62c4993243ce387b6e3b7501356c775652e171410"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "6807fd7ec8e9",
+        "version": "6807fd7ec8e9",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1353 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5668,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790193254.013473,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1355",
+      "claimed_at": 1790193254.013118
+    },
+    {
+      "ts": 1790193254.01455,
+      "account": "A"
+    },
+    {
+      "ts": 1790193255.310109,
+      "pid": 84419,
+      "account": "A"
+    },
+    {
+      "ts": 1790193306.368149,
+      "packet_meta": {
+        "chars": 4929,
+        "est_tokens": 1232,
+        "presented_tokens": 1232,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "9a4be54bfb1a589634b0e0967bb1c93c5ff9b58ef88afbc013008d1aab176876"
+          },
+          "spec": {
+            "chars": 3661,
+            "est_tokens": 915,
+            "sha256": "d9987be625cfaf1bb28e9aa47aaccd6ba370dbbab31417dc9437f1e67e71ecd6"
+          },
+          "acceptance": {
+            "chars": 384,
+            "est_tokens": 96,
+            "sha256": "2c6f788d0a4fcf021ef47a0295e283d6887d6c574de39f8e7dd3c258cb6233b4"
+          },
+          "scope": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "019fee6344491464080f13de95bd90a06e2280162d062802b4ea4a4c01412976"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 490,
+            "est_tokens": 122,
+            "sha256": "c90dfe4c2adef0f373db1ee62c4993243ce387b6e3b7501356c775652e171410"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "6807fd7ec8e9",
+        "version": "6807fd7ec8e9",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1353 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5668,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "24418d3c-f2ab-4e47-a325-e17b1c060a15"
+      }
+    },
+    {
+      "ts": 1790193306.393274,
+      "packet_meta": {
+        "chars": 4929,
+        "est_tokens": 1232,
+        "presented_tokens": 1232,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "9a4be54bfb1a589634b0e0967bb1c93c5ff9b58ef88afbc013008d1aab176876"
+          },
+          "spec": {
+            "chars": 3661,
+            "est_tokens": 915,
+            "sha256": "d9987be625cfaf1bb28e9aa47aaccd6ba370dbbab31417dc9437f1e67e71ecd6"
+          },
+          "acceptance": {
+            "chars": 384,
+            "est_tokens": 96,
+            "sha256": "2c6f788d0a4fcf021ef47a0295e283d6887d6c574de39f8e7dd3c258cb6233b4"
+          },
+          "scope": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "019fee6344491464080f13de95bd90a06e2280162d062802b4ea4a4c01412976"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 490,
+            "est_tokens": 122,
+            "sha256": "c90dfe4c2adef0f373db1ee62c4993243ce387b6e3b7501356c775652e171410"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "6807fd7ec8e9",
+        "version": "6807fd7ec8e9",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1353 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5668,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "24418d3c-f2ab-4e47-a325-e17b1c060a15",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790193306.7929668,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "y daemon tick, so check it is side-effect-free (capacity.snapshot is deliberately read-only). Prefer the snapshot account fields. The spec also does not cover running_claude_workers (daemon.py:~470). It counts by 'claude:' prefixes on assigned_to or executor. Row-routed tasks use executor=row id, so counting relies on assigned_to='claude:<acct>' from the claim. Between dispatch and claim the inflight_claude_dispatches reservation must cover them.\",\"severity\":\"low\",\"line\":455}]],\"suggested_spec_changes\":[\"Decide how the claude branch of start() interacts with pool.reserve and the daily budget. Either call pool.reserve(task_id, ex.id, 'execute', t) and return status 'budget' with the same hold_note handling as the codex path, or state that run_worker owns the reservation and add a test. Check daily_budget_tasks before dispatching.\",\"Make admit() count claude rows against one shared free['claude'] pool, taken from claude_workers_free and bounded by the number of accounts with headroom, and decrement it on each admission. Add a test where two tasks compete for one free Claude slot.\",\"Say how snapshot['fallback'] and daemon._codex_available treat provider='claude' rows, and use one shared definition. Add a test for the mixed case where all codex rows are cooling and a claude row is healthy.\",\"Audit every reader of t['tier'] (daemon.py:1101 and 1275, cli.py:590, scorecard.py:193, attribution, review routing) and either list the needed changes and tests in scope or stop writing tier=ex.id.\",\"Set handed_off=True only after thread.start() succeeds. Specify what happens if run_worker raises (task status, day_tasks). Have run_worker reject an unknown or disabled row id with a hold reason instead of falling back to cfg['models'].\",\"Add acceptance tests for: two claude tasks admitted in one pass, a raising worker, the positive eligibility case, _codex_available with a claude row, and joining the background thread deterministically in test_start_runs_claude_row_with_its_model.\"]}"
+      }
+    }
+  ],
+  "packet_meta": {
+    "chars": 4929,
+    "est_tokens": 1232,
+    "presented_tokens": 1232,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "9a4be54bfb1a589634b0e0967bb1c93c5ff9b58ef88afbc013008d1aab176876"
+      },
+      "spec": {
+        "chars": 3661,
+        "est_tokens": 915,
+        "sha256": "d9987be625cfaf1bb28e9aa47aaccd6ba370dbbab31417dc9437f1e67e71ecd6"
+      },
+      "acceptance": {
+        "chars": 384,
+        "est_tokens": 96,
+        "sha256": "2c6f788d0a4fcf021ef47a0295e283d6887d6c574de39f8e7dd3c258cb6233b4"
+      },
+      "scope": {
+        "chars": 196,
+        "est_tokens": 49,
+        "sha256": "019fee6344491464080f13de95bd90a06e2280162d062802b4ea4a4c01412976"
+      },
+      "depends_on": {
+        "chars": 100,
+        "est_tokens": 25,
+        "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+      },
+      "existing tests": {
+        "chars": 490,
+        "est_tokens": 122,
+        "sha256": "c90dfe4c2adef0f373db1ee62c4993243ce387b6e3b7501356c775652e171410"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 13,
+        "est_tokens": 3,
+        "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+      }
+    },
+    "hash": "6807fd7ec8e9",
+    "version": "6807fd7ec8e9",
+    "candidate_known": false,
+    "base": "1571826d4a38",
+    "sources": "task@T-1353 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 5668,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "24418d3c-f2ab-4e47-a325-e17b1c060a15",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790193254.013118,
+  "account": "A",
+  "pid": 84419,
+  "pipeline": {
+    "skills_used": []
+  },
+  "reason": "review returned no parseable verdict",
+  "resume_hint": {
+    "raw": "y daemon tick, so check it is side-effect-free (capacity.snapshot is deliberately read-only). Prefer the snapshot account fields. The spec also does not cover running_claude_workers (daemon.py:~470). It counts by 'claude:' prefixes on assigned_to or executor. Row-routed tasks use executor=row id, so counting relies on assigned_to='claude:<acct>' from the claim. Between dispatch and claim the inflight_claude_dispatches reservation must cover them.\",\"severity\":\"low\",\"line\":455}]],\"suggested_spec_changes\":[\"Decide how the claude branch of start() interacts with pool.reserve and the daily budget. Either call pool.reserve(task_id, ex.id, 'execute', t) and return status 'budget' with the same hold_note handling as the codex path, or state that run_worker owns the reservation and add a test. Check daily_budget_tasks before dispatching.\",\"Make admit() count claude rows against one shared free['claude'] pool, taken from claude_workers_free and bounded by the number of accounts with headroom, and decrement it on each admission. Add a test where two tasks compete for one free Claude slot.\",\"Say how snapshot['fallback'] and daemon._codex_available treat provider='claude' rows, and use one shared definition. Add a test for the mixed case where all codex rows are cooling and a claude row is healthy.\",\"Audit every reader of t['tier'] (daemon.py:1101 and 1275, cli.py:590, scorecard.py:193, attribution, review routing) and either list the needed changes and tests in scope or stop writing tier=ex.id.\",\"Set handed_off=True only after thread.start() succeeds. Specify what happens if run_worker raises (task status, day_tasks). Have run_worker reject an unknown or disabled row id with a hold reason instead of falling back to cfg['models'].\",\"Add acceptance tests for: two claude tasks admitted in one pass, a raising worker, the positive eligibility case, _codex_available with a claude row, and joining the background thread deterministically in test_start_runs_claude_row_with_its_model.\"]}"
+  }
+}

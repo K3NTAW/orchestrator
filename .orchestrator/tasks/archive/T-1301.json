@@ -1,0 +1,1484 @@
+{
+  "id": "T-1301",
+  "created_at": 1790179363.939452,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S2d2 cache-aware tool and skill disclosure in shadow: stable Level-0 tool catalog view and stable skill catalog block, measured on the existing tool_disclosure and skill_selection rows (P9, P10)",
+  "spec": "orchestrator/tool_catalog.py exposes a pure function cache_view(role, keep, previous_row) returning {stable_catalog_chars (the Level-0 catalog: names and one-line purposes of every known tool for the role, identical across tasks), dynamic_chars (the selected Level-2 schemas), changed_since_previous (True, False, or None when previous_row is None)}; orchestrator/bus.py (scope), where tool_disclosure rows are written (near line 285), calls it and stores the three fields on the row; previous_row is the last tool_disclosure row of the same role among the most recent 200 decision_log rows (bounded read, no module state). Active presentation ([tool_disclosure].cache_mode active): the stable catalog text precedes the dynamic schemas in the tool disclosure text built for the packet. Skills: orchestrator/skill_router.py exposes catalog_block(role, registry) (sorted ids and triggers of every active skill for the role, identical across tasks); orchestrator/spawn.py (scope), where _prepare_skills builds the presented skills section, prepends that block ONLY when [skills].cache_mode is active, and always records catalog_chars and selected_chars on the existing skill_selection row. Both sections get cache_mode = \"shadow\" with dated comments and revert instructions, missing key means off, validated in pool (S2d1 adds the validation helper; reuse it), inert when the section's mode is off. Docs: sections 2 and 3 of docs/hermes-hardening/10-cache-aware-disclosure.md with a reproducible command (`orchestrator scorecard --economy --disclosure-cache`, scope orchestrator/cli.py) printing row counts, date range, mean stable vs dynamic chars and the share of runs whose dynamic list changed since the previous task of the role; when no rows exist the doc says so.\nSpec review T-1293 folded in: (1) One helper, two callers: tool_catalog.cache_view(role, kept_ids, previous_row) is pure; the two existing tool_disclosure row writers call it: spawn._shadow_tool_disclosure (Claude roles) and bus.log_run's Codex row; the escalation row (reason hidden_tool_requested) is left untouched and never used as a previous row. (2) previous_row = the most recent tool_disclosure row for the same role whose subject is a DIFFERENT task and which carries deterministic.kept; found through a new bounded helper decision_log.last_row(kind, *, role, exclude_subject, require_key) that reads only today's decision_log file from the end (scope adds orchestrator/decision_log.py and tests/test_decision_log.py); an older row without the new fields still qualifies as previous when it has kept; none found -> changed_since_previous None. (3) changed_since_previous compares the SETS of kept ids (order ignored). (4) Level-0 catalog = tool_catalog.level0(ids) rendered as one line per tool (name and purpose) over the role's static disclosed id list (no mcp measurements, so it is identical across tasks); Level-2 = the schema text tool_catalog.disclosed(role) already renders; the active ordering is applied in the spawn.py function that renders disclosed tools into the prompt (find it as the caller of tool_catalog.disclosed and name it in the docs), with an acceptance test asserting the stable block precedes the schemas only in active mode. (5) Skills: catalog_block is prepended inside spawn._prepare_skills as before; both cache_mode keys validated by the S2d1 helper pattern (a small cache_mode(cfg, section) in tool_catalog/skill_router, invalid -> off with invalid_config on the row).\nSpec review T-1298 folded in (overrides earlier wording where they differ): (1) decision_log.last_row matches the role stored at deterministic.role (neither writer passes a top-level role). (2) last_row reads today's and yesterday's decision_log files (Europe/Zurich dates), still bounded; when neither has a qualifying row, changed_since_previous is None and the docs state it. (3) Codex rows: bus.log_run keeps writing per event, so the scorecard dedupes by subject (latest row per task) before computing counts, means and the changed share; the Level-0 catalog for codex_execute is tool_catalog.level0 over the CODEX_TOOLS ids (stable_catalog_chars may be small but never undefined). (4) No prompt renderer for tools exists today (the callers of tool_catalog.disclosed only build rows; the escalation writer at spawn.py near 1492 stays untouched): active tool cache_mode adds a packet section named tools inside spawn._packet_body, stable Level-0 catalog lines first, then the Level-2 schema text for the kept ids; in shadow the section is absent; the acceptance test asserts that ordering in active and absence in shadow. (5) One shared validator: context_router.cache_mode is generalised to cache_mode(cfg, section) (context_router, tool_disclosure, skills) and reused by all three callers; invalid values fall back to off and set invalid_config on the corresponding row; cache_mode is inert when the section's own mode (promotion.mode) is off. (6) pool.toml gains cache_mode keys in [tool_disclosure] and [skills] with dated comments and revert instructions; tests/test_pool.py joins the scope and covers the new keys. (7) Scorecard summary: per role; changed share = changed True / (True + False) with the None count printed separately; date range from row ts as ISO dates in Europe/Zurich; zero rows prints 'no tool_disclosure rows in range'; the CLI test asserts these exact fields. (8) Add a test that deterministic.kept and the new char fields survive decision_log._bounded for a row with 200 kept ids.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_tool_catalog.py::test_cache_view_stable_across_tasks_and_changed_flag_none_first (identical stable text for two tasks of a role; changed flag None without a previous row, True/False with one)",
+    "tests/test_bus.py::test_tool_disclosure_row_carries_cache_view_fields",
+    "tests/test_skill_router.py::test_catalog_block_sorted_and_stable",
+    "tests/test_spawn.py::test_skill_catalog_block_only_in_active_cache_mode_and_chars_recorded",
+    "tests/test_cli.py::test_scorecard_disclosure_cache_summary",
+    "tests/test_decision_log.py::test_last_row_bounded_same_role_different_subject_with_kept",
+    "tests/test_spawn.py::test_active_tool_cache_mode_puts_stable_catalog_before_schemas_only_in_active",
+    "tests/test_pool.py::test_cache_mode_keys_in_tool_disclosure_and_skills",
+    "tests/test_decision_log.py::test_bounded_keeps_kept_list_and_char_fields",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/tool_catalog.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_tool_catalog.py",
+    "tests/test_bus.py",
+    "tests/test_skill_router.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/10-cache-aware-disclosure.md",
+    "orchestrator/decision_log.py",
+    "tests/test_decision_log.py",
+    "orchestrator/context_router.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [
+    "T-1282"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1301",
+  "codex_thread": "01a0cf04-edbb-7ab1-aab9-aff13d327b62",
+  "result": {
+    "summary": "Implemented cache-aware disclosure, bounded history, scorecard reporting, and acceptance tests. Documented schema and log-layout compatibility decisions.\n\nGate: **PASS \u2014 1,440 tests, exit 0**.\nCommit: `fca7b8cb2bddfc05b40f967c9134ab23997b6b2a`; worktree clean.\n\nFiles changed: 16 scoped files covering implementation, configuration, documentation, and tests; **494 insertions, 10 deletions**.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0cf04-edbb-7ab1-aab9-aff13d327b62",
+    "usage": {
+      "input_tokens": 1821407,
+      "cached_input_tokens": 1746176,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 12165,
+      "reasoning_output_tokens": 1771,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790179363.941646,
+      "spec_review_verdict": "approve",
+      "reason": "Planner: spec reviews T-1293 and T-1298 folded in; two rounds reviewed, Planner approves (waiver)"
+    },
+    {
+      "ts": 1790179506.8458738,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319
+      }
+    },
+    {
+      "ts": 1790179506.847348,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473
+      }
+    },
+    {
+      "ts": 1790179512.7365189,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403
+      }
+    },
+    {
+      "ts": 1790179599.889477,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        }
+      }
+    },
+    {
+      "ts": 1790179601.804773,
+      "packet_meta": {
+        "chars": 8568,
+        "est_tokens": 2142,
+        "presented_tokens": 2142,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "9df67fd9aca875262d0bef6452c42afd73de97a4cad8e71044536a4e5f474cd9"
+          },
+          "objective": {
+            "chars": 6647,
+            "est_tokens": 1661,
+            "sha256": "ff359d9c22a2c3b952c5d590017660c63afed00cd8e95b6e38e86d4e06f54277"
+          },
+          "acceptance": {
+            "chars": 890,
+            "est_tokens": 222,
+            "sha256": "abc7c3354a3b4fa355d7bc105671e745a2eadbb389343d491b5c703232f3d1c0"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 458,
+            "est_tokens": 114,
+            "sha256": "cf5129423985ac4ec37cba7b7e8c22d417aadac8ab124aa9b3246cf95ec95bc0"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "8b9b4a92c823",
+        "version": "8b9b4a92c823",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@28e5fc3ca227 gotchas@41b022917210 memory@notes over cap by 3768 chars: acceptance kept whole routed=active",
+        "policy_version": "28e5fc3ca227",
+        "gotchas": "41b022917210",
+        "candidate_tokens": 3920,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 38299,
+        "routed_reduction_ratio": 0.954563581077713,
+        "routed_hidden": 5,
+        "routed_ambiguous": 25,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "ef009e6812fe",
+          "944b56a6247b",
+          "55667ed621cb",
+          "482c8531b871",
+          "3edfdb72f70a",
+          "e710f843443d",
+          "cae9c92b39b5",
+          "863b2fbb6f21",
+          "f23a87a4ff32",
+          "ef1f89c41b1c",
+          "73ae64617649",
+          "d2d58d2e23a9",
+          "95db13a3da46",
+          "dc6a6724a10e",
+          "f691f21d34c7",
+          "dbc22db138df",
+          "bc691347e557",
+          "2552d2adfd8d",
+          "e7183f5c7765",
+          "b8802c29d033",
+          "24eb129315e6",
+          "d0fbb0eef6a9",
+          "5f0cea5b19ed",
+          "83c76b85e0f1",
+          "50a5f17a6fc6",
+          "0906ebbd2ce1",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "92be5064b5be",
+          "504365aa02ad",
+          "802822de7781",
+          "fdc9250f9ab9",
+          "124653b9a27b",
+          "528e3521dc5c",
+          "c96ca8a6a113",
+          "a99bec39bad9",
+          "4e70d20a81df",
+          "ad173ce1a3bc",
+          "b72ce61b34c3",
+          "a43cf01f70f2",
+          "47087a7542a2",
+          "63651d9462f9",
+          "9fa7f4593b6d",
+          "7a691684e95a",
+          "08efeb04cb3a",
+          "816fe973a00f",
+          "5a787a0c8889",
+          "f0b10a632acf",
+          "14836d740bab",
+          "692f9d08e54b",
+          "379c6efe7291",
+          "877d6a8f2e4d",
+          "b8b235b8a73d",
+          "2db215bfa30d",
+          "4b3dbe4f4004",
+          "226ac1bd6243",
+          "541287f235ac",
+          "dde26cf91864",
+          "d7138565e73f",
+          "47ec4cd5d02a",
+          "12376e13555f",
+          "c1f62a3bdee9",
+          "e4c630cc87b3",
+          "8f938ad31ca7",
+          "89e16c7c78ed",
+          "3037c6d26ebe",
+          "e1ef80891843",
+          "d02e6bc9902a",
+          "669cef77d8ef",
+          "cc9eccd61e92",
+          "66ab1306ccfc",
+          "b1aeb32aa691",
+          "317964ecce36",
+          "16d273ce80c3"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790179601.80611,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1301",
+      "claimed_at": 1790179601.80593
+    },
+    {
+      "ts": 1790179601.807115,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790180140.993414,
+      "codex_thread": "01a0cf04-edbb-7ab1-aab9-aff13d327b62",
+      "codex_thread_head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+    },
+    {
+      "ts": 1790180140.995438,
+      "packet_meta": {
+        "chars": 8568,
+        "est_tokens": 2142,
+        "presented_tokens": 2142,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "9df67fd9aca875262d0bef6452c42afd73de97a4cad8e71044536a4e5f474cd9"
+          },
+          "objective": {
+            "chars": 6647,
+            "est_tokens": 1661,
+            "sha256": "ff359d9c22a2c3b952c5d590017660c63afed00cd8e95b6e38e86d4e06f54277"
+          },
+          "acceptance": {
+            "chars": 890,
+            "est_tokens": 222,
+            "sha256": "abc7c3354a3b4fa355d7bc105671e745a2eadbb389343d491b5c703232f3d1c0"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 458,
+            "est_tokens": 114,
+            "sha256": "cf5129423985ac4ec37cba7b7e8c22d417aadac8ab124aa9b3246cf95ec95bc0"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "8b9b4a92c823",
+        "version": "8b9b4a92c823",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@28e5fc3ca227 gotchas@41b022917210 memory@notes over cap by 3768 chars: acceptance kept whole routed=active",
+        "policy_version": "28e5fc3ca227",
+        "gotchas": "41b022917210",
+        "candidate_tokens": 3920,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 38299,
+        "routed_reduction_ratio": 0.954563581077713,
+        "routed_hidden": 5,
+        "routed_ambiguous": 25,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "ef009e6812fe",
+          "944b56a6247b",
+          "55667ed621cb",
+          "482c8531b871",
+          "3edfdb72f70a",
+          "e710f843443d",
+          "cae9c92b39b5",
+          "863b2fbb6f21",
+          "f23a87a4ff32",
+          "ef1f89c41b1c",
+          "73ae64617649",
+          "d2d58d2e23a9",
+          "95db13a3da46",
+          "dc6a6724a10e",
+          "f691f21d34c7",
+          "dbc22db138df",
+          "bc691347e557",
+          "2552d2adfd8d",
+          "e7183f5c7765",
+          "b8802c29d033",
+          "24eb129315e6",
+          "d0fbb0eef6a9",
+          "5f0cea5b19ed",
+          "83c76b85e0f1",
+          "50a5f17a6fc6",
+          "0906ebbd2ce1",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "92be5064b5be",
+          "504365aa02ad",
+          "802822de7781",
+          "fdc9250f9ab9",
+          "124653b9a27b",
+          "528e3521dc5c",
+          "c96ca8a6a113",
+          "a99bec39bad9",
+          "4e70d20a81df",
+          "ad173ce1a3bc",
+          "b72ce61b34c3",
+          "a43cf01f70f2",
+          "47087a7542a2",
+          "63651d9462f9",
+          "9fa7f4593b6d",
+          "7a691684e95a",
+          "08efeb04cb3a",
+          "816fe973a00f",
+          "5a787a0c8889",
+          "f0b10a632acf",
+          "14836d740bab",
+          "692f9d08e54b",
+          "379c6efe7291",
+          "877d6a8f2e4d",
+          "b8b235b8a73d",
+          "2db215bfa30d",
+          "4b3dbe4f4004",
+          "226ac1bd6243",
+          "541287f235ac",
+          "dde26cf91864",
+          "d7138565e73f",
+          "47ec4cd5d02a",
+          "12376e13555f",
+          "c1f62a3bdee9",
+          "e4c630cc87b3",
+          "8f938ad31ca7",
+          "89e16c7c78ed",
+          "3037c6d26ebe",
+          "e1ef80891843",
+          "d02e6bc9902a",
+          "669cef77d8ef",
+          "cc9eccd61e92",
+          "66ab1306ccfc",
+          "b1aeb32aa691",
+          "317964ecce36",
+          "16d273ce80c3"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790180141.005725,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790180141.008498,
+      "status": "done",
+      "result": {
+        "summary": "Implemented cache-aware disclosure, bounded history, scorecard reporting, and acceptance tests. Documented schema and log-layout compatibility decisions.\n\nGate: **PASS \u2014 1,440 tests, exit 0**.\nCommit: `fca7b8cb2bddfc05b40f967c9134ab23997b6b2a`; worktree clean.\n\nFiles changed: 16 scoped files covering implementation, configuration, documentation, and tests; **494 insertions, 10 deletions**.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0cf04-edbb-7ab1-aab9-aff13d327b62",
+        "usage": {
+          "input_tokens": 1821407,
+          "cached_input_tokens": 1746176,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 12165,
+          "reasoning_output_tokens": 1771,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790180245.785259,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790180373.7017632,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790180374.214433,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        }
+      }
+    },
+    {
+      "ts": 1790180374.347411,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        },
+        "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+      }
+    },
+    {
+      "ts": 1790180374.380855,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        },
+        "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+        "gated_at_done": 1790180374.380693
+      }
+    },
+    {
+      "ts": 1790180421.64275,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790180443.508678,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        },
+        "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+        "gated_at_done": 1790180374.380693,
+        "merged_at": 1790180443.5085142,
+        "merged_at_lease": 1790181343.5085142
+      }
+    },
+    {
+      "ts": 1790180572.290059,
+      "status": "failed",
+      "reason": "rebase_conflict",
+      "resume_hint": {
+        "conflicts": [
+          "orchestrator/decision_log.py",
+          "tests/test_decision_log.py",
+          "tests/test_pool.py"
+        ],
+        "hunks": "diff --cc orchestrator/decision_log.py\nindex 156172c,159b866..0000000\n--- a/orchestrator/decision_log.py\n+++ b/orchestrator/decision_log.py\n@@@ -244,73 -241,66 +244,139 @@@ def format_explain(rows)\n      return \"\\n\".join(lines)\n  \n  \n++<<<<<<< HEAD\n +STEERING_KEYS = {\"trigger\", \"severity\", \"critical\", \"action\", \"evidence_hash\", \"message_chars\"}\n +\n +\n +def validate_steering(row):\n +    \"\"\"Steering metadata lives in extra, following other decision kinds.\"\"\"\n +    def has_message(value):\n +        if isinstance(value, dict):\n +            return \"message\" in value or any(has_message(v) for v in value.values())\n +        return isinstance(value, (tuple, list)) and any(has_message(v) for v in value)\n +    required = {\"candidates\", \"hard_constraints\", \"deterministic\", \"reason\", \"selected\", \"mode\"}\n +    if not required <= row.keys() or not STEERING_KEYS <= (row.get(\"extra\") or {}).keys():\n +        raise ValueError(\"missing steering metadata\")\n +    if has_message(row):\n +        raise ValueError(\"steering rows must omit message text\")\n +\n +\n +GROUPED_SCAN_LIMIT = 2000\n +\n +\n +def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):\n +    \"\"\"Read newest matching rows, returning each result in chronological order.\n +\n +    Grouped reads retain at most limit rows per subject and inspect at most\n +    GROUPED_SCAN_LIMIT lines total, including malformed and unrelated lines.\n +    \"\"\"\n +    grouped = {subject: [] for subject in subjects} if subjects is not None else None\n +    if limit <= 0 or grouped == {}:\n +        return grouped if grouped is not None else []\n +    completed = set()\n +    rows, scanned = [], 0\n +    def result():\n +        return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]\n +    path = _directory(root) / \"decisions.jsonl\"\n +    try:\n +        with path.open(\"rb\") as stream:\n +            stream.seek(0, 2)\n +            pos, pending = stream.tell(), b\"\"\n +            while pos:\n +                size = min(pos, 8192)\n +                pos -= size\n +                stream.seek(pos)\n +                lines = (stream.read(size) + pending).split(b\"\\n\")\n +                pending = lines.pop(0) if pos else b\"\"\n +                for line in reversed(lines):\n +                    if grouped is not None and scanned >= GROUPED_SCAN_LIMIT:\n +                        return result()\n +                    scanned += 1\n +                    try:\n +                        row = json.loads(line)\n +                    except (ValueError, UnicodeError):\n +                        continue\n +                    if (isinstance(row, dict) and (kind is None or row.get(\"kind\") == kind)\n +                            and (subject is None or row.get(\"subject\") == subject)):\n +                        if grouped is not None:\n +                            tid = row.get(\"subject\")\n +                            if tid not in grouped or tid in completed:\n +                                continue\n +                            own = grouped[tid]\n +                            own.append(row)\n +                            if len(own) >= limit:\n +                                completed.add(tid)\n +                            if len(completed) == len(grouped):\n +                                return result()\n +                            continue\n +                        rows.append(row)\n +                        if len(rows) >= limit:\n +                            return result()\n +    except FileNotFoundError:\n +        pass\n +    return result()\n++=======\n+ def _tail_lines(path, limit=200, max_bytes=2 * 1024 * 1024):\n+     \"\"\"Read a bounded suffix, never loading an entire decision archive.\"\"\"\n+     try:\n+         with path.open(\"rb\") as stream:\n+             stream.seek(0, 2)\n+             position = stream.tell()\n+             chunks, size, newlines = [], 0, 0\n+             while position and size < max_bytes and newlines <= limit:\n+                 count = min(position, 8192, max_bytes - size)\n+                 position -= count\n+                 stream.seek(position)\n+                 chunk = stream.read(count)\n+                 chunks.append(chunk)\n+                 size += len(chunk)\n+                 newlines += chunk.count(b\"\\n\")\n+             data = b\"\".join(reversed(chunks))\n+             if position:\n+                 data = data.partition(b\"\\n\")[2]\n+             return data.splitlines()[-limit:]\n+     except FileNotFoundError:\n+         return []\n+ \n+ \n+ def last_row(kind, *, role, exclude_subject, require_key):\n+     \"\"\"Latest qualifying row in a 200-line, two-local-day bounded tail.\n+ \n+     The current schedlog uses one decisions.jsonl archive; date filtering keeps\n+     that layout compatible with daily decision files without changing writers.\n+     \"\"\"\n+     today = datetime.now(ZoneInfo(\"Europe/Zurich\")).date()\n+     dates = (today, today - timedelta(days=1))\n+     paths = [_directory() / \"decisions.jsonl\"]\n+     paths.extend(_directory() / f\"decisions-{day.isoformat()}.jsonl\" for day in dates)\n+     rows = []\n+     remaining = 200\n+     for path in paths:\n+         if not remaining:\n+             break\n+         lines = _tail_lines(path, limit=remaining)\n+         remaining -= len(lines)\n+         for line in lines:\n+             try:\n+                 row = json.loads(line)\n+                 if not isinstance(row, dict):\n+                     continue\n+                 day = datetime.fromtimestamp(float(row[\"ts\"]), ZoneInfo(\"Europe/Zurich\")).date()\n+                 if day in dates:\n+                     rows.append(row)\n+             except (ValueError, KeyError, TypeError, OSError, OverflowError):\n+                 continue\n+     for row in sorted(rows, key=lambda row: row[\"ts\"], reverse=True)[:200]:\n+         if (row.get(\"kind\") != kind or row.get(\"subject\") == exclude_subject\n+                 or row.get(\"reason\") == \"hidden_tool_requested\"\n+                 or (row.get(\"deterministic\") or {}).get(\"role\") != role):\n+             continue\n+         value = row\n+         for key in require_key.split(\".\"):\n+             if not isinstance(value, dict) or key not in value:\n+                 break\n+             value = value[key]\n+         else:\n+             return row\n+     return None\n++>>>>>>> fca7b8c (T-1301 Add cache-aware tool and skill disclosure telemetry)\ndiff --cc tests/test_decision_log.py\nindex 1a2bf7f,7117381..0000000\n--- a/tests/test_decision_log.py\n+++ b/tests/test_decision_log.py\n@@@ -187,66 -187,41 +187,107 @@@ class MemoryRetrievalDocumentation(unit\n          self.assertEqual(row[\"extra\"][\"tokens_tiered\"], 5)\n  \n  \n++<<<<<<< HEAD\n +class SteeringDecisionLogTests(unittest.TestCase):\n +    def test_steering_rows_omit_message_text(self):\n +        message = \"repeated_failure: synthetic check failure\"\n +        extra = {\"trigger\": \"repeated_failure\", \"severity\": \"medium\", \"critical\": False,\n +                 \"action\": \"steer\", \"evidence_hash\": \"synthetic\", \"message_chars\": len(message)}\n +        fields = dict(candidates=[\"continue\", \"steer\", \"cancel\"], hard_constraints={},\n +                      deterministic={}, selected=\"steer\", reason=[\"repeated_failure\"], mode=\"shadow\")\n +        with tempfile.TemporaryDirectory() as root:\n +            row = decision_log.record(\"steering\", \"T-steering\", extra=extra, root=root, **fields)\n +            serialized = (Path(root) / \"runs/sched/decisions.jsonl\").read_text()\n +            self.assertEqual(row[\"extra\"][\"message_chars\"], len(message))\n +            self.assertNotIn(message, serialized)\n +            self.assertNotIn('\"message\":', serialized)\n +            for key in decision_log.STEERING_KEYS:\n +                with self.subTest(key=key), self.assertRaises(ValueError):\n +                    decision_log.record(\"steering\", \"T-steering\", root=root,\n +                                        extra={k: v for k, v in extra.items() if k != key}, **fields)\n +            with self.assertRaises(ValueError):\n +                decision_log.record(\"steering\", \"T-steering\", root=root,\n +                                    extra={**extra, \"nested\": {\"message\": message}}, **fields)\n +            self.assertEqual(decision_log.recent(root=root), [row])\n +\n +\n +class GroupedSteeringHistoryTests(unittest.TestCase):\n +    def test_grouped_history_honours_per_subject_limit(self):\n +        with tempfile.TemporaryDirectory() as directory:\n +            root = Path(directory)\n +            path = root / \"runs/sched/decisions.jsonl\"\n +            path.parent.mkdir(parents=True)\n +            applied = {\"kind\": \"steering\", \"subject\": \"worker\", \"mode\": \"active\",\n +                       \"extra\": {\"outcome\": \"applied\"}}\n +            latest = {\"kind\": \"steering\", \"subject\": \"worker\", \"mode\": \"shadow\", \"ts\": 99}\n +            rows = [applied] + [{\"kind\": \"routing\", \"subject\": \"other\"}] * 600\n +            rows += [{\"kind\": \"steering\", \"subject\": \"worker\", \"mode\": \"shadow\"}] * 40\n +            rows += [latest, {\"kind\": \"steering\", \"subject\": \"new\", \"mode\": \"shadow\"}]\n +            path.write_text(\"\\n\".join(json.dumps(row) for row in rows) + \"\\n\")\n +            with patch.object(Path, \"open\", autospec=True, side_effect=Path.open) as opened:\n +                grouped = decision_log.recent(root=root, kind=\"steering\", subjects=[\"worker\", \"new\"], limit=2)\n +            opened.assert_called_once()\n +            self.assertEqual(grouped[\"worker\"], [rows[-4], latest])\n +            self.assertEqual(grouped[\"new\"], [rows[-1]])\n +\n +    def test_grouped_history_scan_is_bounded_without_applied_rows(self):\n +        with tempfile.TemporaryDirectory() as directory:\n +            root = Path(directory)\n +            path = root / \"runs/sched/decisions.jsonl\"\n +            path.parent.mkdir(parents=True)\n +            old = {\"kind\": \"steering\", \"subject\": \"old\", \"mode\": \"shadow\"}\n +            newest = {\"kind\": \"steering\", \"subject\": \"new\", \"mode\": \"shadow\"}\n +            path.write_text(json.dumps(old) + \"\\n\" +\n +                            (json.dumps({\"kind\": \"routing\"}) + \"\\ninvalid\\n\") * 1500 +\n +                            json.dumps(newest) + \"\\n\")\n +            with patch.object(decision_log.json, \"loads\", wraps=json.loads) as loads:\n +                rows = decision_log.recent(root=root, kind=\"steering\", subjects=[\"old\", \"new\"], limit=1)\n +            self.assertEqual(rows, {\"old\": [], \"new\": [newest]})\n +            self.assertLessEqual(loads.call_count, decision_log.GROUPED_SCAN_LIMIT)\n +            with patch.object(Path, \"open\") as opened:\n +                self.assertEqual(decision_log.recent(root=root, subjects=[]), {})\n +                self.assertEqual(decision_log.recent(root=root, subjects=[\"new\"], limit=0), {\"new\": []})\n +            opened.assert_not_called()\n +            with patch.object(decision_log.json, \"loads\", wraps=json.loads) as loads:\n +                self.assertEqual(decision_log.recent(root=root, subjects=[\"new\"], limit=1), {\"new\": [newest]})\n +            self.assertLessEqual(loads.call_count, 2)\n++=======\n+ class DisclosureHistory(unittest.TestCase):\n+     def test_last_row_bounded_same_role_different_subject_with_kept(self):\n+         import json\n+         import tempfile\n+         from datetime import datetime, timedelta\n+         from pathlib import Path\n+         from unittest import mock\n+         from zoneinfo import ZoneInfo\n+         from orchestrator import decision_log as log\n+         today = datetime.now(ZoneInfo(\"Europe/Zurich\")).replace(hour=12, minute=0, second=0)\n+         def row(subject, role=\"execute\", **extra):\n+             return {\"ts\": today.timestamp(), \"kind\": \"tool_disclosure\", \"subject\": subject,\n+                     \"deterministic\": {\"role\": role, \"kept\": [\"Read\"]}, **extra}\n+         with tempfile.TemporaryDirectory() as directory, mock.patch.object(log.schedlog, \"SCHED_DIR\", Path(directory)):\n+             path = Path(directory) / \"decisions.jsonl\"\n+             previous = row(\"previous\", ts=(today - timedelta(days=1)).timestamp())\n+             rows = [row(\"old\", ts=(today - timedelta(days=2)).timestamp()), previous,\n+                     row(\"other\", role=\"review\"), row(\"current\"),\n+                     row(\"escalation\", reason=\"hidden_tool_requested\"),\n+                     row(\"missing\", deterministic={\"role\": \"execute\"})]\n+             path.write_text(\"\\n\".join(map(json.dumps, rows)) + \"\\nmalformed\\n\")\n+             args = dict(role=\"execute\", exclude_subject=\"current\", require_key=\"deterministic.kept\")\n+             self.assertEqual(log.last_row(\"tool_disclosure\", **args), previous)\n+             with path.open(\"a\") as stream:\n+                 stream.write((json.dumps(row(\"current\")) + \"\\n\") * 200)\n+             self.assertIsNone(log.last_row(\"tool_disclosure\", **args))\n+             path.write_text(json.dumps(rows[0]) + \"\\n\")\n+             self.assertIsNone(log.last_row(\"tool_disclosure\", **args))\n+             path.unlink()\n+             (Path(directory) / f\"decisions-{today.date() - timedelta(days=1)}.jsonl\").write_text(json.dumps(previous))\n+             self.assertEqual(log.last_row(\"tool_disclosure\", **args), previous)\n+ \n+     def test_bounded_keeps_kept_list_and_char_fields(self):\n+         from orchestrator import decision_log\n+         row = {\"deterministic\": {\"kept\": [f\"tool_{index}\" for index in range(200)],\n+                \"stable_catalog_chars\": 4200, \"dynamic_chars\": 27000,\n+                \"changed_since_previous\": False, \"catalog_chars\": 5100, \"selected_chars\": 1234}}\n+         self.assertEqual(decision_log._bounded(row), row)\n++>>>>>>> fca7b8c (T-1301 Add cache-aware tool and skill disclosure telemetry)\ndiff --cc tests/test_pool.py\nindex 107f7bd,63563d4..0000000\n--- a/tests/test_pool.py\n+++ b/tests/test_pool.py\n@@@ -578,14 -578,14 +578,28 @@@ if __name__ == \"__main__\"\n      unittest.main()\n  \n  \n++<<<<<<< HEAD\n +class SteeringConfiguration(unittest.TestCase):\n +    def test_steering_section_defaults_and_invalid_mode_falls_back(self):\n +        from orchestrator import steering_policy\n +        self.assertEqual(steering_policy.DEFAULTS, {\"mode\": \"shadow\", \"stuck_after_s\": 900,\n +                         \"out_of_scope_events\": 3, \"min_interval_s\": 1800})\n +        self.assertEqual(steering_policy.mode({}), \"shadow\")\n +        self.assertEqual(P.config()[\"steering\"][\"mode\"], \"shadow\")\n +        for value in (\"off\", \"shadow\", \"active\"):\n +            self.assertEqual(steering_policy.mode({\"steering\": {\"mode\": value}}), value)\n +        for value in (\"invalid\", None, 9):\n +            self.assertEqual(steering_policy.mode({\"steering\": {\"mode\": value}}), \"off\")\n++=======\n+ class DisclosureCacheConfig(unittest.TestCase):\n+     def test_cache_mode_keys_in_tool_disclosure_and_skills(self):\n+         from orchestrator import context_router, pool\n+         cfg = pool.config()\n+         for section in (\"tool_disclosure\", \"skills\"):\n+             self.assertEqual(context_router.cache_mode(cfg, section), \"shadow\")\n+             self.assertEqual(context_router.cache_mode({}, section), \"off\")\n+             for mode in (\"off\", \"shadow\", \"active\"):\n+                 self.assertEqual(context_router.cache_mode({section: {\"cache_mode\": mode}}, section), mode)\n+             with self.assertRaises(ValueError):\n+                 context_router.cache_mode({section: {\"cache_mode\": \"invalid\"}}, section)\n++>>>>>>> fca7b8c (T-1301 Add cache-aware tool and skill disclosure telemetry)\n"
+      }
+    },
+    {
+      "ts": 1790180572.402762,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        },
+        "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+        "gated_at_done": 1790180374.380693,
+        "merged_at": 1790180443.5085142,
+        "merged_at_lease": 1790181343.5085142,
+        "merged_at_done": 1790180572.402526
+      }
+    },
+    {
+      "ts": 1790180572.404684,
+      "status": "held",
+      "hold_reason": "merge conflict"
+    },
+    {
+      "ts": 1790180575.000336,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        },
+        "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+        "gated_at_done": 1790180374.380693,
+        "merged_at": 1790180443.5085142,
+        "merged_at_lease": 1790181343.5085142,
+        "merged_at_done": 1790180572.402526,
+        "failure_kind": "conflict"
+      }
+    },
+    {
+      "ts": 1790180575.12332,
+      "pipeline": {
+        "first_ready_at": 1790179506.8458319,
+        "dispatched_at": 1790179506.8473,
+        "dispatched_at_lease": 1790180406.8473,
+        "dispatched_at_done": 1790179512.736403,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790179599.8892171
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790180373.701579,
+        "gated_at_lease": 1790181273.701579,
+        "first_green_at": 1790180373.700763,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1301",
+          "goal_head": "goal/T-0991",
+          "moved_count": 5,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/evidence.py",
+            "orchestrator/spawn.py",
+            "tests/test_evidence.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              ".orchestrator/pool.toml",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1300"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790180374.214046,
+          "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+        },
+        "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+        "gated_at_done": 1790180374.380693,
+        "merged_at": 1790180443.5085142,
+        "merged_at_lease": 1790181343.5085142,
+        "merged_at_done": 1790180572.402526,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1790180572.404684": true
+        }
+      }
+    },
+    {
+      "ts": 1790180595.565376,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner: merge conflict after the goal branch moved; landed via T-1310"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner: merge conflict after the goal branch moved; landed via T-1310",
+  "pipeline": {
+    "first_ready_at": 1790179506.8458319,
+    "dispatched_at": 1790179506.8473,
+    "dispatched_at_lease": 1790180406.8473,
+    "dispatched_at_done": 1790179512.736403,
+    "handoff": {
+      "baseline": "astra",
+      "selected": "astra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790179599.8892171
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "7a533a86551243420f5b815bec78ece8d40b1580",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790180373.701579,
+    "gated_at_lease": 1790181273.701579,
+    "first_green_at": 1790180373.700763,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1301",
+      "goal_head": "goal/T-0991",
+      "moved_count": 5,
+      "stale_paths": [
+        ".orchestrator/pool.toml",
+        "orchestrator/evidence.py",
+        "orchestrator/spawn.py",
+        "tests/test_evidence.py",
+        "tests/test_spawn.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [
+          ".orchestrator/pool.toml",
+          "orchestrator/spawn.py",
+          "tests/test_spawn.py"
+        ],
+        "changed_files_moved": [
+          ".orchestrator/pool.toml",
+          "orchestrator/spawn.py",
+          "tests/test_spawn.py"
+        ],
+        "tests_changed": [
+          "tests/test_spawn.py"
+        ],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": [
+          "T-1300"
+        ]
+      },
+      "risk": "high",
+      "risk_reasons": [
+        "scoped_files_changed",
+        "changed_files_moved",
+        "tests_changed",
+        "overlapping_merge"
+      ],
+      "graph": "stale",
+      "checked_at": 1790180374.214046,
+      "head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a"
+    },
+    "reviewed_sha": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+    "gated_at_done": 1790180374.380693,
+    "merged_at": 1790180443.5085142,
+    "merged_at_lease": 1790181343.5085142,
+    "merged_at_done": 1790180572.402526,
+    "failure_kind": "conflict",
+    "auto_fix_skipped": {
+      "1790180572.404684": true
+    }
+  },
+  "packet_meta": {
+    "chars": 8568,
+    "est_tokens": 2142,
+    "presented_tokens": 2142,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "9df67fd9aca875262d0bef6452c42afd73de97a4cad8e71044536a4e5f474cd9"
+      },
+      "objective": {
+        "chars": 6647,
+        "est_tokens": 1661,
+        "sha256": "ff359d9c22a2c3b952c5d590017660c63afed00cd8e95b6e38e86d4e06f54277"
+      },
+      "acceptance": {
+        "chars": 890,
+        "est_tokens": 222,
+        "sha256": "abc7c3354a3b4fa355d7bc105671e745a2eadbb389343d491b5c703232f3d1c0"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+      },
+      "write_scope": {
+        "chars": 458,
+        "est_tokens": 114,
+        "sha256": "cf5129423985ac4ec37cba7b7e8c22d417aadac8ab124aa9b3246cf95ec95bc0"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "8b9b4a92c823",
+    "version": "8b9b4a92c823",
+    "candidate_known": true,
+    "base": "1acfc3b30612",
+    "sources": "pool.toml@28e5fc3ca227 gotchas@41b022917210 memory@notes over cap by 3768 chars: acceptance kept whole routed=active",
+    "policy_version": "28e5fc3ca227",
+    "gotchas": "41b022917210",
+    "candidate_tokens": 3920,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 38299,
+    "routed_reduction_ratio": 0.954563581077713,
+    "routed_hidden": 5,
+    "routed_ambiguous": 25,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "ef009e6812fe",
+      "944b56a6247b",
+      "55667ed621cb",
+      "482c8531b871",
+      "3edfdb72f70a",
+      "e710f843443d",
+      "cae9c92b39b5",
+      "863b2fbb6f21",
+      "f23a87a4ff32",
+      "ef1f89c41b1c",
+      "73ae64617649",
+      "d2d58d2e23a9",
+      "95db13a3da46",
+      "dc6a6724a10e",
+      "f691f21d34c7",
+      "dbc22db138df",
+      "bc691347e557",
+      "2552d2adfd8d",
+      "e7183f5c7765",
+      "b8802c29d033",
+      "24eb129315e6",
+      "d0fbb0eef6a9",
+      "5f0cea5b19ed",
+      "83c76b85e0f1",
+      "50a5f17a6fc6",
+      "0906ebbd2ce1",
+      "6f6b02dad815",
+      "d0844cdc7c5a",
+      "92be5064b5be",
+      "504365aa02ad",
+      "802822de7781",
+      "fdc9250f9ab9",
+      "124653b9a27b",
+      "528e3521dc5c",
+      "c96ca8a6a113",
+      "a99bec39bad9",
+      "4e70d20a81df",
+      "ad173ce1a3bc",
+      "b72ce61b34c3",
+      "a43cf01f70f2",
+      "47087a7542a2",
+      "63651d9462f9",
+      "9fa7f4593b6d",
+      "7a691684e95a",
+      "08efeb04cb3a",
+      "816fe973a00f",
+      "5a787a0c8889",
+      "f0b10a632acf",
+      "14836d740bab",
+      "692f9d08e54b",
+      "379c6efe7291",
+      "877d6a8f2e4d",
+      "b8b235b8a73d",
+      "2db215bfa30d",
+      "4b3dbe4f4004",
+      "226ac1bd6243",
+      "541287f235ac",
+      "dde26cf91864",
+      "d7138565e73f",
+      "47ec4cd5d02a",
+      "12376e13555f",
+      "c1f62a3bdee9",
+      "e4c630cc87b3",
+      "8f938ad31ca7",
+      "89e16c7c78ed",
+      "3037c6d26ebe",
+      "e1ef80891843",
+      "d02e6bc9902a",
+      "669cef77d8ef",
+      "cc9eccd61e92",
+      "66ab1306ccfc",
+      "b1aeb32aa691",
+      "317964ecce36",
+      "16d273ce80c3"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790179601.80593,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "fca7b8cb2bddfc05b40f967c9134ab23997b6b2a",
+  "review_verdict": "approve",
+  "resume_hint": {
+    "conflicts": [
+      "orchestrator/decision_log.py",
+      "tests/test_decision_log.py",
+      "tests/test_pool.py"
+    ],
+    "hunks": "diff --cc orchestrator/decision_log.py\nindex 156172c,159b866..0000000\n--- a/orchestrator/decision_log.py\n+++ b/orchestrator/decision_log.py\n@@@ -244,73 -241,66 +244,139 @@@ def format_explain(rows)\n      return \"\\n\".join(lines)\n  \n  \n++<<<<<<< HEAD\n +STEERING_KEYS = {\"trigger\", \"severity\", \"critical\", \"action\", \"evidence_hash\", \"message_chars\"}\n +\n +\n +def validate_steering(row):\n +    \"\"\"Steering metadata lives in extra, following other decision kinds.\"\"\"\n +    def has_message(value):\n +        if isinstance(value, dict):\n +            return \"message\" in value or any(has_message(v) for v in value.values())\n +        return isinstance(value, (tuple, list)) and any(has_message(v) for v in value)\n +    required = {\"candidates\", \"hard_constraints\", \"deterministic\", \"reason\", \"selected\", \"mode\"}\n +    if not required <= row.keys() or not STEERING_KEYS <= (row.get(\"extra\") or {}).keys():\n +        raise ValueError(\"missing steering metadata\")\n +    if has_message(row):\n +        raise ValueError(\"steering rows must omit message text\")\n +\n +\n +GROUPED_SCAN_LIMIT = 2000\n +\n +\n +def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):\n +    \"\"\"Read newest matching rows, returning each result in chronological order.\n +\n +    Grouped reads retain at most limit rows per subject and inspect at most\n +    GROUPED_SCAN_LIMIT lines total, including malformed and unrelated lines.\n +    \"\"\"\n +    grouped = {subject: [] for subject in subjects} if subjects is not None else None\n +    if limit <= 0 or grouped == {}:\n +        return grouped if grouped is not None else []\n +    completed = set()\n +    rows, scanned = [], 0\n +    def result():\n +        return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]\n +    path = _directory(root) / \"decisions.jsonl\"\n +    try:\n +        with path.open(\"rb\") as stream:\n +            stream.seek(0, 2)\n +            pos, pending = stream.tell(), b\"\"\n +            while pos:\n +                size = min(pos, 8192)\n +                pos -= size\n +                stream.seek(pos)\n +                lines = (stream.read(size) + pending).split(b\"\\n\")\n +                pending = lines.pop(0) if pos else b\"\"\n +                for line in reversed(lines):\n +                    if grouped is not None and scanned >= GROUPED_SCAN_LIMIT:\n +                        return result()\n +                    scanned += 1\n +                    try:\n +                        row = json.loads(line)\n +                    except (ValueError, UnicodeError):\n +                        continue\n +                    if (isinstance(row, dict) and (kind is None or row.get(\"kind\") == kind)\n +                            and (subject is None or row.get(\"subject\") == subject)):\n +                        if grouped is not None:\n +                            tid = row.get(\"subject\")\n +                            if tid not in grouped or tid in completed:\n +                                continue\n +                            own = grouped[tid]\n +                            own.append(row)\n +                            if len(own) >= limit:\n +                                completed.add(tid)\n +                            if len(completed) == len(grouped):\n +                                return result()\n +                            continue\n +                        rows.append(row)\n +                        if len(rows) >= limit:\n +                            return result()\n +    except FileNotFoundError:\n +        pass\n +    return result()\n++=======\n+ def _tail_lines(path, limit=200, max_bytes=2 * 1024 * 1024):\n+     \"\"\"Read a bounded suffix, never loading an entire decision archive.\"\"\"\n+     try:\n+         with path.open(\"rb\") as stream:\n+             stream.seek(0, 2)\n+             position = stream.tell()\n+             chunks, size, newlines = [], 0, 0\n+             while position and size < max_bytes and newlines <= limit:\n+                 count = min(position, 8192, max_bytes - size)\n+                 position -= count\n+                 stream.seek(position)\n+                 chunk = stream.read(count)\n+                 chunks.append(chunk)\n+                 size += len(chunk)\n+                 newlines += chunk.count(b\"\\n\")\n+             data = b\"\".join(reversed(chunks))\n+             if position:\n+                 data = data.partition(b\"\\n\")[2]\n+             return data.splitlines()[-limit:]\n+     except FileNotFoundError:\n+         return []\n+ \n+ \n+ def last_row(kind, *, role, exclude_subject, require_key):\n+     \"\"\"Latest qualifying row in a 200-line, two-local-day bounded tail.\n+ \n+     The current schedlog uses one decisions.jsonl archive; date filtering keeps\n+     that layout compatible with daily decision files without changing writers.\n+     \"\"\"\n+     today = datetime.now(ZoneInfo(\"Europe/Zurich\")).date()\n+     dates = (today, today - timedelta(days=1))\n+     paths = [_directory() / \"decisions.jsonl\"]\n+     paths.extend(_directory() / f\"decisions-{day.isoformat()}.jsonl\" for day in dates)\n+     rows = []\n+     remaining = 200\n+     for path in paths:\n+         if not remaining:\n+             break\n+         lines = _tail_lines(path, limit=remaining)\n+         remaining -= len(lines)\n+         for line in lines:\n+             try:\n+                 row = json.loads(line)\n+                 if not isinstance(row, dict):\n+                     continue\n+                 day = datetime.fromtimestamp(float(row[\"ts\"]), ZoneInfo(\"Europe/Zurich\")).date()\n+                 if day in dates:\n+                     rows.append(row)\n+             except (ValueError, KeyError, TypeError, OSError, OverflowError):\n+                 continue\n+     for row in sorted(rows, key=lambda row: row[\"ts\"], reverse=True)[:200]:\n+         if (row.get(\"kind\") != kind or row.get(\"subject\") == exclude_subject\n+                 or row.get(\"reason\") == \"hidden_tool_requested\"\n+                 or (row.get(\"deterministic\") or {}).get(\"role\") != role):\n+             continue\n+         value = row\n+         for key in require_key.split(\".\"):\n+             if not isinstance(value, dict) or key not in value:\n+                 break\n+             value = value[key]\n+         else:\n+             return row\n+     return None\n++>>>>>>> fca7b8c (T-1301 Add cache-aware tool and skill disclosure telemetry)\ndiff --cc tests/test_decision_log.py\nindex 1a2bf7f,7117381..0000000\n--- a/tests/test_decision_log.py\n+++ b/tests/test_decision_log.py\n@@@ -187,66 -187,41 +187,107 @@@ class MemoryRetrievalDocumentation(unit\n          self.assertEqual(row[\"extra\"][\"tokens_tiered\"], 5)\n  \n  \n++<<<<<<< HEAD\n +class SteeringDecisionLogTests(unittest.TestCase):\n +    def test_steering_rows_omit_message_text(self):\n +        message = \"repeated_failure: synthetic check failure\"\n +        extra = {\"trigger\": \"repeated_failure\", \"severity\": \"medium\", \"critical\": False,\n +                 \"action\": \"steer\", \"evidence_hash\": \"synthetic\", \"message_chars\": len(message)}\n +        fields = dict(candidates=[\"continue\", \"steer\", \"cancel\"], hard_constraints={},\n +                      deterministic={}, selected=\"steer\", reason=[\"repeated_failure\"], mode=\"shadow\")\n +        with tempfile.TemporaryDirectory() as root:\n +            row = decision_log.record(\"steering\", \"T-steering\", extra=extra, root=root, **fields)\n +            serialized = (Path(root) / \"runs/sched/decisions.jsonl\").read_text()\n +            self.assertEqual(row[\"extra\"][\"message_chars\"], len(message))\n +            self.assertNotIn(message, serialized)\n +            self.assertNotIn('\"message\":', serialized)\n +            for key in decision_log.STEERING_KEYS:\n +                with self.subTest(key=key), self.assertRaises(ValueError):\n +                    decision_log.record(\"steering\", \"T-steering\", root=root,\n +                                        extra={k: v for k, v in extra.items() if k != key}, **fields)\n +            with self.assertRaises(ValueError):\n +                decision_log.record(\"steering\", \"T-steering\", root=root,\n +                                    extra={**extra, \"nested\": {\"message\": message}}, **fields)\n +            self.assertEqual(decision_log.recent(root=root), [row])\n +\n +\n +class GroupedSteeringHistoryTests(unittest.TestCase):\n +    def test_grouped_history_honours_per_subject_limit(self):\n +        with tempfile.TemporaryDirectory() as directory:\n +            root = Path(directory)\n +            path = root / \"runs/sched/decisions.jsonl\"\n +            path.parent.mkdir(parents=True)\n +            applied = {\"kind\": \"steering\", \"subject\": \"worker\", \"mode\": \"active\",\n +                       \"extra\": {\"outcome\": \"applied\"}}\n +            latest = {\"kind\": \"steering\", \"subject\": \"worker\", \"mode\": \"shadow\", \"ts\": 99}\n +            rows = [applied] + [{\"kind\": \"routing\", \"subject\": \"other\"}] * 600\n +            rows += [{\"kind\": \"steering\", \"subject\": \"worker\", \"mode\": \"shadow\"}] * 40\n +            rows += [latest, {\"kind\": \"steering\", \"subject\": \"new\", \"mode\": \"shadow\"}]\n +            path.write_text(\"\\n\".join(json.dumps(row) for row in rows) + \"\\n\")\n +            with patch.object(Path, \"open\", autospec=True, side_effect=Path.open) as opened:\n +                grouped = decision_log.recent(root=root, kind=\"steering\", subjects=[\"worker\", \"new\"], limit=2)\n +            opened.assert_called_once()\n +            self.assertEqual(grouped[\"worker\"], [rows[-4], latest])\n +            self.assertEqual(grouped[\"new\"], [rows[-1]])\n +\n +    def test_grouped_history_scan_is_bounded_without_applied_rows(self):\n +        with tempfile.TemporaryDirectory() as directory:\n +            root = Path(directory)\n +            path = root / \"runs/sched/decisions.jsonl\"\n +            path.parent.mkdir(parents=True)\n +            old = {\"kind\": \"steering\", \"subject\": \"old\", \"mode\": \"shadow\"}\n +            newest = {\"kind\": \"steering\", \"subject\": \"new\", \"mode\": \"shadow\"}\n +            path.write_text(json.dumps(old) + \"\\n\" +\n +                            (json.dumps({\"kind\": \"routing\"}) + \"\\ninvalid\\n\") * 1500 +\n +                            json.dumps(newest) + \"\\n\")\n +            with patch.object(decision_log.json, \"loads\", wraps=json.loads) as loads:\n +                rows = decision_log.recent(root=root, kind=\"steering\", subjects=[\"old\", \"new\"], limit=1)\n +            self.assertEqual(rows, {\"old\": [], \"new\": [newest]})\n +            self.assertLessEqual(loads.call_count, decision_log.GROUPED_SCAN_LIMIT)\n +            with patch.object(Path, \"open\") as opened:\n +                self.assertEqual(decision_log.recent(root=root, subjects=[]), {})\n +                self.assertEqual(decision_log.recent(root=root, subjects=[\"new\"], limit=0), {\"new\": []})\n +            opened.assert_not_called()\n +            with patch.object(decision_log.json, \"loads\", wraps=json.loads) as loads:\n +                self.assertEqual(decision_log.recent(root=root, subjects=[\"new\"], limit=1), {\"new\": [newest]})\n +            self.assertLessEqual(loads.call_count, 2)\n++=======\n+ class DisclosureHistory(unittest.TestCase):\n+     def test_last_row_bounded_same_role_different_subject_with_kept(self):\n+         import json\n+         import tempfile\n+         from datetime import datetime, timedelta\n+         from pathlib import Path\n+         from unittest import mock\n+         from zoneinfo import ZoneInfo\n+         from orchestrator import decision_log as log\n+         today = datetime.now(ZoneInfo(\"Europe/Zurich\")).replace(hour=12, minute=0, second=0)\n+         def row(subject, role=\"execute\", **extra):\n+             return {\"ts\": today.timestamp(), \"kind\": \"tool_disclosure\", \"subject\": subject,\n+                     \"deterministic\": {\"role\": role, \"kept\": [\"Read\"]}, **extra}\n+         with tempfile.TemporaryDirectory() as directory, mock.patch.object(log.schedlog, \"SCHED_DIR\", Path(directory)):\n+             path = Path(directory) / \"decisions.jsonl\"\n+             previous = row(\"previous\", ts=(today - timedelta(days=1)).timestamp())\n+             rows = [row(\"old\", ts=(today - timedelta(days=2)).timestamp()), previous,\n+                     row(\"other\", role=\"review\"), row(\"current\"),\n+                     row(\"escalation\", reason=\"hidden_tool_requested\"),\n+                     row(\"missing\", deterministic={\"role\": \"execute\"})]\n+             path.write_text(\"\\n\".join(map(json.dumps, rows)) + \"\\nmalformed\\n\")\n+             args = dict(role=\"execute\", exclude_subject=\"current\", require_key=\"deterministic.kept\")\n+             self.assertEqual(log.last_row(\"tool_disclosure\", **args), previous)\n+             with path.open(\"a\") as stream:\n+                 stream.write((json.dumps(row(\"current\")) + \"\\n\") * 200)\n+             self.assertIsNone(log.last_row(\"tool_disclosure\", **args))\n+             path.write_text(json.dumps(rows[0]) + \"\\n\")\n+             self.assertIsNone(log.last_row(\"tool_disclosure\", **args))\n+             path.unlink()\n+             (Path(directory) / f\"decisions-{today.date() - timedelta(days=1)}.jsonl\").write_text(json.dumps(previous))\n+             self.assertEqual(log.last_row(\"tool_disclosure\", **args), previous)\n+ \n+     def test_bounded_keeps_kept_list_and_char_fields(self):\n+         from orchestrator import decision_log\n+         row = {\"deterministic\": {\"kept\": [f\"tool_{index}\" for index in range(200)],\n+                \"stable_catalog_chars\": 4200, \"dynamic_chars\": 27000,\n+                \"changed_since_previous\": False, \"catalog_chars\": 5100, \"selected_chars\": 1234}}\n+         self.assertEqual(decision_log._bounded(row), row)\n++>>>>>>> fca7b8c (T-1301 Add cache-aware tool and skill disclosure telemetry)\ndiff --cc tests/test_pool.py\nindex 107f7bd,63563d4..0000000\n--- a/tests/test_pool.py\n+++ b/tests/test_pool.py\n@@@ -578,14 -578,14 +578,28 @@@ if __name__ == \"__main__\"\n      unittest.main()\n  \n  \n++<<<<<<< HEAD\n +class SteeringConfiguration(unittest.TestCase):\n +    def test_steering_section_defaults_and_invalid_mode_falls_back(self):\n +        from orchestrator import steering_policy\n +        self.assertEqual(steering_policy.DEFAULTS, {\"mode\": \"shadow\", \"stuck_after_s\": 900,\n +                         \"out_of_scope_events\": 3, \"min_interval_s\": 1800})\n +        self.assertEqual(steering_policy.mode({}), \"shadow\")\n +        self.assertEqual(P.config()[\"steering\"][\"mode\"], \"shadow\")\n +        for value in (\"off\", \"shadow\", \"active\"):\n +            self.assertEqual(steering_policy.mode({\"steering\": {\"mode\": value}}), value)\n +        for value in (\"invalid\", None, 9):\n +            self.assertEqual(steering_policy.mode({\"steering\": {\"mode\": value}}), \"off\")\n++=======\n+ class DisclosureCacheConfig(unittest.TestCase):\n+     def test_cache_mode_keys_in_tool_disclosure_and_skills(self):\n+         from orchestrator import context_router, pool\n+         cfg = pool.config()\n+         for section in (\"tool_disclosure\", \"skills\"):\n+             self.assertEqual(context_router.cache_mode(cfg, section), \"shadow\")\n+             self.assertEqual(context_router.cache_mode({}, section), \"off\")\n+             for mode in (\"off\", \"shadow\", \"active\"):\n+                 self.assertEqual(context_router.cache_mode({section: {\"cache_mode\": mode}}, section), mode)\n+             with self.assertRaises(ValueError):\n+                 context_router.cache_mode({section: {\"cache_mode\": \"invalid\"}}, section)\n++>>>>>>> fca7b8c (T-1301 Add cache-aware tool and skill disclosure telemetry)\n"
+  },
+  "hold_reason": null
+}

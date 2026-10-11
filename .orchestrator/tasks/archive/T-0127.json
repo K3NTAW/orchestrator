@@ -1,0 +1,82 @@
+{
+  "id": "T-0127",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "review: C-O3 v4: `orchestrator goal start|status|list|stop` \u2014 headless goal entry point (final; spec reviews T-0081, T-0096, T-0097, T-0104 folded in; dispatched without a further spec review by Planner decision)",
+  "spec": "Supersedes T-0103. Scope is 7 files by Planner decision: the two helper extractions (bus.LOCK_NAME, spawn.resolve_secrets) belong with their only new caller, and a fourth spec-review round costs more than the risk.\nIMPORT BOUNDARY (replaces the earlier rule): goals.py may import orchestrator.install.install, orchestrator.spawn.trust_workspace, orchestrator.spawn.resolve_secrets and orchestrator.bus.LOCK_NAME; it must not call any other bus.* or spawn.* function, must not construct Pool(), and must not reference orchestrator.ROOT or STATE; every target path derives from the realpath'd repo_path argument.\nHELPERS: bus.py gains `LOCK_NAME = \"bus.lock\"` and bus.locked() uses it (tests: existing bus tests still green). spawn.py gains `resolve_secrets(mapping: dict[str, str]) -> dict[str, str]`: for each ENV_NAME, value `env:NAME` reads os.environ (missing skipped with a stderr note naming NAME), any other value runs as today's shell command; `secrets_for_role(role)` becomes a one-line wrapper over it (behaviour unchanged, existing tests green).\nPRECHECKS before any write: repo_path is a git toplevel, HEAD attached, no rebase or merge in progress; target pool.toml (after install, see (a)) has [[claude_accounts]] id == account_id and [models].planner; otherwise return {\"launched\": false, \"reason\": ...} with nothing written except the install when it was needed. Add to this repo's .orchestrator/pool.toml: `planner = \"claude-fable-5-1\"` under [models] and `[secrets.planner] GH_WRITE_TOKEN = \"env:GH_WRITE_TOKEN\"`; test that Pool() constructed in the harness root (whose pool.toml is copied from this repo) exposes cfg[\"models\"][\"planner\"] and cfg[\"secrets\"][\"planner\"].\nstart(repo_path, goal_text, account_id=\"A\", reinstall=False) -> dict: (a) install.install(repo_path) when <repo_path>/.orchestrator/pool.toml is missing or reinstall; catch SystemExit into the dict shape; (b) scaffold commit: paths = [.orchestrator, .claude, skills, .gitignore, .mcp.planner.json, .mcp.review.json, .mcp.scout.json, .mcp.triage.json]; `git status --porcelain --ignored -- <paths>`; any `!!` line \u2192 refuse {\"launched\": false, \"reason\": \"<path> is gitignored in the target; worktrees would lack the scaffold\"}; else `git add -- <the paths the status output names>` and commit \"orchestrator: scaffold (goal start)\" with the install report in the body; failure \u2192 refuse; `commit` = sha or None; (c) GOAL task: `subprocess.run([\"uv\", \"run\", \"--project\", <this repo>, \"python\", \"-\"], input=SCRIPT, env={**os.environ, \"ORCH_ROOT\": repo_path, \"ORCH_GOAL_TEXT\": goal_text}, check=False)`; SCRIPT is a module-level constant string with no formatting applied, ever; it reads os.environ[\"ORCH_GOAL_TEXT\"], calls bus.create_task(title=f\"GOAL: {text}\"[:200], spec=text, acceptance=[\"Planner closes the goal with a PR\"], scope=[\"**\"], role=\"triage\", complexity=5) and prints the id; non-zero exit or unparseable id \u2192 refuse; (d) trust_workspace(account.config_dir, repo_path); env = os.environ + CLAUDE_CONFIG_DIR (expanded) + ORCH_ROOT=repo_path + CLAUDE_CODE_OAUTH_TOKEN from the account's oauth_token_env when set + resolve_secrets(target pool.toml [secrets.planner] or {}); (e) prompt = \"Skill(orchestrate) with the goal: \" + goal_text + \"\\nThe GOAL task is \" + goal_id + \"; use it as the parent of every task you create and post the PR url as its result before you finish.\"; argv = [\"claude\", \"-p\", prompt, \"--model\", models.planner, \"--output-format\", \"json\", \"--max-budget-usd\", str(limits.max_budget_usd.get(\"planner\", 10)), \"--mcp-config\", \".mcp.planner.json\", \"--strict-mcp-config\", \"--append-system-prompt\", <contents of .orchestrator/prompts/planner.md>, \"--dangerously-skip-permissions\"]; mkdir -p runs; Popen(start_new_session=True, cwd=repo_path, stdout and stderr to runs/planner-<goal_id>.log); (f) under an fcntl flock on <repo_path>/.orchestrator/<LOCK_NAME>, append {goal_id, repo, text, pid, pid_start, started_at, account, commit, status \"running\"} to <repo_path>/.orchestrator/runs/goals.json; return {\"launched\": true, goal_id, pid, log, commit, install: report, note: \"goal-Planner spend is not counted against any account budget until C-O7a tallies transcripts; the daemon may schedule other work on this account meanwhile (accepted gap)\"}.\n_proc_start(pid): /proc/<pid>/stat on linux; `ps -o lstart= -p <pid>` with LC_ALL=C parsed \"%a %b %e %H:%M:%S %Y\" local time on darwin; None elsewhere. _alive(pid): os.kill(pid, 0) in try/except. identity(record) = _alive(pid) and (pid_start is None or _proc_start(pid) is None or abs(_proc_start(pid) - pid_start) < 5).\nstatus(repo_path, goal_id=None) -> list[dict]: per record: GOAL task status from tasks/<id>.json; children (parent == goal_id) grouped by status with hold_reason; merged shas; pr_url when the GOAL result text contains a github.com/.../pull/ url; planner_alive via identity (None plus note when _proc_start unavailable); under the flock, a \"running\" record failing identity is marked \"exited\" with exited_at. list_goals applies the same reconciliation. stop(repo_path, goal_id): identity ok \u2192 os.killpg(os.getpgid(pid), SIGTERM) and mark \"stopped\"; identity fails \u2192 mark \"stopped\" without signalling; unknown \u2192 {\"error\": \"unknown goal\"}.\n.orchestrator/prompts/planner.md: the \"You are the Planner\" header plus the Never and Always lists copied from <this repo>/CLAUDE.md (the repo root of the orchestrator package: Path(orchestrator.__file__).resolve().parents[1] / \"CLAUDE.md\"), plus: \"Headless: no human is in this session. When a step needs the human, write it under 'Needs the human' in plan.md and finish. The GOAL task id is given in the prompt: parent every task on it and post the PR url as its result.\"\ncli.py: `goal start <repo> <text> [--account A] [--reinstall]` (prints fields and `revert: git revert <commit>` when a commit was made; exit 2 when not launched), `goal status <repo> [id] [--json]`, `goal list <repo>` (\"no goals\" when empty), `goal stop <repo> <id>`; the install command's next-step line points at `orchestrator goal start <target> \"<goal>\"`.\nTests tests/test_goals.py (target = harness.scratch_repo, whose .gitignore covers .orchestrator/ and .claude): start_refuses_when_scaffold_paths_are_gitignored (real git; Popen patched; not called); start_commits_scaffold_and_records_sha (ignore lines removed; real git); start_refuses_unknown_account_and_missing_planner_model_before_any_write; start_creates_goal_task_via_stdin_script_with_env (subprocess.run patched: assert input is the SCRIPT constant, env ORCH_GOAL_TEXT == text, env ORCH_ROOT == repo_path, and the marker string used as goal_text is absent from both argv and the script text); start_launches_claude_with_expected_flags_and_env (flags as listed, goal id in the prompt, CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN when configured, cwd == realpath, start_new_session); start_marks_workspace_trusted; status_reconciles_exited_and_checks_pid_identity (_proc_start patched); stop_uses_killpg_only_when_identity_matches; planner_md_matches_claude_md_lists (reads the repo-root CLAUDE.md by the path rule above); pool_parses_new_tables; bus_lock_name_shared (goals.py uses bus.LOCK_NAME and bus.locked() opens STATE / LOCK_NAME). No README change; no new dependency.",
+  "inputs": [
+    "T-0115"
+  ],
+  "acceptance": [
+    "tests/test_goals.py has the eleven named tests, green; existing bus, spawn and pool tests untouched and green",
+    "goals.py imports from orchestrator only install.install, spawn.trust_workspace, spawn.resolve_secrets and bus.LOCK_NAME (grep), never calls Pool() or other bus/spawn functions, and the GOAL-task script is a constant string with no formatting; the marker goal_text is absent from argv and script text in the test",
+    "The launch never happens when a precheck fails, a scaffold path is gitignored, the commit fails, or the GOAL-task subprocess fails; each returns launched false with a reason",
+    "spawn.secrets_for_role behaviour is unchanged (existing tests) and delegates to resolve_secrets",
+    "`uv run orchestrator goal start /nonexistent x` exits 2 with one line; `goal list <scratch repo>` prints 'no goals'",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "tests/test_goals.py",
+    ".orchestrator/prompts/planner.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0127",
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: T-0115 was executed by claude:sonnet and this review was spawned on sonnet by a daemon running the reverted daemon.py (commit 3130d61 undid review_tier). Same-model review is against the never-review-own-output rule. Replaced by an opus review with inputs=[T-0115].",
+    "verdict": null,
+    "confidence": 0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789736063.7447271,
+      "status": "failed",
+      "result": {
+        "summary": "not run: T-0115 was executed by claude:sonnet and this review was spawned on sonnet by a daemon running the reverted daemon.py (commit 3130d61 undid review_tier). Same-model review is against the never-review-own-output rule. Replaced by an opus review with inputs=[T-0115].",
+        "verdict": null,
+        "confidence": 0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789736129.684895,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0127",
+      "claimed_at": 1789736129.6843991
+    },
+    {
+      "ts": 1789736129.719243,
+      "pid": 4320,
+      "account": "B"
+    },
+    {
+      "ts": 1789736153.425206,
+      "status": "failed",
+      "reason": "non-JSON output (rc=143): "
+    }
+  ],
+  "claimed_at": 1789736129.6843991,
+  "pid": 4320,
+  "account": "B",
+  "reason": "non-JSON output (rc=143): "
+}

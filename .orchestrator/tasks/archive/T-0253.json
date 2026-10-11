@@ -1,0 +1,81 @@
+{
+  "id": "T-0253",
+  "parent": "T-0240",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: F6: a merge that comes back tests_red holds the task for the Planner instead of leaving it failed with merged_at stamped",
+  "spec": "Gotcha 2026-09-19 18:22 (T-0241): orchestrator/daemon.py merge_reviewed (about line 640) stamps pipeline.merged_at before calling merge.merge so a conflict is attempted once; when merge.merge returns status tests_red (worktree gate green, review approved, suite red only in the rebased merge run, here a flaky thread test) merge.merge sets the task failed reason tests_red, report_merge only notifies, merged_at stays stamped, and nothing retries or asks the Planner. The Planner had to notice by hand.\nChange daemon.py:\n1. In merge_reviewed, after report_merge: when the returned status is not \"merged\", set the task status held with hold_reason \"merge <status>\" (for example \"merge tests_red\", \"merge conflict\") and keep reason/resume_hint from merge.merge; clear pipeline.merged_at only for tests_red so a later fix round or Planner re-approval can retry the merge exactly once more; conflicts keep merged_at (today's once-only rule). Use stamp()/bus.update under the bus lock as the surrounding code does.\n2. held tasks with hold_reason starting \"merge \" must appear as decision points for planner_runs.decision_points() the same way review holds do (check planner_runs.py; if held tasks are already picked up generically, add a test proving it and change nothing there).\n3. notify() text unchanged apart from the hold.\nTests in tests/test_daemon.py: test_merge_tests_red_holds_task (merge.merge monkeypatched to return {\"status\": \"tests_red\", ...}: task ends held, hold_reason \"merge tests_red\", merged_at cleared), test_merge_conflict_holds_and_keeps_merged_at, test_merge_ok_unchanged. Keep every existing test green; the suite now runs spawn_async synchronously in tests (T-0245).",
+  "inputs": [
+    "T-0250"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_merge_tests_red_holds_task, ::test_merge_conflict_holds_and_keeps_merged_at, ::test_merge_ok_unchanged pass",
+    "a held task with hold_reason starting 'merge ' is yielded by planner_runs.decision_points() (existing behaviour proven by a test, or added)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    "tests/test_daemon.py",
+    "tests/test_planner_runs.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0253",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789837218.629392,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0253",
+      "claimed_at": 1789837218.62896
+    },
+    {
+      "ts": 1789837218.631083,
+      "account": "B"
+    },
+    {
+      "ts": 1789837218.673665,
+      "pid": 28579,
+      "account": "B"
+    },
+    {
+      "ts": 1789837363.772635,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789837363.774802,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789837218.62896,
+  "account": "B",
+  "pid": 28579,
+  "review_verdict": "approve"
+}

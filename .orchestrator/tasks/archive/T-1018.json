@@ -1,0 +1,190 @@
+{
+  "id": "T-1018",
+  "created_at": 1790154027.892492,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S2i harness_depth and small-task fast path in shadow: deterministic depth level 0-4 from existing task fields, fast path skips Jev, skill routing, strategy lookup and scouts for level 0-1, promotion feature fast_path (P24, P25, P26)",
+  "spec": "Create orchestrator/harness_depth.py. level(task, *, tasks, cfg, history) -> {\"level\": 0..4, \"reasons\": [...], \"eligible_fast_path\": bool}. Deterministic rules in order: 4 when constraints.architectural, any scope path matches [review] security_paths or migrations area globs, complexity >= 8, or the task is a goal container; 3 when complexity 6-7, unresolved depends_on, or constraints.route is spec_review; 2 when complexity 4-5; 1 when complexity <= 3, scope <= 3 files, no security path, no dependency unresolved; 0 additionally when every acceptance line except the gate line is a test id (tests/test_x.py::test_y) and history first-pass rate for the task_class is >= 0.8 over at least 5 samples (history from scorecard rows; missing history means level 1, never 0). Fast path = level 0 or 1: in daemon dispatch and spawn packet building skip jev_route, skill routing (skills=None path), strategy lookup, context-router Jev calls and scout suggestions; keep hooks, tests-green, security review by path and human PR untouched. [harness].depth_mode = \"shadow\" (dated comment; off|shadow|active): shadow records a decision_log row kind harness_depth (add to KINDS) per dispatch with candidates 0..4, selected, reasons, would_skip list, and changes nothing; active applies the skips and stamps pipeline.harness_level. promotion FEATURES entry fast_path with criteria: at least 20 shadow rows at level 0-1, and once active first-pass rate of fast-path tasks not below the shadow baseline and lower tokens per accepted task; demotion on a fast-path task that needed two fix rounds. Docs: docs/hermes-hardening/15-harness-depth.md with the distribution of levels over the real bus tasks of this repository (run level over all merged execute tasks and tabulate).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_harness_depth.py::test_levels_from_rules (security path task 4, complexity 6 task 3, complexity 5 task 2, small localized task 1, small task with test-id acceptance and good history 0)",
+    "tests/test_harness_depth.py::test_missing_history_never_yields_level_zero",
+    "tests/test_daemon.py::test_dispatch_records_harness_depth_row_in_shadow_and_changes_nothing",
+    "tests/test_daemon.py::test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review",
+    "tests/test_promotion.py::test_fast_path_feature_registered",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/harness_depth.py",
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_harness_depth.py",
+    "tests/test_daemon.py",
+    "tests/test_promotion.py",
+    "docs/hermes-hardening/15-harness-depth.md"
+  ],
+  "depends_on": [
+    "T-0996"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790158371.9514081,
+      "pipeline": {
+        "first_ready_at": 1790158371.9513652
+      }
+    },
+    {
+      "ts": 1790158372.023131,
+      "pipeline": {
+        "first_ready_at": 1790158371.9513652,
+        "spec_review_at": 1790158372.02309,
+        "spec_review_at_lease": 1790159272.02309
+      }
+    },
+    {
+      "ts": 1790158372.029705,
+      "pipeline": {
+        "first_ready_at": 1790158371.9513652,
+        "spec_review_at": 1790158372.02309,
+        "spec_review_at_lease": 1790159272.02309,
+        "spec_review_at_done": 1790158372.0296059
+      }
+    },
+    {
+      "ts": 1790164010.318072,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec lists 'strategy lookup' and 'scout suggestions' as fast-path skips in daemon dispatch / spawn packet building, but orchestrator/strategy.py is never called from daemon.dispatch() or spawn.py's packet-building path (only from cli.py and skill_scorecard.py for reporting), and no 'scout suggestion' function exists anywhere in the repo. There is nothing to skip, so acceptance test test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review can only verify 2 of the 5 named skips (jev_route, skill routing); the 'strategy lookup' and 'scout suggestions' entries in the shadow would_skip list have no corresponding real behavior to gate.",
+          "severity": "high",
+          "line": 744
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "'skill routing (skills=None path)' is ambiguous as an insertion point. The primary Codex execute dispatch (daemon.py:910, spawn.packet(t, ...)) never passes skills=, so _prepare_skills/specialist.compose is already never invoked there \u2014 nothing to skip. The only real skill-routing call is _prepare_skills(t, role, pool.cfg) inside spawn.run_worker (line 1217), used for the Claude-fallback executor and scout/review/challenge/spec_review roles, not the path 'daemon dispatch' implies.",
+          "severity": "med",
+          "line": 1217
+        },
+        {
+          "path": "orchestrator/planner_taxonomy.py",
+          "issue": "level() rule 'level 4 when constraints.architectural' references a field that is never written onto a persisted bus task's constraints anywhere in the codebase. 'architectural' is only a transient Planner-side classification field (planner_taxonomy.classify / jev_planner rows), not a task constraint. The unit test can pass with a synthetic fixture, but against real repository tasks this clause is dead code, which undermines the required docs/hermes-hardening/15-harness-depth.md distribution tabulation over real merged tasks.",
+          "severity": "med",
+          "line": 139
+        },
+        {
+          "path": "orchestrator/scorecard.py",
+          "issue": "The 'at least 5 samples' threshold for history is ambiguous between the grouped 'n' (all rows in a task_class bucket) and 'first_pass_defined_count' (rows where first_pass is actually known); using the wrong one changes when 'missing history' (level 1) applies at the level-0/level-1 boundary. Spec also doesn't say history should be computed once per dispatch tick and reused across candidate tasks \u2014 recomputing a full scorecard-by-task_class scan per task per tick adds an unguarded, repeated full-history disk scan to the daemon hot loop.",
+          "severity": "low",
+          "line": 1104
+        }
+      ]
+    },
+    {
+      "ts": 1790164016.134082,
+      "pipeline": {
+        "first_ready_at": 1790158371.9513652,
+        "spec_review_at": 1790158372.02309,
+        "spec_review_at_lease": 1790159272.02309,
+        "spec_review_at_done": 1790158372.0296059,
+        "spec_review_held_at": 1790164016.1340349
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790164017.852253,
+      "pipeline": {
+        "first_ready_at": 1790158371.9513652,
+        "spec_review_at": 1790158372.02309,
+        "spec_review_at_lease": 1790159272.02309,
+        "spec_review_at_done": 1790158372.0296059,
+        "spec_review_held_at": 1790164016.1340349,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790164018.903584,
+      "pipeline": {
+        "first_ready_at": 1790158371.9513652,
+        "spec_review_at": 1790158372.02309,
+        "spec_review_at_lease": 1790159272.02309,
+        "spec_review_at_done": 1790158372.0296059,
+        "spec_review_held_at": 1790164016.1340349,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790164016.134082": true
+        }
+      }
+    },
+    {
+      "ts": 1790164173.186879,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 17:35: spec review T-1070 folded into T-1083"
+    },
+    {
+      "ts": 1790164208.4094138,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 17:20: spec review T-1070 request_changes folded into T-1093 (v2); never executed (worktree null), so a fix round could not dispatch"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790158371.9513652,
+    "spec_review_at": 1790158372.02309,
+    "spec_review_at_lease": 1790159272.02309,
+    "spec_review_at_done": 1790158372.0296059,
+    "spec_review_held_at": 1790164016.1340349,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790164016.134082": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec lists 'strategy lookup' and 'scout suggestions' as fast-path skips in daemon dispatch / spawn packet building, but orchestrator/strategy.py is never called from daemon.dispatch() or spawn.py's packet-building path (only from cli.py and skill_scorecard.py for reporting), and no 'scout suggestion' function exists anywhere in the repo. There is nothing to skip, so acceptance test test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review can only verify 2 of the 5 named skips (jev_route, skill routing); the 'strategy lookup' and 'scout suggestions' entries in the shadow would_skip list have no corresponding real behavior to gate.",
+      "severity": "high",
+      "line": 744
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "'skill routing (skills=None path)' is ambiguous as an insertion point. The primary Codex execute dispatch (daemon.py:910, spawn.packet(t, ...)) never passes skills=, so _prepare_skills/specialist.compose is already never invoked there \u2014 nothing to skip. The only real skill-routing call is _prepare_skills(t, role, pool.cfg) inside spawn.run_worker (line 1217), used for the Claude-fallback executor and scout/review/challenge/spec_review roles, not the path 'daemon dispatch' implies.",
+      "severity": "med",
+      "line": 1217
+    },
+    {
+      "path": "orchestrator/planner_taxonomy.py",
+      "issue": "level() rule 'level 4 when constraints.architectural' references a field that is never written onto a persisted bus task's constraints anywhere in the codebase. 'architectural' is only a transient Planner-side classification field (planner_taxonomy.classify / jev_planner rows), not a task constraint. The unit test can pass with a synthetic fixture, but against real repository tasks this clause is dead code, which undermines the required docs/hermes-hardening/15-harness-depth.md distribution tabulation over real merged tasks.",
+      "severity": "med",
+      "line": 139
+    },
+    {
+      "path": "orchestrator/scorecard.py",
+      "issue": "The 'at least 5 samples' threshold for history is ambiguous between the grouped 'n' (all rows in a task_class bucket) and 'first_pass_defined_count' (rows where first_pass is actually known); using the wrong one changes when 'missing history' (level 1) applies at the level-0/level-1 boundary. Spec also doesn't say history should be computed once per dispatch tick and reused across candidate tasks \u2014 recomputing a full scorecard-by-task_class scan per task per tick adds an unguarded, repeated full-history disk scan to the daemon hot loop.",
+      "severity": "low",
+      "line": 1104
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 17:20: spec review T-1070 request_changes folded into T-1093 (v2); never executed (worktree null), so a fix round could not dispatch"
+}

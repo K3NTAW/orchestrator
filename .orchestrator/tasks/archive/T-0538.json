@@ -1,0 +1,167 @@
+{
+  "id": "T-0538",
+  "created_at": 1789948961.524897,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S3 v3: orchestrator/critical_path.py \u2014 deterministic critical-path ranking of ready tasks (downstream chain length, blocked descendants, cold-start durations) wired as the daemon's wave order",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P4 (prioritize tasks that determine goal completion time; design and test a ranking function, do not implement the sketch blindly) and P5 (cold start simple and deterministic, no false precision). Base goal/T-0503 with S2 v4 (T-0534) merged: daemon._wave_order(candidate_ids, tasks) identity hook; waves.jsonl row has an empty \"priority\"; the tasks dict covers candidates, running and their transitive depends_on ancestry. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: tasks are dicts with id, parent, depends_on, status, merged_into, complexity, constraints; dependents of X are tasks listing X in depends_on; scorecard._band (scorecard.py:56) maps complexity to bands 1-3, 4-6, 7-10.\n1. New orchestrator/critical_path.py, pure: est_duration_s(task, durations=None) = durations[task id] if present, else durations[band] if present, else COLD_START_S = {\"1-3\": 600, \"4-6\": 1200, \"7-10\": 2400} by complexity band. explain(task_id, tasks, durations=None) -> {\"downstream_depth\": longest chain of transitive dependents that are not merged, done or failed; \"blocked_descendants\": number of such transitive dependents; \"est_duration_s\"; \"critical_path_s\": est_duration_s of the task plus the heaviest downstream chain by est_duration_s; \"priority\": critical_path_s}. Cycles are guarded (a back edge is ignored, never a hang). rank(ready_ids, tasks, durations=None) -> ids sorted by priority desc, then blocked_descendants desc, then id asc; deterministic; ids not in tasks keep their relative order at the end.\n2. daemon: _wave_order(candidate_ids, tasks) returns critical_path.rank(candidate_ids, tasks); the waves.jsonl row's \"priority\" becomes {id: explain(...)} for every candidate. Dependents are only visible when they are in the tasks dict, so extend the dict built in dispatch with the queued dependents of every candidate (tasks whose depends_on names a candidate, transitively, via bus.read(status=\"queued\", role=\"execute\")); state the extension in a comment. In shadow mode the order is only logged (baseline_order stays first-come); in active mode the wave is dispatched in this order.\n3. README Pipeline paragraph: one sentence on the ranking and its cold-start durations.\n4. Tests: tests/test_critical_path.py::test_rank_prefers_longer_downstream_chain, ::test_rank_tie_breaks_on_blocked_descendants_then_id, ::test_explain_cold_start_durations_by_band, ::test_rank_ignores_merged_and_failed_descendants, ::test_rank_handles_cycles, ::test_durations_override_cold_start; tests/test_daemon.py::test_wave_row_carries_priority_order (two ready candidates, one with a queued dependent: the wave order puts it first and the row's priority explains both). Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_critical_path.py::test_rank_prefers_longer_downstream_chain, tests/test_critical_path.py::test_rank_tie_breaks_on_blocked_descendants_then_id, tests/test_critical_path.py::test_rank_ignores_merged_and_failed_descendants and tests/test_critical_path.py::test_rank_handles_cycles pass: rank orders a task that unblocks a longer or heavier chain first, breaks ties by blocked descendants then id, ignores merged, done and failed descendants, terminates on cycles",
+    "tests/test_critical_path.py::test_explain_cold_start_durations_by_band and tests/test_critical_path.py::test_durations_override_cold_start pass: explain reports downstream_depth, blocked_descendants, est_duration_s (600/1200/2400 s by band unless durations override) and critical_path_s",
+    "tests/test_daemon.py::test_wave_row_carries_priority_order passes: the waves.jsonl row carries priority explanations for all candidates, the wave order follows rank with queued dependents visible, and shadow mode still dispatches first-come",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains seven tests"
+  ],
+  "scope": [
+    "orchestrator/critical_path.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_critical_path.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0534"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/interference.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/bus.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "critical_path.rank(ready_ids, tasks, durations=None) -> ordered ids; critical_path.explain(task_id, tasks, durations=None) -> {downstream_depth, blocked_descendants, est_duration_s, critical_path_s, priority}; COLD_START_S by band; durations dict keyed by task id or band string",
+    "supersedes": "T-0526"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by S3 v4 after spec review T-0540 request_changes (dependents visible unless merged or failed, via bus.dependents; critical_path_s recursion pinned); no code was written",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1789949515.478175,
+      "pipeline": {
+        "spec_review_at": 1789949515.478135,
+        "spec_review_at_lease": 1789950415.478135
+      }
+    },
+    {
+      "ts": 1789949515.483605,
+      "pipeline": {
+        "spec_review_at": 1789949515.478135,
+        "spec_review_at_lease": 1789950415.478135,
+        "spec_review_at_done": 1789949515.4834602
+      }
+    },
+    {
+      "ts": 1789949624.230517,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec restricts the tasks-dict extension to `bus.read(status=\"queued\", role=\"execute\")` transitively over depends_on. This codebase treats \"held\" (e.g. hold_reason=\"budget\", handled explicitly via retry_held in dispatch()) as a first-class non-terminal, retryable status, same as \"queued\"/\"running\". explain()'s own definition of downstream_depth/blocked_descendants is 'not merged, done or failed' -- which includes held. A held dependent several hops downstream of a candidate would be invisible to explain() (it's simply absent from the tasks dict), silently undercounting downstream_depth, blocked_descendants and therefore critical_path_s/priority for that candidate's wave order. This is a silent-undercount class of bug the review checklist calls out explicitly, and it's plausible in practice since budget holds are a routine occurrence in this daemon.",
+          "severity": "med",
+          "line": 679
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "bus.py already provides `dependents(tid)` (bus.py:153-155), which reads all tasks (any status) and filters by depends_on membership -- exactly the reverse-traversal primitive the extension needs. The spec instead prescribes a bespoke traversal built directly on `bus.read(status=\"queued\", role=\"execute\")`, duplicating logic that already exists and is more restrictive (status-filtered) than the existing helper, which is what produces the held-dependent blind spot above.",
+          "severity": "low",
+          "line": 679
+        },
+        {
+          "path": "orchestrator/critical_path.py",
+          "issue": "'critical_path_s: est_duration_s of the task plus the heaviest downstream chain by est_duration_s' is ambiguous between a proper recursive critical-path sum (own duration + max over children of the child's own critical_path_s, i.e. duration accumulates along the whole chain) versus a shallow one-hop version (own duration + the single heaviest direct child's duration, ignoring grandchildren). A shallow implementation would still satisfy the given acceptance test names in isolation but would not actually rank 'a task that unblocks a longer or heavier chain' correctly for chains deeper than 2 levels, which is the module's stated purpose per P4.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789949639.227148,
+      "pipeline": {
+        "spec_review_at": 1789949515.478135,
+        "spec_review_at_lease": 1789950415.478135,
+        "spec_review_at_done": 1789949515.4834602,
+        "spec_review_held_at": 1789949639.227092
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789949639.850375,
+      "pipeline": {
+        "spec_review_at": 1789949515.478135,
+        "spec_review_at_lease": 1789950415.478135,
+        "spec_review_at_done": 1789949515.4834602,
+        "spec_review_held_at": 1789949639.227092,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789949639.875745,
+      "pipeline": {
+        "spec_review_at": 1789949515.478135,
+        "spec_review_at_lease": 1789950415.478135,
+        "spec_review_at_done": 1789949515.4834602,
+        "spec_review_held_at": 1789949639.227092,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789949639.227148": true
+        }
+      }
+    },
+    {
+      "ts": 1789949643.851428,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by S3 v4 after spec review T-0540 request_changes (dependents visible unless merged or failed, via bus.dependents; critical_path_s recursion pinned); no code was written",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789949515.478135,
+    "spec_review_at_lease": 1789950415.478135,
+    "spec_review_at_done": 1789949515.4834602,
+    "spec_review_held_at": 1789949639.227092,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789949639.227148": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec restricts the tasks-dict extension to `bus.read(status=\"queued\", role=\"execute\")` transitively over depends_on. This codebase treats \"held\" (e.g. hold_reason=\"budget\", handled explicitly via retry_held in dispatch()) as a first-class non-terminal, retryable status, same as \"queued\"/\"running\". explain()'s own definition of downstream_depth/blocked_descendants is 'not merged, done or failed' -- which includes held. A held dependent several hops downstream of a candidate would be invisible to explain() (it's simply absent from the tasks dict), silently undercounting downstream_depth, blocked_descendants and therefore critical_path_s/priority for that candidate's wave order. This is a silent-undercount class of bug the review checklist calls out explicitly, and it's plausible in practice since budget holds are a routine occurrence in this daemon.",
+      "severity": "med",
+      "line": 679
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "bus.py already provides `dependents(tid)` (bus.py:153-155), which reads all tasks (any status) and filters by depends_on membership -- exactly the reverse-traversal primitive the extension needs. The spec instead prescribes a bespoke traversal built directly on `bus.read(status=\"queued\", role=\"execute\")`, duplicating logic that already exists and is more restrictive (status-filtered) than the existing helper, which is what produces the held-dependent blind spot above.",
+      "severity": "low",
+      "line": 679
+    },
+    {
+      "path": "orchestrator/critical_path.py",
+      "issue": "'critical_path_s: est_duration_s of the task plus the heaviest downstream chain by est_duration_s' is ambiguous between a proper recursive critical-path sum (own duration + max over children of the child's own critical_path_s, i.e. duration accumulates along the whole chain) versus a shallow one-hop version (own duration + the single heaviest direct child's duration, ignoring grandchildren). A shallow implementation would still satisfy the given acceptance test names in isolation but would not actually rank 'a task that unblocks a longer or heavier chain' correctly for chains deeper than 2 levels, which is the module's stated purpose per P4.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

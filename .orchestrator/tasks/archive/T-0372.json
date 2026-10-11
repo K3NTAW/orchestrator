@@ -1,0 +1,97 @@
+{
+  "id": "T-0372",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H8: worker packets carry a version hash, base sha and source provenance and never drop an acceptance criterion; bus_events takes role and task filters",
+  "spec": "Build on goal/T-0353. Handover sections 6 and 7. Evidence (scout T-0355): spawn.packet has no hash/version/provenance field; when the packet exceeds its cap the acceptance list is summarized to 5 bullets plus \"N more in task\" (G2 fix round 2), which the handover forbids (objective, acceptance and constraints must never be dropped); bus.events(since, limit) has no role or task filter, so callers read every event.\n1. spawn.packet: the rendered packet starts with one header line \"packet v<hash12> base <sha12> sources pool.toml@<policy_version> gotchas@<gotchas sha12>\" where hash12 is sha256 of the packet body (excluding the header), the base sha is the worktree base commit already computed, policy_version is bus.policy_version() if H1 has landed else a sha of pool.toml (import guarded), and the gotchas sha is over the matched gotcha lines. Provide spawn.packet_meta(task, worktree) returning the same values as a dict for the run record.\n2. Truncation order change: acceptance is never shortened. When the packet exceeds the cap, drop sections in this order until it fits: evidence pointers, decisions, gotchas, symbols, relevant tests, then trim the objective's discovery text; acceptance, base, write scope, read scope, constraints and the verification command always stay complete even if the packet ends above the cap, and the header then adds \"over cap by <n> chars: acceptance kept whole\".\n3. bus.events(since, limit, role=None, task_ids=None): filters applied after seq ordering, seq values unchanged, so a filtered read still advances the same cursor and no event is lost or renumbered; bus_mcp bus_events exposes the two optional parameters and its reply includes next_since (last seq seen, filtered or not) and truncated: true when limit was hit.\nTests: tests/test_spawn.py::test_packet_header_has_hash_base_and_sources, ::test_packet_hash_changes_when_body_changes, ::test_packet_over_cap_keeps_every_acceptance_criterion (a 60-criterion acceptance survives whole; discovery sections drop first); tests/test_bus.py::test_events_role_filter_keeps_seq_and_cursor, ::test_events_truncated_flag_and_next_since. Keep every existing test green (adjust the G2 test that expected the 5-bullet summary); .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0360"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_packet_header_has_hash_base_and_sources, ::test_packet_hash_changes_when_body_changes and ::test_packet_over_cap_keeps_every_acceptance_criterion pass",
+    "tests/test_bus.py::test_events_role_filter_keeps_seq_and_cursor and ::test_events_truncated_flag_and_next_since pass",
+    "no packet rendering path shortens the acceptance list (grep for the 'more in task' summary shows it removed)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/bus_mcp.py",
+    "tests/test_spawn.py",
+    "tests/test_bus.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0372",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/bus_mcp.py",
+        "line": 49,
+        "issue": "bus_events issues two separate, non-atomic queries against the shared sqlite connection (bus.events(since, limit) for `raw`, then bus.events(since, limit, role=..., task_ids=...) for `events`). db() returns one shared autocommit connection with no transaction wrapping these two calls, and other processes (daemon, scouts, executors) write to the same bus concurrently. If a new event is inserted between the two calls, the second (filtered) query can see rows beyond what `raw` examined, so `events` can include entries with seq > next_since. The next poll with since=next_since then redelivers those events, contradicting the code's own comment that callers 'never reread the unfiltered stream.' Fetch once and filter/derive next_since from that single result set instead of querying twice.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789902074.258847,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0372",
+      "claimed_at": 1789902074.2584882
+    },
+    {
+      "ts": 1789902074.260212,
+      "account": "B"
+    },
+    {
+      "ts": 1789902074.297961,
+      "pid": 78315,
+      "account": "B"
+    },
+    {
+      "ts": 1789902266.166519,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/bus_mcp.py",
+            "line": 49,
+            "issue": "bus_events issues two separate, non-atomic queries against the shared sqlite connection (bus.events(since, limit) for `raw`, then bus.events(since, limit, role=..., task_ids=...) for `events`). db() returns one shared autocommit connection with no transaction wrapping these two calls, and other processes (daemon, scouts, executors) write to the same bus concurrently. If a new event is inserted between the two calls, the second (filtered) query can see rows beyond what `raw` examined, so `events` can include entries with seq > next_since. The next poll with since=next_since then redelivers those events, contradicting the code's own comment that callers 'never reread the unfiltered stream.' Fetch once and filter/derive next_since from that single result set instead of querying twice.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789902266.169659,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789902074.2584882,
+  "account": "B",
+  "pid": 78315,
+  "review_verdict": "request_changes"
+}

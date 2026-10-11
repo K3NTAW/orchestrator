@@ -1,0 +1,120 @@
+{
+  "id": "T-0467",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P1b: role-specific review, spec-review and scout packets \u2014 the review prompt receives spec, acceptance, the scoped diff, changed tests and the gate result plus security context only when a security path is touched; spec review receives only spec, acceptance, scope, dependency titles and the existing test files for the scope; scouts receive the exact question, a bounded scope tree, memory titles and the expected output structure; nothing else is injected",
+  "spec": "Phase I P1 (brief .orchestrator/phase-i-program.md, sections review packet, scout packet, spec-review packet). Base goal/T-0445 after P1a (T-0461) merges. Scout facts: spawn.run_worker renders review with complexity, diff, acceptance, security only (spawn.py:514-520) and .orchestrator/prompts/review.md has no {{spec}} or {{gate}} placeholder; spec-review and scout prompts are rendered from .orchestrator/prompts/<role>.md via spawn.render (spawn.py:75-93); the H8 packet header exists in spawn.packet (spawn.py:329-344).\n1. spawn.review_packet(task, reviewed) -> str, deterministic, with the H8-style header (version hash, base sha, sources): sections in order: spec (of the reviewed task), acceptance (never trimmed), scope, diff (the scoped diff, the existing bounded form), changed tests (paths under tests/ in the diff and the acceptance-named test ids with present/missing), gate (pipeline.gated_at, gate_attempts, gate_reds, first_green_at and the last failure text head when red), security (only when a scope path matches [review].security_paths or a semantic trigger fires: the matched globs and the checklist pointer), fix-round context (only for a fix round: the parent review's comments). Nothing else: no goal history, no other tasks' results, no memory notes. review.md gains {{packet}} and drops the loose {{spec}}-less layout; run_worker passes packet=review_packet(...). Cap about 2,000 tokens with visible truncation markers; acceptance and gate never trimmed.\n2. spawn.spec_review_packet(task) -> str: spec, acceptance, scope, depends_on (id and title), existing test files for each scope path (tests/test_<module>.py present or not), complexity and tier. spec-review.md renders {{packet}} only.\n3. spawn.scout_packet(task) -> str: the question (spec), acceptance as the expected output structure, scope (a bounded tree: the scope paths and their direct children, capped at 60 entries), memory titles (recall index titles only, up to 10, from the memory skill's index, no bodies), the result contract (bus_post_result fields and the 1,500-token limit). scout.md renders {{packet}}.\n4. Every worker row logs packet_meta (chars, est_tokens, hash, version, role) for these roles too (spawn.run_claude already logs packet_meta; make sure the meta describes the new packets).\nTests tests/test_spawn.py: test_review_packet_has_spec_acceptance_diff_tests_gate_in_order, test_review_packet_security_section_only_on_security_path, test_review_packet_excludes_other_tasks_and_memory (a fixture bus with another finished task and a gotcha entry: neither text appears), test_spec_review_packet_minimal_fields, test_scout_packet_bounded_tree_and_memory_titles_only, test_role_prompts_have_no_unfilled_placeholder (render each role prompt with its packet and assert no \"{{\"), test_packet_meta_logged_for_review_and_scout. Existing tests green; .claude/hooks/tests-green.sh exits 0; commit with the task id including every named test; report sha and failures only.",
+  "inputs": [
+    "T-0462"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_review_packet_has_spec_acceptance_diff_tests_gate_in_order, test_review_packet_security_section_only_on_security_path, test_review_packet_excludes_other_tasks_and_memory, test_spec_review_packet_minimal_fields, test_scout_packet_bounded_tree_and_memory_titles_only, test_role_prompts_have_no_unfilled_placeholder, test_packet_meta_logged_for_review_and_scout pass",
+    "review.md, spec-review.md and scout.md render {{packet}} built by review_packet, spec_review_packet and scout_packet; acceptance and gate sections are never trimmed; unrelated tasks and memory bodies never appear",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    ".orchestrator/prompts/review.md",
+    ".orchestrator/prompts/spec-review.md",
+    ".orchestrator/prompts/scout.md",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0467",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 433,
+        "issue": "review_packet()'s '## security' section is gated only on security_paths glob matches against scope and a hand-rolled semantic regex on spec+diff text; it never reads task complexity. daemon.py's _open_reviews() (lines ~774-776) and gate() docstring (lines ~799-804) explicitly bump a review task's complexity to SECURITY_CHECKLIST_COMPLEXITY=7 specifically because, per their own comment, 'spawn.py's run_worker hardcodes the checklist decision at complexity >= 7' for the three fail-closed review reasons: security_paths match, diff_unavailable, and security_paths_empty. review_packet ignores complexity entirely, so that bump is now a no-op. In the diff_unavailable and security_paths_empty cases specifically, security_globs can be empty/irrelevant and the diff/scope may not literally contain the diff text needed for the semantic match, so the checklist can silently be omitted from exactly the fail-closed cases daemon.py was designed to guarantee it for. The semantic regex is also weaker than daemon.py's own DEFAULT_SEMANTIC_PATTERNS (e.g. its 'authorization' pattern matches bearer|authenticate|authorize|permission), since \\bauth\\b/\\bcrypt\\b won't match 'authenticate', 'authorization', or 'encryption' due to word-boundary rules \u2014 duplicating and weakening logic that already exists in daemon.py instead of reusing it.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 452,
+        "issue": "When the joined body exceeds 8000 chars, the diff section (already run through bounded_diff, which appends its own 'Diffstat:'-prefixed, hint-suffixed truncation) is re-wrapped with bounded_text using a cap derived from the pre-trim body length (max(500, 12000-len(body))). Nesting a second, differently-formatted truncation (bounded_text's naive char cap) around an already-truncated bounded_diff string can cut into or duplicate the 'expand with:' hint, producing a malformed or misleading diff section. No test exercises this path (only the ~4000-char first-pass cap is covered by test_review_prompt_diff_is_bounded), so this is untested and can surface with realistic-sized acceptance/scope/gate/fix-round-context sections.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 87,
+        "issue": "render()'s new fallback ('packet' not in kw for review/spec-review/scout builds an ad-hoc packet from raw kwargs) is dead in production \u2014 every real call site (run_worker) now always passes a pre-built packet \u2014 and exists only to keep three untouched legacy tests (test_templates_fill, test_scout_prompt_names_base, test_render_does_not_rebound_diff) passing. It bypasses all the new security-section, test-presence, gate, and bounding logic in review_packet/spec_review_packet/scout_packet, so if any future caller reintroduces kwarg-style calls it would silently produce an unbounded, unstructured, security-unaware prompt.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789927716.917823,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0467",
+      "claimed_at": 1789927716.9175282
+    },
+    {
+      "ts": 1789927716.918699,
+      "account": "B"
+    },
+    {
+      "ts": 1789927716.951952,
+      "pid": 11682,
+      "account": "B"
+    },
+    {
+      "ts": 1789928173.609731,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 433,
+            "issue": "review_packet()'s '## security' section is gated only on security_paths glob matches against scope and a hand-rolled semantic regex on spec+diff text; it never reads task complexity. daemon.py's _open_reviews() (lines ~774-776) and gate() docstring (lines ~799-804) explicitly bump a review task's complexity to SECURITY_CHECKLIST_COMPLEXITY=7 specifically because, per their own comment, 'spawn.py's run_worker hardcodes the checklist decision at complexity >= 7' for the three fail-closed review reasons: security_paths match, diff_unavailable, and security_paths_empty. review_packet ignores complexity entirely, so that bump is now a no-op. In the diff_unavailable and security_paths_empty cases specifically, security_globs can be empty/irrelevant and the diff/scope may not literally contain the diff text needed for the semantic match, so the checklist can silently be omitted from exactly the fail-closed cases daemon.py was designed to guarantee it for. The semantic regex is also weaker than daemon.py's own DEFAULT_SEMANTIC_PATTERNS (e.g. its 'authorization' pattern matches bearer|authenticate|authorize|permission), since \\bauth\\b/\\bcrypt\\b won't match 'authenticate', 'authorization', or 'encryption' due to word-boundary rules \u2014 duplicating and weakening logic that already exists in daemon.py instead of reusing it.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 452,
+            "issue": "When the joined body exceeds 8000 chars, the diff section (already run through bounded_diff, which appends its own 'Diffstat:'-prefixed, hint-suffixed truncation) is re-wrapped with bounded_text using a cap derived from the pre-trim body length (max(500, 12000-len(body))). Nesting a second, differently-formatted truncation (bounded_text's naive char cap) around an already-truncated bounded_diff string can cut into or duplicate the 'expand with:' hint, producing a malformed or misleading diff section. No test exercises this path (only the ~4000-char first-pass cap is covered by test_review_prompt_diff_is_bounded), so this is untested and can surface with realistic-sized acceptance/scope/gate/fix-round-context sections.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 87,
+            "issue": "render()'s new fallback ('packet' not in kw for review/spec-review/scout builds an ad-hoc packet from raw kwargs) is dead in production \u2014 every real call site (run_worker) now always passes a pre-built packet \u2014 and exists only to keep three untouched legacy tests (test_templates_fill, test_scout_prompt_names_base, test_render_does_not_rebound_diff) passing. It bypasses all the new security-section, test-presence, gate, and bounding logic in review_packet/spec_review_packet/scout_packet, so if any future caller reintroduces kwarg-style calls it would silently produce an unbounded, unstructured, security-unaware prompt.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789928173.611827,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789927716.9175282,
+  "account": "B",
+  "pid": 11682,
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,96 @@
+{
+  "id": "T-0377",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H6 fix round 1: the new acceptance and daemon tests leak module state into the rest of the suite (bus KeyErrors, worktree added inside the task worktree, merged_into KeyError); restore sandbox isolation so the full gate is green (gate_red on T-0359)",
+  "spec": "STEP 0: the worktree must contain d362503 (T-0359, H6) in git log; never drop or amend it.\nGate red on T-0359, reproduced on a clean external run of .claude/hooks/tests-green.sh (10 errors, deterministic, the base goal/T-0353 head is green):\nERROR test_bus.Bus.test_db_leaves_no_unclosed_connection, test_depends_on, test_lifecycle_and_rules, test_read_compact_rows, test_read_full_shape_unchanged: KeyError on the fixture's own task id (bus.get reads a different tasks dir than create_task wrote; ids differ per run, so a module global such as bus STATE/TASKS or spawn.ROOT is left patched by an earlier test).\nERROR test_cli.Cli.test_scorecard_table_and_json, test_status_plain_and_json: KeyError on a task id (same cause).\nERROR test_daemon.Daemon.test_ancestor_merged_task_skips_gate_and_review: KeyError 'merged_into' (the new gate path indexes a key that fixture tasks may lack; use .get).\nERROR test_merge.MergeQueue.test_checkout_ff_when_root_has_target_checked_out, test_checkout_stale_when_root_has_conflicting_local_change: RuntimeError git worktree add <task worktree>/wt/T-xxxx (spawn.ROOT or the harness ROOT points at the checked-out worktree instead of the sandbox, again leaked module state); plus one RuntimeError boom traceback from another test's thread.\nRequired: (1) tests/test_acceptance.py and the new tests in tests/test_daemon.py use the repository's per-test sandbox harness (tests/_harness.py, the same base class or fixtures the neighbouring tests use) and never patch bus, spawn, daemon or STATE globals without restoring them in tearDown or a context manager; no test may create tasks outside the sandbox; the acceptance module must not cache ROOT or STATE at import time. (2) daemon.gate's missing-tests branch reads task fields with .get and tolerates tasks without a worktree (skip the check, let the normal path run). (3) Run the suite twice in a row from the worktree root (.claude/hooks/tests-green.sh . both times) and confirm exit 0 both times, then run only tests.test_bus and tests.test_merge after tests.test_acceptance and tests.test_daemon in one unittest invocation to prove ordering independence. Keep the five T-0359 acceptance tests green. git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0373"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows d362503 below your commit",
+    "tests/test_acceptance.py::test_named_tests_parses_full_and_shorthand_ids, ::test_missing_tests_detects_absent_definitions and tests/test_daemon.py::test_gate_red_when_acceptance_test_missing, ::test_gate_runs_suite_when_named_tests_exist, ::test_auto_fix_round_fires_on_missing_test_ids still pass",
+    "python -m unittest tests.test_acceptance tests.test_daemon tests.test_bus tests.test_merge tests.test_cli in that order exits 0",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/acceptance.py",
+    "orchestrator/daemon.py",
+    "tests/test_acceptance.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0377",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 782,
+        "issue": "gate()'s worktree guard was refactored: the `not t.get(\"worktree\")` early-continue was dropped, but the unconditional `subprocess.run([str(merge.TESTS_GREEN), worktree], ...)` after the new `if worktree:` block still runs when worktree is falsy, passing None as a subprocess arg. This raises TypeError outside gate()'s try/except, which tick() only catches per-stage \u2014 so one execute/done task with no worktree aborts gate() entirely for that tick (and every tick after, since it never gets gated_at), starving all other pending merges/reviews.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789902780.4525042,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0377",
+      "claimed_at": 1789902780.45215
+    },
+    {
+      "ts": 1789902780.453696,
+      "account": "B"
+    },
+    {
+      "ts": 1789902780.486086,
+      "pid": 58420,
+      "account": "B"
+    },
+    {
+      "ts": 1789902970.4057531,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 782,
+            "issue": "gate()'s worktree guard was refactored: the `not t.get(\"worktree\")` early-continue was dropped, but the unconditional `subprocess.run([str(merge.TESTS_GREEN), worktree], ...)` after the new `if worktree:` block still runs when worktree is falsy, passing None as a subprocess arg. This raises TypeError outside gate()'s try/except, which tick() only catches per-stage \u2014 so one execute/done task with no worktree aborts gate() entirely for that tick (and every tick after, since it never gets gated_at), starving all other pending merges/reviews.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789902970.407688,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789902780.45215,
+  "account": "B",
+  "pid": 58420,
+  "review_verdict": "request_changes"
+}

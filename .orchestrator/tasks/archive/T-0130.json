@@ -1,0 +1,111 @@
+{
+  "id": "T-0130",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O9: daemon re-gates an orphaned executor's committed work instead of redispatching it",
+  "spec": "Why: spawn.run_worker runs in a daemon thread of the MCP server (mcp.py:20). When the Planner session restarts, the `claude -p` child (spawn.py Popen) outlives the server, finishes and commits in its worktree, but the thread that would post its result is gone. daemon.tick() then sees a dead pid and requeues the task as \"process died; requeued\", which would redo finished work on top of the executor's commit (gotchas.md 2026-09-18: T-0115, commit abc3f56 sat in wt/T-0115 while the task went back to queued; the Planner reclaimed it by hand).\n\nChange orchestrator/daemon.py tick()'s requeue loop. For a running task with a dead pid older than 60 s: if role != \"execute\" or it has no worktree directory \u2192 requeue as today. For an execute task with an existing worktree: compute base = `git merge-base HEAD goal/<parent>` in the worktree (fall back to the parentless case: base = the branch the worktree was cut from, via `git rev-parse task/<id>@{upstream}` when present, else skip to requeue); ahead = `git rev-list --count <base>..HEAD` in the worktree; dirty = `git status --porcelain` (excluding untracked files that match .gitignore, i.e. plain --porcelain) non-empty. Then: ahead > 0 and not dirty \u2192 bus.post_result(task_id, {\"summary\": \"executor exited without posting a result; daemon found commit <sha> ahead of <base[:8]> in the worktree and re-gated it\", \"commit\": sha, \"executed_by\": task.executor or \"claude:<tier>\", \"orphaned\": true, \"provenance\": [\"repo\"]}, \"done\") so gate() runs tests-green and the review as usual; log one stderr line. ahead > 0 and dirty \u2192 bus.update(status=\"held\", hold_reason=\"orphaned_dirty_worktree\", pid=None, resume_hint={\"commit\": sha, \"dirty\": first 20 status lines}) and notify(...) so the Planner decides. ahead == 0 \u2192 requeue as today. Factor this into a helper `reconcile_dead(task) -> str` returning \"requeued\" | \"regated\" | \"held\" so it is unit-testable without a live pid. Keep the 60 s grace.\n\nTests in tests/test_daemon.py (harness fixtures; see how existing daemon tests fake tasks and worktrees): (1) execute task, worktree with one commit ahead of the goal branch and clean \u2192 after tick the task is done with result.orphaned true and result.commit == sha; (2) same with an uncommitted modification \u2192 held with hold_reason orphaned_dirty_worktree and the resume_hint names the commit; (3) execute task whose worktree has no commit ahead \u2192 queued with reason \"process died; requeued\"; (4) scout task with dead pid \u2192 queued (unchanged path). Finish with: summary, files changed, failures-only test output.",
+  "inputs": [],
+  "acceptance": [
+    "tick() posts a done result with orphaned true and the commit sha for an execute task whose dead worker left a clean worktree with commits ahead of the base; test 1",
+    "A dirty worktree with commits ahead holds the task with hold_reason orphaned_dirty_worktree and a resume_hint naming the commit; test 2",
+    "No commits ahead, or a non-execute role, still requeues with reason process died; requeued; tests 3 and 4",
+    "reconcile_dead(task) exists and returns requeued|regated|held",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the two scoped files change"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 2100,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0130",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0130`.\n\n**Summary:** Added `reconcile_dead(task)` in `orchestrator/daemon.py`, used by `tick()`'s dead-pid requeue loop. For a dead task that isn't `execute` or has no worktree, it requeues as before. For an execute task with a worktree: computes `base` via `git merge-base HEAD goal/<parent>` (falling back to `task/<id>@{upstream}`, else requeues), counts commits ahead, and checks `git status --porcelain`. Clean + ahead \u2192 `bus.post_result(..., \"done\")` with `orphaned: true` and the commit sha, so `gate()` re-gates it normally. Dirty + ahead \u2192 holds with `hold_reason=orphaned_dirty_worktree` and a `resume_hint` naming the commit and first 20 dirty lines, plus a notify. No commits ahead \u2192 requeues as before.\n\n**Files changed:** `orchestrator/daemon.py`, `tests/test_daemon.py` (only the two scoped paths).\n\n**Tests:** `uv run python -m unittest discover -q tests` \u2014 121 tests, all green (no failures). `.claude/hooks/tests-green.sh` also exits 0. (Note: the spec named `scripts/tests_green.sh`, which doesn't exist in this repo \u2014 the actual gate script is `.claude/hooks/tests-green.sh`; I ran that instead.)",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789736544.719616,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789736545.646423,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0130",
+      "claimed_at": 1789736545.645911
+    },
+    {
+      "ts": 1789736545.659085,
+      "pid": 7404,
+      "account": "A"
+    },
+    {
+      "ts": 1789736906.2554839,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0130`.\n\n**Summary:** Added `reconcile_dead(task)` in `orchestrator/daemon.py`, used by `tick()`'s dead-pid requeue loop. For a dead task that isn't `execute` or has no worktree, it requeues as before. For an execute task with a worktree: computes `base` via `git merge-base HEAD goal/<parent>` (falling back to `task/<id>@{upstream}`, else requeues), counts commits ahead, and checks `git status --porcelain`. Clean + ahead \u2192 `bus.post_result(..., \"done\")` with `orphaned: true` and the commit sha, so `gate()` re-gates it normally. Dirty + ahead \u2192 holds with `hold_reason=orphaned_dirty_worktree` and a `resume_hint` naming the commit and first 20 dirty lines, plus a notify. No commits ahead \u2192 requeues as before.\n\n**Files changed:** `orchestrator/daemon.py`, `tests/test_daemon.py` (only the two scoped paths).\n\n**Tests:** `uv run python -m unittest discover -q tests` \u2014 121 tests, all green (no failures). `.claude/hooks/tests-green.sh` also exits 0. (Note: the spec named `scripts/tests_green.sh`, which doesn't exist in this repo \u2014 the actual gate script is `.claude/hooks/tests-green.sh`; I ran that instead.)",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789736973.8595068,
+      "pipeline": {
+        "gated_at": 1789736973.859313
+      }
+    },
+    {
+      "ts": 1789737191.019469,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789737207.431225,
+      "pipeline": {
+        "gated_at": 1789736973.859313,
+        "review_held_at": 1789737207.431127
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789738940.834392,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "hold_reason": null,
+      "merged_via": "T-0135 (rebased fix round; ancestry lost, marked by Planner)"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789736545.645911,
+  "pid": 7404,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789736973.859313,
+    "review_held_at": 1789737207.431127
+  },
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0073",
+  "merged_via": "T-0135 (rebased fix round; ancestry lost, marked by Planner)"
+}

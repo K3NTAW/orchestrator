@@ -1,0 +1,250 @@
+{
+  "id": "T-0321",
+  "parent": "T-0260",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: G7 v3: automatic routine fix rounds with a lineage-wide round cap, escalation keyed to the hold instance, placed after merge_reviewed and before the autonomous Planner block (spec reviews T-0293 and T-0312 folded in)",
+  "spec": "Replaces T-0296 (spec review T-0312) and T-0272 (T-0293). Build on goal/T-0260 daemon.py after G6 v4 (stage leases, clear_stage) and planner_runs.py. Today a held task waits for the Planner to write a fix-round spec and to mark the original merged afterwards; held tasks carry hold_reason and resume_hint (tests-green failures, rebase conflicts), review tasks carry result.comments (path, line, issue, severity), constraints.fix_round_for makes spawn.base_for cut the fix worktree from the held task's branch.\nDesign:\n1. Lineage: root(task) walks constraints.fix_round_for up to the task without it. lineage(root) = root plus every task whose root() is that root. auto_fix_round(pool) runs in tick() after the dispatch, gate and merge_reviewed loop and before the autonomous Planner block (a task held this tick is picked up the same tick). For each held execute task: skip when any non-failed task in its lineage carries fix_round_for pointing at this task (a fix round already exists); routine when hold_reason is gate_red and resume_hint.failures names at least one FAIL or ERROR test id, or hold_reason starts 'review request_changes' and every comment of that review has a path inside the task scope; and the number of tasks in the lineage with constraints.auto_round set is below [daemon].auto_fix_rounds (pool.toml, default 2), counted across the whole chain. Otherwise escalate: hold instance key = the timestamp of the latest event that set status held on this task (fallback: review_held_at or gated_at); stamp pipeline.auto_fix_skipped[<key>] = now under the lock and notify once per key; a later, different hold on the same task gets its own key and its own notification.\n2. The fix task: title 'fix round <n>: <root title>' with n = lineage auto rounds + 1; spec rendered from a new .orchestrator/prompts/fix-round.md (root id and title, held task id, the failed acceptance criteria: those mentioning a failing test id, else all; failure text capped 3,000 chars in a fenced block labelled data; review comments as path:line issue lines; branch and head sha; keep every original criterion); same scope, complexity, tier and constraints plus fix_round_for = the held task id and auto_round = n; inputs = [held task, review id if any]; created under the bus lock, one per hold key (dedupe on the key).\n3. planner_runs.decision_points() skips a held task when any non-failed task with constraints.fix_round_for == its id exists, so [planner].autonomous never launches a Planner for a hold the daemon handled; when auto_fix_round escalates, the decision point stays available.\n4. Reconciliation: in gate() direct-merge and merge_reviewed(), after a task with fix_round_for merges, walk the chain to the root setting each ancestor status done, merged_into = target, merged_via = 'fix round <fix id> <sha>', hold_reason None.\n5. README Pipeline 'Automatic fix rounds' paragraph (routine/escalate rule, lineage cap, hold-key notification, placement); pool.toml [daemon] auto_fix_rounds = 2.\nTests in tests/test_daemon.py: test_auto_fix_round_on_gate_red, test_auto_fix_round_on_review_comments_in_scope, test_no_auto_fix_when_comments_outside_scope, test_lineage_cap_across_chained_fix_rounds (fix round of a fix round stops at the cap), test_escalation_notifies_once_per_hold_key (two ticks one notify; a new hold on the same task notifies again), test_same_tick_pickup (a task held during gate() gets its fix round in the same tick), test_fix_round_merge_reconciles_chain; tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists.",
+  "inputs": [
+    "T-0320"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_auto_fix_round_on_gate_red, ::test_auto_fix_round_on_review_comments_in_scope, ::test_no_auto_fix_when_comments_outside_scope, ::test_lineage_cap_across_chained_fix_rounds, ::test_escalation_notifies_once_per_hold_key, ::test_same_tick_pickup, ::test_fix_round_merge_reconciles_chain pass",
+    "tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists passes",
+    "the generated fix task passes .claude/hooks/require-acceptance.sh and carries constraints.fix_round_for and auto_round",
+    "README and pool.toml document the rule, the lineage cap, the hold-key notification and the placement",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_planner_runs.py",
+    "README.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0321",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Design point 2 doesn't say the fix-round task must carry over parent=<held task's parent>. bus.create_task defaults parent=None. merge.merge() targets f\"goal/{parent}\" or falls back to \"integration\" when parent is unset, and planner_runs.decision_points()'s children_by_parent grouping (keyed on parent) would never see the fix round as a goal child, so 'closable' can fire while it's still in flight and the merge lands on the wrong branch.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Reconciliation is scoped to 'gate() direct-merge and merge_reviewed()' only, but sweep_leases() has a third, independent merge.merge() call for an expired gated_at lease with reviews_expected==0 (around line 719-723). A fix round merged via that lease-retry path would skip chain reconciliation entirely, reproducing the documented gotcha ('a rebased fix round hides the original task from already_merged', gotchas.md 2026-09-18). None of the listed tests exercise this path.",
+        "severity": "high",
+        "line": 719
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The gate_red 'routine' rule requires finding a FAIL/ERROR test id inside resume_hint.failures, but that field is raw grep output from tests-green.sh across pytest/npm/tsc, not a structured test-id list; the spec never defines the extraction rule, risking systematic misclassification for non-pytest failures.",
+        "severity": "med",
+        "line": 565
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "hold_reason for a review hold only names the first rejected review (rejected[0]); at complexity>=7 two reviews can both reject. If the routine scope-check only inspects the review named in hold_reason instead of every rejected review, an out-of-scope comment on the un-named second review is missed, wrongly classifying an unsafe hold as routine.",
+        "severity": "med",
+        "line": 651
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The new daemon-side hold-instance key (latest held event, fallback review_held_at/gated_at) duplicates planner_runs._held_at(), an existing, tested implementation of the same concept but with a different fallback list (review_held_at/spec_review_held_at). Two divergent implementations of 'what identifies this hold instance' risk drifting apart.",
+        "severity": "low",
+        "line": 92
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "No stale()/goal-closed guard before generating an auto fix round, unlike dispatch()/gate()/merge_reviewed() which all skip a task whose parent goal is already done.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add explicit field 'parent = held task's parent' to the fix-round task's creation fields in design point 2.",
+      "Either centralize the chain-reconciliation call inside report_merge() (shared by all three merge.merge() call sites: gate(), merge_reviewed(), and sweep_leases()'s gated_at lease-expiry retry) or explicitly list the sweep_leases() call site as a third insertion point, with a test covering it.",
+      "Define precisely how a 'failing test id' is extracted from resume_hint.failures (or scope the routine gate_red rule to pytest-style 'FAILED <nodeid>' lines only and document that other runners always escalate).",
+      "Specify that the review-comment scope check must consider every rejected review of the held task (not just the one named in hold_reason), when reviews_expected > 1.",
+      "Reuse planner_runs._held_at() for the hold-instance key instead of reimplementing similar fallback logic in daemon.py."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789849815.119492,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0321",
+      "claimed_at": 1789849815.119116
+    },
+    {
+      "ts": 1789849815.121301,
+      "account": "B"
+    },
+    {
+      "ts": 1789849815.132189,
+      "pid": 98432,
+      "account": "B"
+    },
+    {
+      "ts": 1789850181.068245,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Design point 2 doesn't say the fix-round task must carry over parent=<held task's parent>. bus.create_task defaults parent=None. merge.merge() targets f\"goal/{parent}\" or falls back to \"integration\" when parent is unset, and planner_runs.decision_points()'s children_by_parent grouping (keyed on parent) would never see the fix round as a goal child, so 'closable' can fire while it's still in flight and the merge lands on the wrong branch.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Reconciliation is scoped to 'gate() direct-merge and merge_reviewed()' only, but sweep_leases() has a third, independent merge.merge() call for an expired gated_at lease with reviews_expected==0 (around line 719-723). A fix round merged via that lease-retry path would skip chain reconciliation entirely, reproducing the documented gotcha ('a rebased fix round hides the original task from already_merged', gotchas.md 2026-09-18). None of the listed tests exercise this path.",
+            "severity": "high",
+            "line": 719
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The gate_red 'routine' rule requires finding a FAIL/ERROR test id inside resume_hint.failures, but that field is raw grep output from tests-green.sh across pytest/npm/tsc, not a structured test-id list; the spec never defines the extraction rule, risking systematic misclassification for non-pytest failures.",
+            "severity": "med",
+            "line": 565
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "hold_reason for a review hold only names the first rejected review (rejected[0]); at complexity>=7 two reviews can both reject. If the routine scope-check only inspects the review named in hold_reason instead of every rejected review, an out-of-scope comment on the un-named second review is missed, wrongly classifying an unsafe hold as routine.",
+            "severity": "med",
+            "line": 651
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The new daemon-side hold-instance key (latest held event, fallback review_held_at/gated_at) duplicates planner_runs._held_at(), an existing, tested implementation of the same concept but with a different fallback list (review_held_at/spec_review_held_at). Two divergent implementations of 'what identifies this hold instance' risk drifting apart.",
+            "severity": "low",
+            "line": 92
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "No stale()/goal-closed guard before generating an auto fix round, unlike dispatch()/gate()/merge_reviewed() which all skip a task whose parent goal is already done.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add explicit field 'parent = held task's parent' to the fix-round task's creation fields in design point 2.",
+          "Either centralize the chain-reconciliation call inside report_merge() (shared by all three merge.merge() call sites: gate(), merge_reviewed(), and sweep_leases()'s gated_at lease-expiry retry) or explicitly list the sweep_leases() call site as a third insertion point, with a test covering it.",
+          "Define precisely how a 'failing test id' is extracted from resume_hint.failures (or scope the routine gate_red rule to pytest-style 'FAILED <nodeid>' lines only and document that other runners always escalate).",
+          "Specify that the review-comment scope check must consider every rejected review of the held task (not just the one named in hold_reason), when reviews_expected > 1.",
+          "Reuse planner_runs._held_at() for the hold-instance key instead of reimplementing similar fallback logic in daemon.py."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789850181.0709078,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Design point 2 doesn't say the fix-round task must carry over parent=<held task's parent>. bus.create_task defaults parent=None. merge.merge() targets f\"goal/{parent}\" or falls back to \"integration\" when parent is unset, and planner_runs.decision_points()'s children_by_parent grouping (keyed on parent) would never see the fix round as a goal child, so 'closable' can fire while it's still in flight and the merge lands on the wrong branch.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Reconciliation is scoped to 'gate() direct-merge and merge_reviewed()' only, but sweep_leases() has a third, independent merge.merge() call for an expired gated_at lease with reviews_expected==0 (around line 719-723). A fix round merged via that lease-retry path would skip chain reconciliation entirely, reproducing the documented gotcha ('a rebased fix round hides the original task from already_merged', gotchas.md 2026-09-18). None of the listed tests exercise this path.",
+          "severity": "high",
+          "line": 719
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The gate_red 'routine' rule requires finding a FAIL/ERROR test id inside resume_hint.failures, but that field is raw grep output from tests-green.sh across pytest/npm/tsc, not a structured test-id list; the spec never defines the extraction rule, risking systematic misclassification for non-pytest failures.",
+          "severity": "med",
+          "line": 565
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "hold_reason for a review hold only names the first rejected review (rejected[0]); at complexity>=7 two reviews can both reject. If the routine scope-check only inspects the review named in hold_reason instead of every rejected review, an out-of-scope comment on the un-named second review is missed, wrongly classifying an unsafe hold as routine.",
+          "severity": "med",
+          "line": 651
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The new daemon-side hold-instance key (latest held event, fallback review_held_at/gated_at) duplicates planner_runs._held_at(), an existing, tested implementation of the same concept but with a different fallback list (review_held_at/spec_review_held_at). Two divergent implementations of 'what identifies this hold instance' risk drifting apart.",
+          "severity": "low",
+          "line": 92
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "No stale()/goal-closed guard before generating an auto fix round, unlike dispatch()/gate()/merge_reviewed() which all skip a task whose parent goal is already done.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789849815.119116,
+  "account": "B",
+  "pid": 98432,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Design point 2 doesn't say the fix-round task must carry over parent=<held task's parent>. bus.create_task defaults parent=None. merge.merge() targets f\"goal/{parent}\" or falls back to \"integration\" when parent is unset, and planner_runs.decision_points()'s children_by_parent grouping (keyed on parent) would never see the fix round as a goal child, so 'closable' can fire while it's still in flight and the merge lands on the wrong branch.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Reconciliation is scoped to 'gate() direct-merge and merge_reviewed()' only, but sweep_leases() has a third, independent merge.merge() call for an expired gated_at lease with reviews_expected==0 (around line 719-723). A fix round merged via that lease-retry path would skip chain reconciliation entirely, reproducing the documented gotcha ('a rebased fix round hides the original task from already_merged', gotchas.md 2026-09-18). None of the listed tests exercise this path.",
+      "severity": "high",
+      "line": 719
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The gate_red 'routine' rule requires finding a FAIL/ERROR test id inside resume_hint.failures, but that field is raw grep output from tests-green.sh across pytest/npm/tsc, not a structured test-id list; the spec never defines the extraction rule, risking systematic misclassification for non-pytest failures.",
+      "severity": "med",
+      "line": 565
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "hold_reason for a review hold only names the first rejected review (rejected[0]); at complexity>=7 two reviews can both reject. If the routine scope-check only inspects the review named in hold_reason instead of every rejected review, an out-of-scope comment on the un-named second review is missed, wrongly classifying an unsafe hold as routine.",
+      "severity": "med",
+      "line": 651
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The new daemon-side hold-instance key (latest held event, fallback review_held_at/gated_at) duplicates planner_runs._held_at(), an existing, tested implementation of the same concept but with a different fallback list (review_held_at/spec_review_held_at). Two divergent implementations of 'what identifies this hold instance' risk drifting apart.",
+      "severity": "low",
+      "line": 92
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "No stale()/goal-closed guard before generating an auto fix round, unlike dispatch()/gate()/merge_reviewed() which all skip a task whose parent goal is already done.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

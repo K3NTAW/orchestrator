@@ -1,0 +1,741 @@
+{
+  "id": "T-1677",
+  "created_at": 1791317901.422681,
+  "parent": "T-1667",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: v3 watchdog: restart dead daemons, report spawn failures and stalled queues; resolve the claude CLI without PATH",
+  "spec": "Stall watchdog and the PATH root cause.\n\nRoot cause first: worker spawns run the `claude` CLI found on the daemon's PATH; a daemon started from a shell without the\nHomebrew bin dir failed every spawn with \"claude CLI not found on PATH\" (luna-inbox review T-0599, 2026-10-06).\n1. Resolve the CLI once per spawn: shutil.which(\"claude\") on PATH, else the first existing of\n   /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.local/bin/claude, ~/.claude/local/claude; pass the absolute path.\n   Find every place that spawns claude (grep orchestrator/ for \"claude\" in subprocess argv) and route them through one helper.\n2. New orchestrator/watchdog.py and CLI `orchestrator watchdog [--once] [--install-launchd]`, machine level:\n   - Repos to watch: every repo with a .orchestrator/daemon.lock known to the machine registry (~/.orchestrator-machine,\n     orchestrator/machine.py) or listed in [watchdog].repos of the orchestrator's pool.toml.\n   - Every 5 minutes per repo: (a) daemon alive = its daemon.lock is held (fcntl test, no write); if not and the repo has\n     queued/running/held tasks or an open goal -> start `uv run orchestrator daemon` with ORCH_ROOT=<repo> and a PATH that\n     includes the Homebrew bin dir, log to <repo>/.orchestrator/runs/daemon-<ts>.log, notify once;\n     (b) a task \"running\" for more than 2x its timeout_s with no live worker pid -> let the daemon's reconcile_dead handle it\n     if the daemon is alive, else count it as stalled; (c) spawn failures in the last 30 minutes of bus events\n     (\"not found on PATH\", spawn error) -> notify once with the error; (d) nothing dispatched, gated or merged for 60 min\n     while ready tasks exist and accounts are not cooling -> notify once \"queue stalled\".\n   - Notifications through notify.notify_once with keys per repo+condition, so each condition is reported once until it clears.\n   - --install-launchd prints (does not write) a LaunchAgent plist that runs `orchestrator watchdog` every 300 s, and the\n     two commands the human runs to load it; installing it is the human's step.\n3. The machine registry gains the repo path when a daemon acquires its lock (machine.py), so new repos are watched automatically.\nTests tests/test_watchdog.py (temp repos, fake clock, no real daemons: patch the start function): test_claude_resolved_without_path_entry,\ntest_restarts_dead_daemon_with_work, test_no_restart_without_work, test_reports_spawn_failure_once, test_reports_stalled_queue_once,\ntest_registry_adds_repo_on_lock, test_install_launchd_prints_only.\n\n\nAMENDMENTS from spec review T-1672 (v3). Where they differ from the text above, the amendments win.\nW1 Registry: add `register_repo(path)` and `repos()` to orchestrator/machine.py storing ~/.orchestrator-machine/repos.json\n   (under the existing machine lock). Call register_repo from daemon.acquire_lock right after the lock is taken\n   (orchestrator/daemon.py is in scope for this one call). [watchdog].repos in the orchestrator's pool.toml adds extra paths.\nW2 Watchdog notifications: its own dedupe file ~/.orchestrator-machine/watchdog-state.json, keyed \"<repo>:<condition>\",\n   storing first_seen and notified_at; a condition is reported once and again only after it cleared and came back.\n   Send via notify.notify (not notify_once). The watchdog never writes to any repo's bus.\nW3 Resolver everywhere: one helper orchestrator/claude_cli.py `resolve() -> str | None` used by spawn.py (both the which\n   check ~1336 and the Popen ~1365 path), goals.py ~350 and planner_shadow.py ~33; add those three files to scope. If no\n   candidate exists, keep the existing hold but with the reason \"claude CLI not found; looked in: <list>\".\nW4 Lock probe: open daemon.lock with os.open(path, os.O_RDONLY) (create nothing, truncate nothing); flock LOCK_SH|LOCK_NB;\n   if it succeeds the daemon is dead: release immediately, then start the daemon and, before notifying, confirm within 20 s\n   that the lock is held by the new daemon. Missing lock file = never had a daemon: only start it if the repo is registered.\nW5 Data for (b) and (d): read tasks from <repo>/.orchestrator/tasks/*.json directly (read-only). Running too long:\n   status running, now - pipeline.dispatched_at > 2 * constraints.timeout_s (defaults 900), and the daemon is dead.\n   Stalled queue: at least one queued execute task whose depends_on are all merged, no task file modified in the last\n   60 min (mtime of tasks/*.json), and machine.py account state shows no account cooling. Name these predicates as\n   functions with unit tests.\nExtra tests: test_lock_probe_readonly_and_released, test_dedupe_reports_again_after_clear, test_resolver_used_by_goals_and_shadow,\ntest_running_too_long_only_when_daemon_dead, test_registry_written_on_acquire_lock.\n",
+  "inputs": [
+    "T-1674"
+  ],
+  "acceptance": [
+    "tests/test_watchdog.py: the seven named tests exist and pass",
+    "every claude spawn goes through one resolver helper",
+    "--install-launchd prints and writes nothing outside the repo"
+  ],
+  "scope": [
+    "orchestrator/watchdog.py",
+    "orchestrator/spawn.py",
+    "orchestrator/machine.py",
+    "orchestrator/cli.py",
+    "tests/test_watchdog.py",
+    "orchestrator/daemon.py",
+    "orchestrator/goals.py",
+    "orchestrator/planner_shadow.py",
+    "orchestrator/claude_cli.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1677",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/machine.py",
+        "issue": "W5 says to read account cooling from machine.py account state. machine.py's accounts.json only holds window and day token counters (_fresh_account has no cooldown field). Cooldowns live per repo in STATE/pool_state.json as cooldown_until, in orchestrator/pool.py. As written, the 'not cooling' predicate cannot be implemented or tested, and an implementer would likely fall back to always true. That reports 'queue stalled' during legitimate cooldowns.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "W4 probes the lock with flock LOCK_SH|NB. acquire_lock takes LOCK_EX|NB. A probe that overlaps a starting daemon makes that daemon's LOCK_EX fail, so it exits as 'already running'. The watchdog then sees a held lock and may report a restart that never happened. This is a race between the probe and the daemon start. The spec's 20 s confirm only partly covers it, with no retry or backoff.",
+        "severity": "med",
+        "line": 1954
+      },
+      {
+        "path": "orchestrator/watchdog.py",
+        "issue": "Two watchdog instances can run at once (launchd plus a manual --once, or a second launchd load). Both would see the dead daemon and both would start one. The daemon lock stops a duplicate daemon but not duplicate notifications or duplicate log files. The dedupe state file read-modify-write is also unguarded. Spec says machine lock only for repos.json.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The spec says 'one helper', but mcp.py (~77) also spawns scout/triage workers. It goes through spawn.run_worker, so it is covered, but the acceptance 'every claude spawn goes through one resolver' has no test that proves it. Only goals and shadow are tested. A grep-based test over orchestrator/*.py for a literal \"claude\" argv head would make the criterion verifiable. The cache-key and argv assertions in tests/test_spawn.py that expect the bare 'claude' string will also break and are not listed.",
+        "severity": "med",
+        "line": 1317
+      },
+      {
+        "path": "orchestrator/watchdog.py",
+        "issue": "Condition (c) scans 'bus events in the last 30 min' for spawn failures, but only a hold reason or event text is matched, and W2 forbids writing to the bus. The spawn failure is currently surfaced as a hold with the old reason text. W3 changes that text to 'claude CLI not found; looked in: ...', so the match string 'not found on PATH' goes stale. Matching must cover the new reason, and the source (events file path and format) is unnamed.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/watchdog.py",
+        "issue": "Daemon start passes a PATH with the Homebrew dir, but the watchdog itself runs under launchd with a minimal PATH, so `uv` may not resolve. This is the same class of failure as the root cause. The start function should resolve uv explicitly with fallbacks, and failures of the start itself (OSError) need a notification, not a silent skip.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/machine.py",
+        "issue": "The registry only grows. Deleted or moved repos stay in repos.json forever, and a missing path would be probed every 5 min. Missing repo dirs should be skipped (and optionally pruned) so a stale entry never triggers a start.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/watchdog.py",
+        "issue": "The dedupe state in watchdog-state.json has no clear step defined for conditions that disappear, and entries for removed repos accumulate. 'Reported again only after it cleared' needs an explicit clear pass over all known keys each run, not only keys seen this run.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "tests/test_watchdog.py",
+        "issue": "The tests use the shared ORCH_ROOT from _harness. ORCH_MACHINE_DIR is read at import time in machine.py, so the tests need to patch machine.MACHINE_DIR/LOCK or the watchdog state path. Otherwise they write to the real ~/.orchestrator-machine. The spec does not say so.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "W5: replace 'machine.py account state shows no account cooling' with a named source. Cooldown is in each repo's .orchestrator/pool_state.json (cooldown_until > now on the relevant accounts, orchestrator/pool.py). Specify which accounts count (all executors, or at least one usable) and add a unit test for the predicate.",
+      "W4: say how a probe/start race is handled. Prefer a probe that cannot block a starter, for example a short retry in the daemon's acquire_lock, or have the watchdog skip repos whose lock file mtime is under ~5 s old. Require the start confirmation to retry within the 20 s and report 'start failed' if the lock is still free.",
+      "Add a single-instance guard for the watchdog itself (flock on ~/.orchestrator-machine/watchdog.lock, non-blocking) and take that lock around the state-file read-modify-write.",
+      "Name the bus events source for condition (c) (file and event fields) and make the match cover both the old 'not found on PATH' text and the new 'claude CLI not found; looked in:' reason. Add a test that the watchdog does not write to the bus.",
+      "Add tests/test_spawn.py, tests/test_goals.py and tests/test_planner_shadow.py to scope, or state that existing argv assertions are updated. Add a test that no orchestrator/*.py builds an argv starting with the literal 'claude' outside claude_cli.py.",
+      "Require the daemon start function to resolve uv (shutil.which with Homebrew, ~/.local/bin and ~/.cargo/bin fallbacks) and to notify when it cannot, and make the machine dir patchable in tests (patch machine.MACHINE_DIR and derived paths) so nothing touches the real home dir.",
+      "Skip and optionally prune registry entries whose path no longer exists or has no .orchestrator dir.",
+      "Add a rollback note: the watchdog is opt-in via launchd (the spec prints only), the registry file can be deleted safely, and resolver fallback order is covered by a test that PATH wins over the fixed list."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791317911.9794838,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6624,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791317912.033868,
+      "packet_meta": {
+        "chars": 5885,
+        "est_tokens": 1471,
+        "presented_tokens": 1471,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "3285f7544853011c2242888007a581fe857c770e13f1edee3a6b32b5aa67e790"
+          },
+          "spec": {
+            "chars": 4760,
+            "est_tokens": 1190,
+            "sha256": "d8d458703031aedd5e6dc98f95fa5f401db78b151cf461b56469617982128713"
+          },
+          "acceptance": {
+            "chars": 194,
+            "est_tokens": 48,
+            "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+          },
+          "scope": {
+            "chars": 244,
+            "est_tokens": 61,
+            "sha256": "0d09d06abb7c84f080685c453eb213f1f6cdbc8f96b18a6f82ee5aa36e3d58bc"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 567,
+            "est_tokens": 141,
+            "sha256": "959a27f1475bf0098bc4efdd8feb5118d4531f9971bbf9a055765b448e358ae3"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "37554af114b1",
+        "version": "37554af114b1",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1674 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6624,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791317913.705504,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1677",
+      "claimed_at": 1791317913.705121
+    },
+    {
+      "ts": 1791317913.707326,
+      "account": "B"
+    },
+    {
+      "ts": 1791317924.496634,
+      "pid": 22780,
+      "account": "B"
+    },
+    {
+      "ts": 1791317967.9059799,
+      "packet_meta": {
+        "chars": 5885,
+        "est_tokens": 1471,
+        "presented_tokens": 1471,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "3285f7544853011c2242888007a581fe857c770e13f1edee3a6b32b5aa67e790"
+          },
+          "spec": {
+            "chars": 4760,
+            "est_tokens": 1190,
+            "sha256": "d8d458703031aedd5e6dc98f95fa5f401db78b151cf461b56469617982128713"
+          },
+          "acceptance": {
+            "chars": 194,
+            "est_tokens": 48,
+            "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+          },
+          "scope": {
+            "chars": 244,
+            "est_tokens": 61,
+            "sha256": "0d09d06abb7c84f080685c453eb213f1f6cdbc8f96b18a6f82ee5aa36e3d58bc"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 567,
+            "est_tokens": 141,
+            "sha256": "959a27f1475bf0098bc4efdd8feb5118d4531f9971bbf9a055765b448e358ae3"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "37554af114b1",
+        "version": "37554af114b1",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1674 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6624,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "98b14d2a-2fe6-4149-bc86-bd56479abb97"
+      }
+    },
+    {
+      "ts": 1791317967.930038,
+      "packet_meta": {
+        "chars": 5885,
+        "est_tokens": 1471,
+        "presented_tokens": 1471,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "3285f7544853011c2242888007a581fe857c770e13f1edee3a6b32b5aa67e790"
+          },
+          "spec": {
+            "chars": 4760,
+            "est_tokens": 1190,
+            "sha256": "d8d458703031aedd5e6dc98f95fa5f401db78b151cf461b56469617982128713"
+          },
+          "acceptance": {
+            "chars": 194,
+            "est_tokens": 48,
+            "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+          },
+          "scope": {
+            "chars": 244,
+            "est_tokens": 61,
+            "sha256": "0d09d06abb7c84f080685c453eb213f1f6cdbc8f96b18a6f82ee5aa36e3d58bc"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 567,
+            "est_tokens": 141,
+            "sha256": "959a27f1475bf0098bc4efdd8feb5118d4531f9971bbf9a055765b448e358ae3"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "37554af114b1",
+        "version": "37554af114b1",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1674 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6624,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "98b14d2a-2fe6-4149-bc86-bd56479abb97",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791317968.654274,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/machine.py",
+            "issue": "W5 says to read account cooling from machine.py account state. machine.py's accounts.json only holds window and day token counters (_fresh_account has no cooldown field). Cooldowns live per repo in STATE/pool_state.json as cooldown_until, in orchestrator/pool.py. As written, the 'not cooling' predicate cannot be implemented or tested, and an implementer would likely fall back to always true. That reports 'queue stalled' during legitimate cooldowns.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "W4 probes the lock with flock LOCK_SH|NB. acquire_lock takes LOCK_EX|NB. A probe that overlaps a starting daemon makes that daemon's LOCK_EX fail, so it exits as 'already running'. The watchdog then sees a held lock and may report a restart that never happened. This is a race between the probe and the daemon start. The spec's 20 s confirm only partly covers it, with no retry or backoff.",
+            "severity": "med",
+            "line": 1954
+          },
+          {
+            "path": "orchestrator/watchdog.py",
+            "issue": "Two watchdog instances can run at once (launchd plus a manual --once, or a second launchd load). Both would see the dead daemon and both would start one. The daemon lock stops a duplicate daemon but not duplicate notifications or duplicate log files. The dedupe state file read-modify-write is also unguarded. Spec says machine lock only for repos.json.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The spec says 'one helper', but mcp.py (~77) also spawns scout/triage workers. It goes through spawn.run_worker, so it is covered, but the acceptance 'every claude spawn goes through one resolver' has no test that proves it. Only goals and shadow are tested. A grep-based test over orchestrator/*.py for a literal \"claude\" argv head would make the criterion verifiable. The cache-key and argv assertions in tests/test_spawn.py that expect the bare 'claude' string will also break and are not listed.",
+            "severity": "med",
+            "line": 1317
+          },
+          {
+            "path": "orchestrator/watchdog.py",
+            "issue": "Condition (c) scans 'bus events in the last 30 min' for spawn failures, but only a hold reason or event text is matched, and W2 forbids writing to the bus. The spawn failure is currently surfaced as a hold with the old reason text. W3 changes that text to 'claude CLI not found; looked in: ...', so the match string 'not found on PATH' goes stale. Matching must cover the new reason, and the source (events file path and format) is unnamed.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/watchdog.py",
+            "issue": "Daemon start passes a PATH with the Homebrew dir, but the watchdog itself runs under launchd with a minimal PATH, so `uv` may not resolve. This is the same class of failure as the root cause. The start function should resolve uv explicitly with fallbacks, and failures of the start itself (OSError) need a notification, not a silent skip.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/machine.py",
+            "issue": "The registry only grows. Deleted or moved repos stay in repos.json forever, and a missing path would be probed every 5 min. Missing repo dirs should be skipped (and optionally pruned) so a stale entry never triggers a start.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/watchdog.py",
+            "issue": "The dedupe state in watchdog-state.json has no clear step defined for conditions that disappear, and entries for removed repos accumulate. 'Reported again only after it cleared' needs an explicit clear pass over all known keys each run, not only keys seen this run.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "tests/test_watchdog.py",
+            "issue": "The tests use the shared ORCH_ROOT from _harness. ORCH_MACHINE_DIR is read at import time in machine.py, so the tests need to patch machine.MACHINE_DIR/LOCK or the watchdog state path. Otherwise they write to the real ~/.orchestrator-machine. The spec does not say so.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "W5: replace 'machine.py account state shows no account cooling' with a named source. Cooldown is in each repo's .orchestrator/pool_state.json (cooldown_until > now on the relevant accounts, orchestrator/pool.py). Specify which accounts count (all executors, or at least one usable) and add a unit test for the predicate.",
+          "W4: say how a probe/start race is handled. Prefer a probe that cannot block a starter, for example a short retry in the daemon's acquire_lock, or have the watchdog skip repos whose lock file mtime is under ~5 s old. Require the start confirmation to retry within the 20 s and report 'start failed' if the lock is still free.",
+          "Add a single-instance guard for the watchdog itself (flock on ~/.orchestrator-machine/watchdog.lock, non-blocking) and take that lock around the state-file read-modify-write.",
+          "Name the bus events source for condition (c) (file and event fields) and make the match cover both the old 'not found on PATH' text and the new 'claude CLI not found; looked in:' reason. Add a test that the watchdog does not write to the bus.",
+          "Add tests/test_spawn.py, tests/test_goals.py and tests/test_planner_shadow.py to scope, or state that existing argv assertions are updated. Add a test that no orchestrator/*.py builds an argv starting with the literal 'claude' outside claude_cli.py.",
+          "Require the daemon start function to resolve uv (shutil.which with Homebrew, ~/.local/bin and ~/.cargo/bin fallbacks) and to notify when it cannot, and make the machine dir patchable in tests (patch machine.MACHINE_DIR and derived paths) so nothing touches the real home dir.",
+          "Skip and optionally prune registry entries whose path no longer exists or has no .orchestrator dir.",
+          "Add a rollback note: the watchdog is opt-in via launchd (the spec prints only), the registry file can be deleted safely, and resolver fallback order is covered by a test that PATH wins over the fixed list."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791317968.65569,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/machine.py",
+          "issue": "W5 says to read account cooling from machine.py account state. machine.py's accounts.json only holds window and day token counters (_fresh_account has no cooldown field). Cooldowns live per repo in STATE/pool_state.json as cooldown_until, in orchestrator/pool.py. As written, the 'not cooling' predicate cannot be implemented or tested, and an implementer would likely fall back to always true. That reports 'queue stalled' during legitimate cooldowns.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "W4 probes the lock with flock LOCK_SH|NB. acquire_lock takes LOCK_EX|NB. A probe that overlaps a starting daemon makes that daemon's LOCK_EX fail, so it exits as 'already running'. The watchdog then sees a held lock and may report a restart that never happened. This is a race between the probe and the daemon start. The spec's 20 s confirm only partly covers it, with no retry or backoff.",
+          "severity": "med",
+          "line": 1954
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "Two watchdog instances can run at once (launchd plus a manual --once, or a second launchd load). Both would see the dead daemon and both would start one. The daemon lock stops a duplicate daemon but not duplicate notifications or duplicate log files. The dedupe state file read-modify-write is also unguarded. Spec says machine lock only for repos.json.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The spec says 'one helper', but mcp.py (~77) also spawns scout/triage workers. It goes through spawn.run_worker, so it is covered, but the acceptance 'every claude spawn goes through one resolver' has no test that proves it. Only goals and shadow are tested. A grep-based test over orchestrator/*.py for a literal \"claude\" argv head would make the criterion verifiable. The cache-key and argv assertions in tests/test_spawn.py that expect the bare 'claude' string will also break and are not listed.",
+          "severity": "med",
+          "line": 1317
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "Condition (c) scans 'bus events in the last 30 min' for spawn failures, but only a hold reason or event text is matched, and W2 forbids writing to the bus. The spawn failure is currently surfaced as a hold with the old reason text. W3 changes that text to 'claude CLI not found; looked in: ...', so the match string 'not found on PATH' goes stale. Matching must cover the new reason, and the source (events file path and format) is unnamed.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "Daemon start passes a PATH with the Homebrew dir, but the watchdog itself runs under launchd with a minimal PATH, so `uv` may not resolve. This is the same class of failure as the root cause. The start function should resolve uv explicitly with fallbacks, and failures of the start itself (OSError) need a notification, not a silent skip.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/machine.py",
+          "issue": "The registry only grows. Deleted or moved repos stay in repos.json forever, and a missing path would be probed every 5 min. Missing repo dirs should be skipped (and optionally pruned) so a stale entry never triggers a start.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "The dedupe state in watchdog-state.json has no clear step defined for conditions that disappear, and entries for removed repos accumulate. 'Reported again only after it cleared' needs an explicit clear pass over all known keys each run, not only keys seen this run.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_watchdog.py",
+          "issue": "The tests use the shared ORCH_ROOT from _harness. ORCH_MACHINE_DIR is read at import time in machine.py, so the tests need to patch machine.MACHINE_DIR/LOCK or the watchdog state path. Otherwise they write to the real ~/.orchestrator-machine. The spec does not say so.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 5885,
+    "est_tokens": 1471,
+    "presented_tokens": 1471,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "3285f7544853011c2242888007a581fe857c770e13f1edee3a6b32b5aa67e790"
+      },
+      "spec": {
+        "chars": 4760,
+        "est_tokens": 1190,
+        "sha256": "d8d458703031aedd5e6dc98f95fa5f401db78b151cf461b56469617982128713"
+      },
+      "acceptance": {
+        "chars": 194,
+        "est_tokens": 48,
+        "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+      },
+      "scope": {
+        "chars": 244,
+        "est_tokens": 61,
+        "sha256": "0d09d06abb7c84f080685c453eb213f1f6cdbc8f96b18a6f82ee5aa36e3d58bc"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 567,
+        "est_tokens": 141,
+        "sha256": "959a27f1475bf0098bc4efdd8feb5118d4531f9971bbf9a055765b448e358ae3"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "37554af114b1",
+    "version": "37554af114b1",
+    "candidate_known": false,
+    "base": "247fe58bae3d",
+    "sources": "task@T-1674 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 6624,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "98b14d2a-2fe6-4149-bc86-bd56479abb97",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791317913.705121,
+  "account": "B",
+  "pid": 22780,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/machine.py",
+      "issue": "W5 says to read account cooling from machine.py account state. machine.py's accounts.json only holds window and day token counters (_fresh_account has no cooldown field). Cooldowns live per repo in STATE/pool_state.json as cooldown_until, in orchestrator/pool.py. As written, the 'not cooling' predicate cannot be implemented or tested, and an implementer would likely fall back to always true. That reports 'queue stalled' during legitimate cooldowns.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "W4 probes the lock with flock LOCK_SH|NB. acquire_lock takes LOCK_EX|NB. A probe that overlaps a starting daemon makes that daemon's LOCK_EX fail, so it exits as 'already running'. The watchdog then sees a held lock and may report a restart that never happened. This is a race between the probe and the daemon start. The spec's 20 s confirm only partly covers it, with no retry or backoff.",
+      "severity": "med",
+      "line": 1954
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "Two watchdog instances can run at once (launchd plus a manual --once, or a second launchd load). Both would see the dead daemon and both would start one. The daemon lock stops a duplicate daemon but not duplicate notifications or duplicate log files. The dedupe state file read-modify-write is also unguarded. Spec says machine lock only for repos.json.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The spec says 'one helper', but mcp.py (~77) also spawns scout/triage workers. It goes through spawn.run_worker, so it is covered, but the acceptance 'every claude spawn goes through one resolver' has no test that proves it. Only goals and shadow are tested. A grep-based test over orchestrator/*.py for a literal \"claude\" argv head would make the criterion verifiable. The cache-key and argv assertions in tests/test_spawn.py that expect the bare 'claude' string will also break and are not listed.",
+      "severity": "med",
+      "line": 1317
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "Condition (c) scans 'bus events in the last 30 min' for spawn failures, but only a hold reason or event text is matched, and W2 forbids writing to the bus. The spawn failure is currently surfaced as a hold with the old reason text. W3 changes that text to 'claude CLI not found; looked in: ...', so the match string 'not found on PATH' goes stale. Matching must cover the new reason, and the source (events file path and format) is unnamed.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "Daemon start passes a PATH with the Homebrew dir, but the watchdog itself runs under launchd with a minimal PATH, so `uv` may not resolve. This is the same class of failure as the root cause. The start function should resolve uv explicitly with fallbacks, and failures of the start itself (OSError) need a notification, not a silent skip.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/machine.py",
+      "issue": "The registry only grows. Deleted or moved repos stay in repos.json forever, and a missing path would be probed every 5 min. Missing repo dirs should be skipped (and optionally pruned) so a stale entry never triggers a start.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "The dedupe state in watchdog-state.json has no clear step defined for conditions that disappear, and entries for removed repos accumulate. 'Reported again only after it cleared' needs an explicit clear pass over all known keys each run, not only keys seen this run.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_watchdog.py",
+      "issue": "The tests use the shared ORCH_ROOT from _harness. ORCH_MACHINE_DIR is read at import time in machine.py, so the tests need to patch machine.MACHINE_DIR/LOCK or the watchdog state path. Otherwise they write to the real ~/.orchestrator-machine. The spec does not say so.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

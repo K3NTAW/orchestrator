@@ -1,0 +1,101 @@
+{
+  "id": "T-0139",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): C-O9 fix round 1 on reconcile_dead (T-0135, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0135 delta: `git diff f3d1f10 e712553` in worktree wt/T-0135 (orchestrator/daemon.py, tests/test_daemon.py, about 115 lines). Fix round for review T-0132; confirm each item resolved: (1) base resolution without goal/<parent>: merge-base against origin/main then main, requeue only when none resolves, with a test using a real task/<id> branch and no goal branch; (2) gate() never merges a result with orphaned true directly: review task at review_tier(t) with the orphaned warning at the start of its spec, tested at complexity 2; (3) every requeue path clears pipeline.dispatched_at and a following tick redispatches (test with a stubbed executor.start); (4) tick() isolates reconcile_dead per task in try/except; (5) tests use real ids for branch names; (6) dirty-check comment. Also check nothing else in daemon.py changed behaviour, no shell strings built from task fields, no new dependency. Run `uv run python -m unittest tests.test_daemon -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0135"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the six T-0132 items confirmed resolved or named unresolved with evidence from the delta",
+    "Security checklist applied"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0139",
+  "codex_thread": null,
+  "result": {
+    "summary": "```json\n{\"verdict\":\"approve\",\"comments\":[{\"path\":\"orchestrator/daemon.py\",\"line\":64,\"issue\":\"_requeue does its pipeline read-modify-write outside bus.locked(). The pipeline it writes is the snapshot tick() read at the top of the loop, so any key another thread added since then (_dispatch_worker writes pipeline['dispatch_error'] from a spawn_async thread, hold_failed writes an error stamp) is dropped by the wholesale `pipeline=clean` overwrite. stamp() at daemon.py:42-52 carries the exact comment saying this must happen under the lock; _requeue is the one pipeline writer that does not. Fix: re-read under `with bus.locked():` and filter the fresh pipeline.\",\"severity\":\"low\"},{\"path\":\"orchestrator/daemon.py\",\"line\":103,\"issue\":\"Docstring/behaviour mismatch: the docstring says 'a dirty one is held for the Planner', but the dirty check at 106-114 only runs after the ahead>0 gate, so a worktree with uncommitted work and zero commits ahead takes the plain requeue at line 104 and the next executor starts on top of the dead worker's uncommitted edits. Not a regression, but the new code has the information in hand and does not use it. Either reorder the status check ahead of the ahead check, or say in the docstring that dirty-without-commits requeues.\",\"severity\":\"low\"},{\"path\":\"orchestrator/daemon.py\",\"line\":112,\"issue\":\"resume_hint goes through bus.update, which has no size cap, unlike post_result's MAX_RESULT_CHARS guard (bus.py:138). The 20-line slice bounds it to roughly 20KB of executor-chosen path text landing in the task json and then the Planner's context. A per-line truncation (line[:200]) would match the capping discipline notify() and post_result already apply to untrusted strings.\",\"severity\":\"low\"}]}\n```\n\nPosted to the bus as T-0139. Evidence per T-0132 item:\n\n1. **Base resolution** \u2014 resolved. `daemon.py:87-100`: `merge-base HEAD goal/<parent>` \u2192 `origin/main` \u2192 `main`, each returncode-guarded, requeue only if all three fail.\n2. **Auto-merge of orphans** \u2014 reso",
+    "parse_error": true,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789737720.8251038,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0139",
+      "claimed_at": 1789737720.824672
+    },
+    {
+      "ts": 1789737720.8757372,
+      "pid": 64248,
+      "account": "B"
+    },
+    {
+      "ts": 1789737921.4593868,
+      "status": "done",
+      "result": {
+        "summary": "approve. All six T-0132 change-requested items are resolved in the delta, verified against the worktree source, not just the diff text. (1) base resolution: daemon.py:87-100 replaces the never-resolving task/<id>@{upstream} rev-parse with merge-base HEAD goal/<parent> -> origin/main -> main, each guarded on returncode, requeue if all three fail. (2) auto-merge risk: daemon.py:296-310, gate() computes orphaned from result.orphaned and the direct-merge arm is now `not orphaned and complexity <= DIRECT_MERGE_MAX`, so an orphan always opens a review at review_tier(t) with the warning leading the spec; no other path merges an orphan without a review (merge_reviewed only acts on an approve verdict). (3) requeue dead end: new _requeue at daemon.py:60-66 strips dispatched_at so dispatch()'s stamp() can claim it again; every requeue arm in reconcile_dead goes through it, and test_daemon.py:415 asserts re-dispatch on the same tick, not just status==queued. (4) tick isolation: daemon.py:353-358 wraps reconcile_dead in try/except print+continue, matching the stage loop; test_daemon.py:498 proves dispatch still runs after a raising _git_in. (5) coverage gap: test_reconcile_dead_regates_using_main_when_no_goal_branch (test_daemon.py:381) covers the parentless/no-goal-branch arm. (6) porcelain rationale: comment added at daemon.py:106-107. T-0132 item 7 requested no change. Verified: python3 -m unittest tests.test_daemon -> Ran 42 tests, OK. Security checklist applied (complexity 4, so advisory): every git call is an argv list with no shell=True, worktree is only ever cwd; parent is interpolated into the ref string f\"goal/{parent}\" but stays one argv item, so even a leading-dash parent cannot become a git flag; executor-controlled data (porcelain filenames, sha) reaches notify(), which caps at 200 chars and passes the message as an argv item to osascript; int() is isdigit-guarded; no auth/billing/data-deletion surface; provenance repo. Three low findings below, none blocking.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 64,
+            "issue": "_requeue does its pipeline read-modify-write outside bus.locked(). The `pipeline` it writes is the snapshot tick() read at the top of the loop, so any key another thread added since then (_dispatch_worker writes pipeline['dispatch_error'] from a spawn_async thread on daemon.py:225-231, hold_failed writes an error stamp) is silently dropped by the wholesale `pipeline=clean` overwrite. stamp() at daemon.py:42-52 carries the exact comment saying this must happen under the lock; _requeue is the one pipeline writer that does not. Narrow window and only loses a diagnostic key today, but the invariant is stated and broken. Fix: re-read under `with bus.locked():` and filter the fresh pipeline.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 103,
+            "issue": "Docstring/behaviour mismatch on the dirty case: the docstring says 'a dirty one is held for the Planner', but the dirty check at line 106-114 only runs after the ahead>0 gate, so a worktree with uncommitted work and zero commits ahead takes the plain requeue at line 104 and the next executor starts on top of the dead worker's uncommitted edits. Same as pre-change behaviour so not a regression, but the new code has the information in hand and does not use it, and the docstring reads as if it does. Either reorder the status check ahead of the ahead check, or say in the docstring that dirty-without-commits requeues.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 112,
+            "issue": "resume_hint goes through bus.update, which has no size cap, unlike post_result's MAX_RESULT_CHARS guard (bus.py:138). The 20-line slice bounds it to roughly 20KB of executor-chosen path text landing in the task json and then in the Planner's context. Bounded enough not to block, but a per-line truncation (e.g. line[:200]) would make it match the capping discipline notify() and post_result already apply to untrusted strings.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789737935.722972,
+      "status": "done",
+      "result": {
+        "summary": "```json\n{\"verdict\":\"approve\",\"comments\":[{\"path\":\"orchestrator/daemon.py\",\"line\":64,\"issue\":\"_requeue does its pipeline read-modify-write outside bus.locked(). The pipeline it writes is the snapshot tick() read at the top of the loop, so any key another thread added since then (_dispatch_worker writes pipeline['dispatch_error'] from a spawn_async thread, hold_failed writes an error stamp) is dropped by the wholesale `pipeline=clean` overwrite. stamp() at daemon.py:42-52 carries the exact comment saying this must happen under the lock; _requeue is the one pipeline writer that does not. Fix: re-read under `with bus.locked():` and filter the fresh pipeline.\",\"severity\":\"low\"},{\"path\":\"orchestrator/daemon.py\",\"line\":103,\"issue\":\"Docstring/behaviour mismatch: the docstring says 'a dirty one is held for the Planner', but the dirty check at 106-114 only runs after the ahead>0 gate, so a worktree with uncommitted work and zero commits ahead takes the plain requeue at line 104 and the next executor starts on top of the dead worker's uncommitted edits. Not a regression, but the new code has the information in hand and does not use it. Either reorder the status check ahead of the ahead check, or say in the docstring that dirty-without-commits requeues.\",\"severity\":\"low\"},{\"path\":\"orchestrator/daemon.py\",\"line\":112,\"issue\":\"resume_hint goes through bus.update, which has no size cap, unlike post_result's MAX_RESULT_CHARS guard (bus.py:138). The 20-line slice bounds it to roughly 20KB of executor-chosen path text landing in the task json and then the Planner's context. A per-line truncation (line[:200]) would match the capping discipline notify() and post_result already apply to untrusted strings.\",\"severity\":\"low\"}]}\n```\n\nPosted to the bus as T-0139. Evidence per T-0132 item:\n\n1. **Base resolution** \u2014 resolved. `daemon.py:87-100`: `merge-base HEAD goal/<parent>` \u2192 `origin/main` \u2192 `main`, each returncode-guarded, requeue only if all three fail.\n2. **Auto-merge of orphans** \u2014 reso",
+        "parse_error": true,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789737720.824672,
+  "pid": 64248,
+  "account": "B"
+}

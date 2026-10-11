@@ -1,0 +1,135 @@
+{
+  "id": "T-0338",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G5: Jev gate in sampled mode by default \u2014 deterministic sampling, local exact-repeat detection without a network call, tool target and input hash in gate rows, and an offline diagnosis command with a labelling export",
+  "spec": "Depends on G1b (T-0265) and G2b (T-0267) because all three add cli.py subcommands. Scout T-0262: gate.jsonl rows carry ts, task, session, tool, p_needed, p_redundant, p_destructive, mode, blocked, latency_ms, scored, since F1 also startup_ms and rule, but no tool target or input hash, so repeated reads cannot be detected locally. Phase F measured 590 ms network per scored call and 62 to 78 percent 'redundant' verdicts on reviewers without knowing whether those reads were necessary verification.\nChange:\n1. jev_gate.py: [jev].gate_mode gains 'sample' (new default in pool.toml; log and block stay). In sample mode a call is scored only when sha1(session_id + call_index) mod 1000 < sample_rate * 1000 ([jev].sample_rate default 0.1); unscored calls make no network request. Every call, scored or not, computes tool_target (the path for Read/Edit/Write/Grep/Glob, the first 80 chars of the command for Bash, redacted through jev.redact) and input_hash = sha1(tool + normalised tool_input), and updates runs/jev/session-<session>.json {input_hash: {count, mtime}}; repeat = true when the same hash was seen in this session and the target file's mtime is unchanged. Rows gain tool_target, input_hash, repeat, sampled. In block mode, [jev].block_repeats = true (default false) denies a repeat with the message 'identical read already made this session; use the earlier result'. Startup stays one interpreter call; the hook script passes through unchanged apart from any new env it needs.\n2. cli.py: `orchestrator jev diagnose [--since YYYY-MM-DD] [--export FILE --n N]`: from gate.jsonl and the bus (task -> role): calls, scored, sampled share, waste_pct by tool and by role, repeat rate by role, latency p50/p95 and startup vs network split, blocked count; --export writes N random scored rows with an empty label column as JSONL for hand labelling, and the command prints where.\n3. pool.toml [jev]: gate_mode = \"sample\", sample_rate = 0.1, block_repeats = false, each with a comment; README Jev paragraph updated (sample mode, repeat detection, diagnose, labelling before any block).\nTests in tests/test_jev_gate.py: test_sample_mode_is_deterministic, test_unsampled_call_makes_no_request, test_repeat_detected_without_network, test_repeat_cleared_when_mtime_changes, test_rows_have_target_hash_and_flags, test_block_repeats_denies; tests/test_cli.py::test_jev_diagnose_summary (fixture gate.jsonl).",
+  "inputs": [
+    "T-0273"
+  ],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_sample_mode_is_deterministic, ::test_unsampled_call_makes_no_request, ::test_repeat_detected_without_network, ::test_repeat_cleared_when_mtime_changes, ::test_rows_have_target_hash_and_flags, ::test_block_repeats_denies pass",
+    "tests/test_cli.py::test_jev_diagnose_summary passes",
+    "pool.toml [jev] gate_mode is sample with sample_rate 0.1 and block_repeats false, documented; README updated",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_gate.py",
+    ".claude/hooks/jev-gate.sh",
+    "orchestrator/cli.py",
+    "tests/test_jev_gate.py",
+    "tests/test_cli.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0338",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_jev_gate.py",
+        "line": 0,
+        "issue": "None of the six required tests (test_sample_mode_is_deterministic, test_unsampled_call_makes_no_request, test_repeat_detected_without_network, test_repeat_cleared_when_mtime_changes, test_rows_have_target_hash_and_flags, test_block_repeats_denies) exist anywhere in the repo. Grepping tests/ for all six names returns zero matches. The acceptance criteria name these as required to pass; since they don't exist, running those node ids fails outright and tests-green.sh cannot pass.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_cli.py",
+        "line": 0,
+        "issue": "test_jev_diagnose_summary is also required by acceptance criteria but does not exist anywhere in tests/. The new `orchestrator jev diagnose` CLI subcommand in orchestrator/cli.py has no test coverage at all.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 162,
+        "issue": "_record_call does a read-modify-write on .orchestrator/state/runs/jev/session-{id}.json with no file locking, unlike jev.py's own shared state (jev_state.json), which is guarded by STATE_LOCK_FILE. PreToolUse hooks for a single session can fire concurrently for parallel tool calls; concurrent invocations will race on this file, silently losing repeat-count updates (breaking block_repeats/repeat detection) and can interleave partial writes that json.loads then fails to parse, silently resetting session state to {} on the next read.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 166,
+        "issue": "_target returns jev.redact(path) and that redacted string is what _target_mtime later calls os.stat() on (jev_gate.py:167). redact() is meant to scrub secret-shaped substrings before network egress/logging; if a real file path happens to match one of its patterns (e.g. a 32+ char alnum run, common in content-hashed build/cache directories), os.stat() silently fails on the mangled path and mtime is permanently None for that target, defeating 'repeat cleared when mtime changes' for that file without any error surfaced.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789851834.312031,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0338",
+      "claimed_at": 1789851834.311706
+    },
+    {
+      "ts": 1789851834.31328,
+      "account": "B"
+    },
+    {
+      "ts": 1789851834.3473501,
+      "pid": 92140,
+      "account": "B"
+    },
+    {
+      "ts": 1789851976.590719,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_jev_gate.py",
+            "line": 0,
+            "issue": "None of the six required tests (test_sample_mode_is_deterministic, test_unsampled_call_makes_no_request, test_repeat_detected_without_network, test_repeat_cleared_when_mtime_changes, test_rows_have_target_hash_and_flags, test_block_repeats_denies) exist anywhere in the repo. Grepping tests/ for all six names returns zero matches. The acceptance criteria name these as required to pass; since they don't exist, running those node ids fails outright and tests-green.sh cannot pass.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_cli.py",
+            "line": 0,
+            "issue": "test_jev_diagnose_summary is also required by acceptance criteria but does not exist anywhere in tests/. The new `orchestrator jev diagnose` CLI subcommand in orchestrator/cli.py has no test coverage at all.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 162,
+            "issue": "_record_call does a read-modify-write on .orchestrator/state/runs/jev/session-{id}.json with no file locking, unlike jev.py's own shared state (jev_state.json), which is guarded by STATE_LOCK_FILE. PreToolUse hooks for a single session can fire concurrently for parallel tool calls; concurrent invocations will race on this file, silently losing repeat-count updates (breaking block_repeats/repeat detection) and can interleave partial writes that json.loads then fails to parse, silently resetting session state to {} on the next read.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 166,
+            "issue": "_target returns jev.redact(path) and that redacted string is what _target_mtime later calls os.stat() on (jev_gate.py:167). redact() is meant to scrub secret-shaped substrings before network egress/logging; if a real file path happens to match one of its patterns (e.g. a 32+ char alnum run, common in content-hashed build/cache directories), os.stat() silently fails on the mangled path and mtime is permanently None for that target, defeating 'repeat cleared when mtime changes' for that file without any error surfaced.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789851976.593195,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789851834.311706,
+  "account": "B",
+  "pid": 92140,
+  "review_verdict": "request_changes"
+}

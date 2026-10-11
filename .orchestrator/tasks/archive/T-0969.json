@@ -1,0 +1,214 @@
+{
+  "id": "T-0969",
+  "created_at": 1790122680.190351,
+  "parent": "T-0861",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S9: Jev skill routing for the ambiguous bucket only: typed relevance questions, batched, cached by task state + skill version + repo head, declared Jev boundary, shadow decisions; deterministic candidates never touched (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P9, P8 step 6, P29, P38 (P37 stage 9). Depends on T-0939 (skill_router.select returns ambiguous ids and mandatory/selected sets; [skills] mode; skill_selection rows with role) and the Jev boundary from T-0774 (jev.declare_boundary, jev.ask(site=...), data classes). Facts: jev.ask redacts and caps payloads, refuses SENSITIVE/SECRET, and every site declares its fields; jev_route/jev_gate show the question pattern (typed yes/no questions with probabilities, batched into one request, fail-open on None); [jev] has budget and cache settings; skills carry Level 1 renderings (trigger + objective + output).\nDo:\n1. orchestrator/jev_skills.py (new). `classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask) -> {\"decisions\": {id: {\"relevant_p\", \"reduces_rework_p\", \"duplicates_p\", \"worth_cost_p\", \"requires_specialist_p\", \"select\": bool}}, \"source\": \"jev\"|\"cache\"|\"none\", \"latency_ms\", \"usage\"}`. One batched request per task carrying, per ambiguous skill, only its Level 1 rendering (\u2264 400 chars) and, once, a redacted task digest (title, spec[:800], scope paths, task_class, role); at most [skills] jev_max_batch (default 8) skills per request, never more than one request per spawn; obvious trigger matches and mandatory skills are never sent. Selection rule: select when relevant_p \u2265 0.6 and worth_cost_p \u2265 0.5 and duplicates_p < 0.5; when Jev is unavailable (None) the ambiguous bucket stays excluded (fail-closed for extra skills, which is the safe direction).\n2. Boundary: jev.declare_boundary(\"skills\", fields=[...exact fields...], max_chars=6000, raw_source_allowed=False); tests assert an undeclared field is dropped and no packet section or file content ever appears in the payload.\n3. Cache: key = sha256(task id + task content hash (title+spec+scope) + sorted skill versions + repo head sha)[:16]; entries live in STATE/runs/jev/skills_cache.json with [jev.skills] cache_ttl_s (default 86400) and max entries 500; any change in the key invalidates.\n4. Wiring: skill_router.select gains `jev=True` behaviour when [skills] jev_mode (new key: off | shadow | active, default shadow) is shadow or active: shadow records the Jev verdicts in the skill_selection row (jev = {...}) without changing selected; active adds Jev-selected ambiguous skills to selected (still under max_selected and the presentation cap from T-0939). promotion.FEATURES gains \"jev_skill_routing\" (table skills, key jev_mode, default shadow) with an evidence loader counting rows carrying jev verdicts.\n5. Scorecard: skill_scorecard adds jev_agreement_rate (Jev-selected skills that were later used / Jev-selected) and jev_calls_per_spawn per role; `scorecard --skills` prints them.\n6. docs/skill-intelligence/10-jev-routing.md (\u226460 lines): the questions, the batching and cache rules, the boundary, what shadow logs, revert path (jev_mode off).\nTests (unittest, fake ask): tests/test_jev_skills.py::test_only_ambiguous_skills_are_sent_in_one_batch, ::test_selection_rule_thresholds, ::test_unavailable_jev_keeps_bucket_excluded, ::test_cache_key_invalidates_on_skill_version_or_head_change, ::test_boundary_drops_undeclared_fields_and_never_carries_content; tests/test_skill_router.py::test_jev_shadow_records_without_changing_selection, ::test_jev_active_adds_selected_ambiguous_under_caps. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 11:45) after spec review T-0960 (request_changes), binding on top of v1:\n- Wiring of the Jev verdicts into the decision rows: orchestrator/spawn.py, orchestrator/executor.py, tests/test_spawn.py and tests/test_executor.py join the scope. skill_router.select returns the Jev result under a `jev` key (decisions, source, latency_ms, batch size); spawn._skill_routing and executor._route_skills pass it as decision_log.record(..., jev=choice.get(\"jev\")) so it lands in the row's top-level jev field (the existing kwarg), never inside extra.\n- Acceptance tests: tests/test_spawn.py::test_skill_routing_row_carries_top_level_jev_in_shadow and tests/test_executor.py::test_route_skills_row_carries_top_level_jev_in_shadow drive the real call sites with a fake ask under jev_mode shadow and assert the recorded row's top-level jev is populated while selected is unchanged.",
+  "inputs": [
+    "T-0967"
+  ],
+  "acceptance": [
+    "tests/test_jev_skills.py::test_only_ambiguous_skills_are_sent_in_one_batch passes",
+    "tests/test_jev_skills.py::test_selection_rule_thresholds passes",
+    "tests/test_jev_skills.py::test_unavailable_jev_keeps_bucket_excluded passes",
+    "tests/test_jev_skills.py::test_cache_key_invalidates_on_skill_version_or_head_change passes",
+    "tests/test_jev_skills.py::test_boundary_drops_undeclared_fields_and_never_carries_content passes",
+    "tests/test_skill_router.py::test_jev_shadow_records_without_changing_selection passes",
+    "tests/test_skill_router.py::test_jev_active_adds_selected_ambiguous_under_caps passes",
+    "pool.toml has [skills] jev_mode = \"shadow\" and promotion.FEATURES has jev_skill_routing; docs/skill-intelligence/10-jev-routing.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_skill_routing_row_carries_top_level_jev_in_shadow passes",
+    "tests/test_executor.py::test_route_skills_row_carries_top_level_jev_in_shadow passes"
+  ],
+  "scope": [
+    "orchestrator/jev_skills.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/jev.py",
+    "orchestrator/promotion.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_skills.py",
+    "tests/test_skill_router.py",
+    "tests/test_promotion.py",
+    "docs/skill-intelligence/10-jev-routing.md",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_spawn.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0969",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/jev_skills.py",
+        "issue": "Spec literally requires `def classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask)`. A default parameter value is evaluated once, at module-import time, not per call. Wiring skill_router.select to depend on jev_skills (which must `from . import jev`) creates a real cycle: skill_router -> jev_skills -> jev -> spawn -> skill_router. orchestrator/executor.py already imports `jev_route` (which imports `jev`, which imports `spawn`, which imports `skill_router`) BEFORE `skill_router` in the same `from . import ...` statement (executor.py:14), so `orchestrator.jev` is only partially initialized (no `ask` attribute yet, since `def ask(...)` is ~200 lines below jev.py's own `from . import spawn` line) when jev_skills.py tries to evaluate `ask=jev.ask` as its default -> AttributeError at import time. Separately, even if the crash is avoided by lazy-importing, this early-bound default silently defeats the codebase's established test-mocking idiom of `mock.patch.object(jev_route.jev, \"ask\", fake)` (see tests/test_jev_route.py), because callers that don't pass `ask=` explicitly (skill_router.select, _prepare_skills, _skill_routing, _route_skills \u2014 none of which the spec gives an `ask` passthrough) will always invoke whatever `jev.ask` was at jev_skills.py's def-time, not a monkeypatched replacement.",
+        "severity": "high",
+        "line": 14
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "Existing import order (`jev_route` before `skill_router` in the same import statement) is the concrete trigger for the circular-import crash described above once skill_router gains a dependency on jev_skills/jev.",
+        "severity": "high",
+        "line": 14
+      },
+      {
+        "path": "orchestrator/skill_router.py",
+        "issue": "Spec says active mode 'adds Jev-selected ambiguous skills to selected (still under max_selected)' but select() currently computes `selected = mandatory + ranked[:cap]` with cap = max_selected; the spec doesn't say whether jev-added ids consume remaining cap headroom or are appended on top, risking selected exceeding max_selected or silently starving ranked trigger matches.",
+        "severity": "med",
+        "line": 48
+      },
+      {
+        "path": "orchestrator/jev_skills.py",
+        "issue": "jev_max_batch (default 8) truncation order for the ambiguous bucket is unspecified when more than 8 skills are ambiguous, making the acceptance test's expected batch content implementation-defined rather than verifiable against a spec-mandated order.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Change jev_skills.classify's signature to `ask=None` and resolve `ask = ask or jev.ask` inside the function body (call `jev.ask(...)` via attribute lookup like jev_route.py/jev_sched.py already do), so the default isn't evaluated against a possibly-partial jev module at import time and so mock.patch.object(jev, \"ask\", ...) is honored by every caller that doesn't pass ask explicitly.",
+      "Import jev_skills (and jev) lazily inside skill_router.select(), not at module top level, mirroring executor.py's existing local `from .spawn import _prepare_skills` import used to avoid this same class of circular import between executor.py and spawn.py.",
+      "State that when more than jev_max_batch skills are ambiguous, the batch is truncated using the same (-strength, id) ordering skill_router.select already uses for ranked candidates.",
+      "Clarify that active-mode Jev-selected ambiguous skills are added to `selected` only up to the remaining headroom under max_selected (len(mandatory)+len(ranked_kept)+len(jev_added) <= max_selected), not additively beyond it."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790122683.162404,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0969",
+      "claimed_at": 1790122683.162112
+    },
+    {
+      "ts": 1790122683.1656141,
+      "account": "B"
+    },
+    {
+      "ts": 1790122684.371476,
+      "pid": 94424,
+      "account": "B"
+    },
+    {
+      "ts": 1790123041.390065,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/jev_skills.py",
+            "issue": "Spec literally requires `def classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask)`. A default parameter value is evaluated once, at module-import time, not per call. Wiring skill_router.select to depend on jev_skills (which must `from . import jev`) creates a real cycle: skill_router -> jev_skills -> jev -> spawn -> skill_router. orchestrator/executor.py already imports `jev_route` (which imports `jev`, which imports `spawn`, which imports `skill_router`) BEFORE `skill_router` in the same `from . import ...` statement (executor.py:14), so `orchestrator.jev` is only partially initialized (no `ask` attribute yet, since `def ask(...)` is ~200 lines below jev.py's own `from . import spawn` line) when jev_skills.py tries to evaluate `ask=jev.ask` as its default -> AttributeError at import time. Separately, even if the crash is avoided by lazy-importing, this early-bound default silently defeats the codebase's established test-mocking idiom of `mock.patch.object(jev_route.jev, \"ask\", fake)` (see tests/test_jev_route.py), because callers that don't pass `ask=` explicitly (skill_router.select, _prepare_skills, _skill_routing, _route_skills \u2014 none of which the spec gives an `ask` passthrough) will always invoke whatever `jev.ask` was at jev_skills.py's def-time, not a monkeypatched replacement.",
+            "severity": "high",
+            "line": 14
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Existing import order (`jev_route` before `skill_router` in the same import statement) is the concrete trigger for the circular-import crash described above once skill_router gains a dependency on jev_skills/jev.",
+            "severity": "high",
+            "line": 14
+          },
+          {
+            "path": "orchestrator/skill_router.py",
+            "issue": "Spec says active mode 'adds Jev-selected ambiguous skills to selected (still under max_selected)' but select() currently computes `selected = mandatory + ranked[:cap]` with cap = max_selected; the spec doesn't say whether jev-added ids consume remaining cap headroom or are appended on top, risking selected exceeding max_selected or silently starving ranked trigger matches.",
+            "severity": "med",
+            "line": 48
+          },
+          {
+            "path": "orchestrator/jev_skills.py",
+            "issue": "jev_max_batch (default 8) truncation order for the ambiguous bucket is unspecified when more than 8 skills are ambiguous, making the acceptance test's expected batch content implementation-defined rather than verifiable against a spec-mandated order.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Change jev_skills.classify's signature to `ask=None` and resolve `ask = ask or jev.ask` inside the function body (call `jev.ask(...)` via attribute lookup like jev_route.py/jev_sched.py already do), so the default isn't evaluated against a possibly-partial jev module at import time and so mock.patch.object(jev, \"ask\", ...) is honored by every caller that doesn't pass ask explicitly.",
+          "Import jev_skills (and jev) lazily inside skill_router.select(), not at module top level, mirroring executor.py's existing local `from .spawn import _prepare_skills` import used to avoid this same class of circular import between executor.py and spawn.py.",
+          "State that when more than jev_max_batch skills are ambiguous, the batch is truncated using the same (-strength, id) ordering skill_router.select already uses for ranked candidates.",
+          "Clarify that active-mode Jev-selected ambiguous skills are added to `selected` only up to the remaining headroom under max_selected (len(mandatory)+len(ranked_kept)+len(jev_added) <= max_selected), not additively beyond it."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790123041.3911638,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev_skills.py",
+          "issue": "Spec literally requires `def classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask)`. A default parameter value is evaluated once, at module-import time, not per call. Wiring skill_router.select to depend on jev_skills (which must `from . import jev`) creates a real cycle: skill_router -> jev_skills -> jev -> spawn -> skill_router. orchestrator/executor.py already imports `jev_route` (which imports `jev`, which imports `spawn`, which imports `skill_router`) BEFORE `skill_router` in the same `from . import ...` statement (executor.py:14), so `orchestrator.jev` is only partially initialized (no `ask` attribute yet, since `def ask(...)` is ~200 lines below jev.py's own `from . import spawn` line) when jev_skills.py tries to evaluate `ask=jev.ask` as its default -> AttributeError at import time. Separately, even if the crash is avoided by lazy-importing, this early-bound default silently defeats the codebase's established test-mocking idiom of `mock.patch.object(jev_route.jev, \"ask\", fake)` (see tests/test_jev_route.py), because callers that don't pass `ask=` explicitly (skill_router.select, _prepare_skills, _skill_routing, _route_skills \u2014 none of which the spec gives an `ask` passthrough) will always invoke whatever `jev.ask` was at jev_skills.py's def-time, not a monkeypatched replacement.",
+          "severity": "high",
+          "line": 14
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Existing import order (`jev_route` before `skill_router` in the same import statement) is the concrete trigger for the circular-import crash described above once skill_router gains a dependency on jev_skills/jev.",
+          "severity": "high",
+          "line": 14
+        },
+        {
+          "path": "orchestrator/skill_router.py",
+          "issue": "Spec says active mode 'adds Jev-selected ambiguous skills to selected (still under max_selected)' but select() currently computes `selected = mandatory + ranked[:cap]` with cap = max_selected; the spec doesn't say whether jev-added ids consume remaining cap headroom or are appended on top, risking selected exceeding max_selected or silently starving ranked trigger matches.",
+          "severity": "med",
+          "line": 48
+        },
+        {
+          "path": "orchestrator/jev_skills.py",
+          "issue": "jev_max_batch (default 8) truncation order for the ambiguous bucket is unspecified when more than 8 skills are ambiguous, making the acceptance test's expected batch content implementation-defined rather than verifiable against a spec-mandated order.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790122683.162112,
+  "account": "B",
+  "pid": 94424,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev_skills.py",
+      "issue": "Spec literally requires `def classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask)`. A default parameter value is evaluated once, at module-import time, not per call. Wiring skill_router.select to depend on jev_skills (which must `from . import jev`) creates a real cycle: skill_router -> jev_skills -> jev -> spawn -> skill_router. orchestrator/executor.py already imports `jev_route` (which imports `jev`, which imports `spawn`, which imports `skill_router`) BEFORE `skill_router` in the same `from . import ...` statement (executor.py:14), so `orchestrator.jev` is only partially initialized (no `ask` attribute yet, since `def ask(...)` is ~200 lines below jev.py's own `from . import spawn` line) when jev_skills.py tries to evaluate `ask=jev.ask` as its default -> AttributeError at import time. Separately, even if the crash is avoided by lazy-importing, this early-bound default silently defeats the codebase's established test-mocking idiom of `mock.patch.object(jev_route.jev, \"ask\", fake)` (see tests/test_jev_route.py), because callers that don't pass `ask=` explicitly (skill_router.select, _prepare_skills, _skill_routing, _route_skills \u2014 none of which the spec gives an `ask` passthrough) will always invoke whatever `jev.ask` was at jev_skills.py's def-time, not a monkeypatched replacement.",
+      "severity": "high",
+      "line": 14
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Existing import order (`jev_route` before `skill_router` in the same import statement) is the concrete trigger for the circular-import crash described above once skill_router gains a dependency on jev_skills/jev.",
+      "severity": "high",
+      "line": 14
+    },
+    {
+      "path": "orchestrator/skill_router.py",
+      "issue": "Spec says active mode 'adds Jev-selected ambiguous skills to selected (still under max_selected)' but select() currently computes `selected = mandatory + ranked[:cap]` with cap = max_selected; the spec doesn't say whether jev-added ids consume remaining cap headroom or are appended on top, risking selected exceeding max_selected or silently starving ranked trigger matches.",
+      "severity": "med",
+      "line": 48
+    },
+    {
+      "path": "orchestrator/jev_skills.py",
+      "issue": "jev_max_batch (default 8) truncation order for the ambiguous bucket is unspecified when more than 8 skills are ambiguous, making the acceptance test's expected batch content implementation-defined rather than verifiable against a spec-mandated order.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

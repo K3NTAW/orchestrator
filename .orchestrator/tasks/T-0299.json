@@ -1,0 +1,86 @@
+{
+  "id": "T-0299",
+  "parent": "T-0260",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: G7 v2: the daemon writes routine fix rounds itself and reconciles merged_into (spec review T-0293 folded in: coordinated with the autonomous held decision point, escalation notifies once)",
+  "spec": "Replaces T-0272 after spec review T-0293. G6 v4 (T-0290, merged) added stage leases and clear_stage(); build on the current goal/T-0260 daemon.py. Today a held task waits for the Planner to write a fix-round spec by hand and to mark the original done + merged_into after the fix round merges. Held tasks carry hold_reason and resume_hint (tests-green failures, rebase conflicts); review tasks carry result.comments with path, line, issue, severity; constraints.fix_round_for makes spawn.base_for cut the fix worktree from the held task's branch.\nChange:\n1. daemon.auto_fix_round(pool) runs in tick() after sweep_leases and before planner_runs decisions, for held execute tasks with no non-failed task whose constraints.fix_round_for == id. Routine when: hold_reason is gate_red and resume_hint.failures names at least one FAIL or ERROR test id, or hold_reason starts 'review request_changes' and every comment of that review has a path inside the task scope; and the task has fewer than [daemon].auto_fix_rounds (pool.toml, default 2) automatic rounds (count tasks with fix_round_for == id and constraints.auto_round set). Otherwise escalate: stamp pipeline.auto_fix_skipped_at (stamp()-then-notify convention) and notify once; a second tick does not notify again.\n2. The fix task: title 'fix round <n>: <original title>', spec rendered from a new .orchestrator/prompts/fix-round.md (original id and title, failed acceptance criteria: those mentioning a failing test id, else all; failure text capped 3,000 chars in a fenced block; review comments as path:line issue lines; branch and head sha; keep every original criterion), same scope, complexity, tier and constraints plus fix_round_for and auto_round = n, inputs = [original, review id if any], created under the bus lock with a dedupe key like spec reviews use (one fix task per held_at).\n3. Coordination with planner_runs.py: decision_points() skips a held task when a non-failed task with constraints.fix_round_for == id exists (the daemon or the Planner already acted), so [planner].autonomous = true never launches a Planner for a hold that auto_fix_round handled; test in tests/test_planner_runs.py.\n4. Reconciliation: in gate() direct-merge and merge_reviewed(), after a task with constraints.fix_round_for merges, set the original task status done, merged_into = the same target, merged_via = 'fix round <fix id> <sha>', hold_reason None; walk up if the original was itself a fix round.\n5. README Pipeline: 'Automatic fix rounds' paragraph (routine/escalate rule, round cap, coordination with autonomous decisions); pool.toml [daemon] auto_fix_rounds = 2.\nTests in tests/test_daemon.py: test_auto_fix_round_on_gate_red, test_auto_fix_round_on_review_comments_in_scope, test_no_auto_fix_when_comments_outside_scope, test_no_auto_fix_after_round_cap, test_escalation_notifies_once (notify counted over two ticks), test_fix_round_merge_reconciles_original_chain; tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists.",
+  "inputs": [
+    "T-0296"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_auto_fix_round_on_gate_red, ::test_auto_fix_round_on_review_comments_in_scope, ::test_no_auto_fix_when_comments_outside_scope, ::test_no_auto_fix_after_round_cap, ::test_escalation_notifies_once, ::test_fix_round_merge_reconciles_original_chain pass",
+    "tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists passes",
+    "the generated fix task passes .claude/hooks/require-acceptance.sh and carries constraints.fix_round_for and auto_round",
+    "README and pool.toml document the rule, the cap and the coordination",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_planner_runs.py",
+    "README.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "queued",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0299",
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789847685.3107982,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0299",
+      "claimed_at": 1789847685.307275
+    },
+    {
+      "ts": 1789847685.314198,
+      "account": "B"
+    },
+    {
+      "ts": 1789847685.321578,
+      "pid": 89495,
+      "account": "B"
+    },
+    {
+      "ts": 1789847977.3383381,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "Reviewed the T-0299 spec against current `daemon.py`/`planner_runs.py`. Verdict: **request_changes** \u2014 two high-severity design gaps before this should go to an executor:\n\n1. **Missing `parent` field** on the generated fix task (item 2's field list never mentions it) \u2014 without it, `merge.merge()` sends the fix round to a stray `integration` branch instead of `goal/<parent>`, breaking item 4's reconciliation entirely.\n2. **Round cap is per-node, not per-chain** \u2014 `auto_fix_rounds` counts only direct children of whichever task is *currently* held, so a chain of held\u2192fix\u2192held\u2192fix resets the cap at each hop, making total automatic churn effectively unbounded.\n3. Related to #2: decision_points()'s new skip condition (\"non-failed fix_round_for task exists\") can't tell an in-flight fix round from an exhausted/escalated one, since exhausted rounds end up `status=\"held\"`, not `\"failed\"` \u2014 risking a permanently stalled goal that neither the daemon nor an autonomous Planner ever revisits.\n\nPlus two lower-severity notes: an orphaned `fix-delta.md` template left unaddressed, and a fragile FAIL/ERROR-test-id parsing heuristic over heterogeneous test-runner output."
+      }
+    },
+    {
+      "ts": 1790166287.959886,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "verdict_retries": 1
+      },
+      "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)"
+    }
+  ],
+  "claimed_at": 1789847685.307275,
+  "account": "B",
+  "pid": null,
+  "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)",
+  "resume_hint": {
+    "raw": "Reviewed the T-0299 spec against current `daemon.py`/`planner_runs.py`. Verdict: **request_changes** \u2014 two high-severity design gaps before this should go to an executor:\n\n1. **Missing `parent` field** on the generated fix task (item 2's field list never mentions it) \u2014 without it, `merge.merge()` sends the fix round to a stray `integration` branch instead of `goal/<parent>`, breaking item 4's reconciliation entirely.\n2. **Round cap is per-node, not per-chain** \u2014 `auto_fix_rounds` counts only direct children of whichever task is *currently* held, so a chain of held\u2192fix\u2192held\u2192fix resets the cap at each hop, making total automatic churn effectively unbounded.\n3. Related to #2: decision_points()'s new skip condition (\"non-failed fix_round_for task exists\") can't tell an in-flight fix round from an exhausted/escalated one, since exhausted rounds end up `status=\"held\"`, not `\"failed\"` \u2014 risking a permanently stalled goal that neither the daemon nor an autonomous Planner ever revisits.\n\nPlus two lower-severity notes: an orphaned `fix-delta.md` template left unaddressed, and a fragile FAIL/ERROR-test-id parsing heuristic over heterogeneous test-runner output."
+  },
+  "hold_reason": null,
+  "pipeline": {
+    "verdict_retries": 1
+  }
+}

@@ -1,0 +1,1805 @@
+{
+  "id": "T-1639",
+  "created_at": 1791041464.6094348,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 4,
+  "title": "E7 finish (T-1628 lineage): grant_scope keeps write_scope precedence, reaches review diffs and the routine fix-round scope check",
+  "spec": "Goal T-1403, plan label E7-finish. Finishes E7 T-1628 (held: review T-1636 request_changes 2026-10-03). Fresh task, not a resumed fix round: the Planner created your branch task/THIS-TASK at 490cc11 (the head of task/T-1628: constraints.grant_scope in scopes.effective_scope, scope-guard.sh, spawn packet, daemon dirty check, bus validation). Keep everything already committed. Do not edit .claude/hooks/scope-guard.sh (protected path; its committed change stays as is).\n\nReview T-1636 findings to fix (locate by symbol):\n1. scopes.safe_scope used to read task.get('write_scope', task.get('scope', [])) and now calls effective_scope, which ignores write_scope. Restore the precedence: the base list is write_scope when the key is present, else scope; effective_scope appends constraints.grant_scope (dedup, order kept) to that base; safe_scope keeps its containment filtering over that combined list. A task with write_scope ['x/'] and scope ['y/'] yields ['x/'] plus grants, never 'y/'.\n2. spawn: the review diff for a review task is built from src['scope'] (scoped_diff and the review packet's pathspec). Use scopes.effective_scope(src) there, so files edited under grant_scope appear in the reviewer's diff, including security reviews. Also in daemon.py where review tasks are created with the source task's scope (grep the review bus.create_task call), pass scopes.effective_scope(t) as the review's scope.\n3. daemon.auto_fix_round: the routine review-comment check _path_in_scope(c.get('path'), held.get('scope') or []) uses scope only; use scopes.effective_scope(held), so a comment on a granted path counts as in scope.\n4. tests/test_hooks.py::test_scope_guard_accepts_grant_scope: also assert the blocked path's message shows both the scope and grant_scope lists, and add a case for the early exit for a file outside the task worktree (the first block in scope-guard.sh), asserting exit code 2 and that the message names both lists.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_scopes.py safe_scope tests (grep 'safe_scope' and 'write_scope') pass unchanged; tests/test_spawn.py review packet tests pass unchanged (grep 'scoped_diff' and 'review_packet'). Commit first, then run tests/test_scopes.py, tests/test_spawn.py, tests/test_daemon.py and tests/test_hooks.py in the foreground, then the whole tests directory once with the command .claude/hooks/tests-green.sh uses; report failures only. Never background a command. Write tests as unittest.TestCase methods using tests/_harness.py.",
+  "inputs": [
+    "T-1628",
+    "T-1636"
+  ],
+  "acceptance": [
+    "tests/test_scopes.py::test_effective_scope_includes_grant_scope: passes: scopes.effective_scope of a task with scope ['a/'] and constraints.grant_scope naming one test module under tests/ returns both entries in order, safe_scope keeps the grant entry when it is contained in the worktree and drops '..' entries; a task without grant_scope is unchanged",
+    "tests/test_hooks.py::test_scope_guard_accepts_grant_scope: passes: scope-guard.sh allows a write to a path matched only by constraints.grant_scope and still blocks a path outside both lists with a message naming both",
+    "tests/test_daemon.py::test_gate_dirty_check_and_fix_round_honour_grant_scope: passes: a done execute task with an uncommitted file under its grant_scope is reported by the gate's dirty-scope check (held 'executor did not commit'), and auto_fix_round's fix round carries the parent's constraints.grant_scope",
+    "tests/test_bus.py::test_create_task_validates_grant_scope: passes: bus.create_task rejects grant_scope entries that are not strings, are empty, are absolute or contain '..', and accepts a list of relative paths",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0",
+    "tests/test_scopes.py::test_effective_scope_keeps_write_scope_precedence: passes: for a task with write_scope ['x/'], scope ['y/'] and constraints.grant_scope ['tests/test_x.py'], effective_scope returns ['x/', 'tests/test_x.py'] and safe_scope (with a worktree containing those paths) returns the same; a task without write_scope returns scope plus grants",
+    "tests/test_spawn.py::test_review_diff_includes_grant_scope_paths: passes: the scoped diff and the review packet pathspec for a source task with constraints.grant_scope include a committed change under a granted path that is outside scope",
+    "tests/test_daemon.py::test_routine_review_comment_on_granted_path_is_in_scope: passes: auto_fix_round treats a rejecting review comment on a path under the held task's grant_scope as in scope and files a routine fix round; a comment on a path outside both lists is still not routine"
+  ],
+  "scope": [
+    "orchestrator/scopes.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_scopes.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_hooks.py"
+  ],
+  "depends_on": [
+    "T-1638"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "E7-finish",
+    "finishes": "T-1628"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1639",
+  "codex_thread": "01a1029a-18fc-7f73-9a5e-24a15f4a3270",
+  "result": {
+    "summary": "Summary:\n- Implemented grant-scope precedence and propagation through reviews and auto-fix routing.\n- Added regression tests for scopes, spawn, daemon, and hooks.\n- Committed as `b422ffa`.\n\nFiles changed: `orchestrator/{scopes,spawn,daemon}.py`, `tests/{test_scopes,test_spawn,test_daemon,test_hooks}.py`\n\nFailures-only test output:\n- `test_spawn.py`: 2 existing fixture errors involving missing `goal/G`.\n- Full `tests-green.sh` gate: passed.\n- Worktree clean.",
+    "executed_by": "codex:luna",
+    "thread": "01a1029a-18fc-7f73-9a5e-24a15f4a3270",
+    "usage": {
+      "input_tokens": 2513612,
+      "cached_input_tokens": 2429696,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 8735,
+      "reasoning_output_tokens": 2888,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791044649.750591,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535
+      }
+    },
+    {
+      "ts": 1791044649.752661,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513
+      }
+    },
+    {
+      "ts": 1791044649.7540832,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513
+      }
+    },
+    {
+      "ts": 1791044663.3596401,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7850,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791044663.361415,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346
+      }
+    },
+    {
+      "ts": 1791045002.3983948,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        }
+      }
+    },
+    {
+      "ts": 1791045014.048386,
+      "packet_meta": {
+        "chars": 6971,
+        "est_tokens": 1742,
+        "presented_tokens": 1742,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "5cde68d1e2c3d8d286f84ff3f5eebbbbda7572e6fd0ee2c31132c22b23eaa213"
+          },
+          "objective": {
+            "chars": 2669,
+            "est_tokens": 667,
+            "sha256": "5bba4403c6e9c4ea72534c858e20cd171370eb163087016489b82cfb60e0fdd4"
+          },
+          "acceptance": {
+            "chars": 2045,
+            "est_tokens": 511,
+            "sha256": "1e2ccfac64884fa4feafb36e658e699744196f8888feae6be4a23f29212147ae"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "43bf7752477f8dbe36b41ce2ac7b3a824acb1c9479494e6569fb862858f5e170"
+          },
+          "write_scope": {
+            "chars": 179,
+            "est_tokens": 44,
+            "sha256": "aeee5edf6b28361de851dc3e4d982f3aa570011ff682871cd43fd371a958d1a5"
+          },
+          "read_scope": {
+            "chars": 1437,
+            "est_tokens": 359,
+            "sha256": "bec668a302685b024ad783686c337b543cdcdc451941c5f29e80b2e662d14ced"
+          },
+          "constraints": {
+            "chars": 201,
+            "est_tokens": 50,
+            "sha256": "72d4f52eb9f1bc1d5046ccbb6ed194ac3488911862b932eddd8c6ce3198d0842"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "f298c4b26a95",
+        "version": "f298c4b26a95",
+        "candidate_known": true,
+        "base": "408738b4f46e",
+        "sources": "pool.toml@ff24348c30dc gotchas@533a3df532c5 memory@notes over cap by 2171 chars: acceptance kept whole routed=shadow",
+        "policy_version": "ff24348c30dc",
+        "gotchas": "533a3df532c5",
+        "candidate_tokens": 4020,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 19195,
+        "routed_reduction_ratio": 0.8681984712108192,
+        "routed_hidden": 61,
+        "routed_ambiguous": 15,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "bb7c9af200db",
+          "4d11f773aed4",
+          "d2029f834660",
+          "c4239671ce8c",
+          "34891102c166",
+          "197a97a3d5a3",
+          "4e69580dd865",
+          "c9373171f433",
+          "1abede74550a",
+          "5de74ac90a48",
+          "5e9bcae7ed92",
+          "63407adb9b84",
+          "6bc5ed5c9a5f",
+          "9467fb8c20b0",
+          "10357d124edf",
+          "506593215e9e",
+          "2db17589af9c",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "d0e646881f9e",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "d80d1256695d",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "453b6e50c221",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "28a564cd538d",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "64b680375800",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "18f9ce631e61",
+          "ce80308dc309",
+          "051786ba0165",
+          "d8c56b24a84f",
+          "ef73848f43b6",
+          "d38dc8f56565",
+          "15635a7332d0",
+          "d0e0813e68c7",
+          "b4bd74f47864",
+          "ccbfe70fac51",
+          "e85902ae399c",
+          "0b4b19fe9e7b",
+          "1dacdf4da4b3",
+          "71b238c46143",
+          "69321709f433",
+          "fb0463969ed6",
+          "3cab1e35d706",
+          "7e1d1cae2f7e",
+          "5cc9e40e40ce",
+          "97b675e98731",
+          "1306c222e85f",
+          "f2e8cb6cb127",
+          "20deadf14569",
+          "01685e27cbc9",
+          "5764aba2f72e",
+          "fcdb086b4ccd",
+          "074cb4957865",
+          "913f472f7cfe",
+          "0d50926114f2",
+          "120a18ed3aa4",
+          "a81841ba52a0",
+          "ae34305cb07d",
+          "4c0733920458",
+          "8f7f932f348a",
+          "eb2a0506ff95",
+          "92c1f6f994a2",
+          "ffd37cfc2d11",
+          "eb1401356815",
+          "7207f99467f4",
+          "5594ba70135a",
+          "419c419e681f",
+          "6e60f4e260b9",
+          "b8c759d079b3",
+          "e4c630cc87b3",
+          "e146114ba8ec",
+          "e325ae44fe23",
+          "d876d051610f",
+          "f5f8de2fdaa8",
+          "7f65565c4e40",
+          "66ab1306ccfc",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "f5e9df567728",
+          "db9174a961da",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "caa80180ae36"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7850,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1791045014.049773,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1639",
+      "claimed_at": 1791045014.049469
+    },
+    {
+      "ts": 1791045014.050925,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1791045485.5997682,
+      "codex_thread": "01a1029a-18fc-7f73-9a5e-24a15f4a3270",
+      "codex_thread_head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+    },
+    {
+      "ts": 1791045485.60307,
+      "packet_meta": {
+        "chars": 6971,
+        "est_tokens": 1742,
+        "presented_tokens": 1742,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "5cde68d1e2c3d8d286f84ff3f5eebbbbda7572e6fd0ee2c31132c22b23eaa213"
+          },
+          "objective": {
+            "chars": 2669,
+            "est_tokens": 667,
+            "sha256": "5bba4403c6e9c4ea72534c858e20cd171370eb163087016489b82cfb60e0fdd4"
+          },
+          "acceptance": {
+            "chars": 2045,
+            "est_tokens": 511,
+            "sha256": "1e2ccfac64884fa4feafb36e658e699744196f8888feae6be4a23f29212147ae"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "43bf7752477f8dbe36b41ce2ac7b3a824acb1c9479494e6569fb862858f5e170"
+          },
+          "write_scope": {
+            "chars": 179,
+            "est_tokens": 44,
+            "sha256": "aeee5edf6b28361de851dc3e4d982f3aa570011ff682871cd43fd371a958d1a5"
+          },
+          "read_scope": {
+            "chars": 1437,
+            "est_tokens": 359,
+            "sha256": "bec668a302685b024ad783686c337b543cdcdc451941c5f29e80b2e662d14ced"
+          },
+          "constraints": {
+            "chars": 201,
+            "est_tokens": 50,
+            "sha256": "72d4f52eb9f1bc1d5046ccbb6ed194ac3488911862b932eddd8c6ce3198d0842"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "f298c4b26a95",
+        "version": "f298c4b26a95",
+        "candidate_known": true,
+        "base": "408738b4f46e",
+        "sources": "pool.toml@ff24348c30dc gotchas@533a3df532c5 memory@notes over cap by 2171 chars: acceptance kept whole routed=shadow",
+        "policy_version": "ff24348c30dc",
+        "gotchas": "533a3df532c5",
+        "candidate_tokens": 4020,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 19195,
+        "routed_reduction_ratio": 0.8681984712108192,
+        "routed_hidden": 61,
+        "routed_ambiguous": 15,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "bb7c9af200db",
+          "4d11f773aed4",
+          "d2029f834660",
+          "c4239671ce8c",
+          "34891102c166",
+          "197a97a3d5a3",
+          "4e69580dd865",
+          "c9373171f433",
+          "1abede74550a",
+          "5de74ac90a48",
+          "5e9bcae7ed92",
+          "63407adb9b84",
+          "6bc5ed5c9a5f",
+          "9467fb8c20b0",
+          "10357d124edf",
+          "506593215e9e",
+          "2db17589af9c",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "e13b05dcafb4",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "25ee5f8920dc",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "d0e646881f9e",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "d80d1256695d",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "453b6e50c221",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "28a564cd538d",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "64b680375800",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "18f9ce631e61",
+          "ce80308dc309",
+          "051786ba0165",
+          "d8c56b24a84f",
+          "ef73848f43b6",
+          "d38dc8f56565",
+          "15635a7332d0",
+          "d0e0813e68c7",
+          "b4bd74f47864",
+          "ccbfe70fac51",
+          "e85902ae399c",
+          "0b4b19fe9e7b",
+          "1dacdf4da4b3",
+          "71b238c46143",
+          "69321709f433",
+          "fb0463969ed6",
+          "3cab1e35d706",
+          "7e1d1cae2f7e",
+          "5cc9e40e40ce",
+          "97b675e98731",
+          "1306c222e85f",
+          "f2e8cb6cb127",
+          "20deadf14569",
+          "01685e27cbc9",
+          "5764aba2f72e",
+          "fcdb086b4ccd",
+          "074cb4957865",
+          "913f472f7cfe",
+          "0d50926114f2",
+          "120a18ed3aa4",
+          "a81841ba52a0",
+          "ae34305cb07d",
+          "4c0733920458",
+          "8f7f932f348a",
+          "eb2a0506ff95",
+          "92c1f6f994a2",
+          "ffd37cfc2d11",
+          "eb1401356815",
+          "7207f99467f4",
+          "5594ba70135a",
+          "419c419e681f",
+          "6e60f4e260b9",
+          "b8c759d079b3",
+          "e4c630cc87b3",
+          "e146114ba8ec",
+          "e325ae44fe23",
+          "d876d051610f",
+          "f5f8de2fdaa8",
+          "7f65565c4e40",
+          "66ab1306ccfc",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "f5e9df567728",
+          "db9174a961da",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "caa80180ae36"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7850,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791045486.312791,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791045486.316303,
+      "status": "done",
+      "result": {
+        "summary": "Summary:\n- Implemented grant-scope precedence and propagation through reviews and auto-fix routing.\n- Added regression tests for scopes, spawn, daemon, and hooks.\n- Committed as `b422ffa`.\n\nFiles changed: `orchestrator/{scopes,spawn,daemon}.py`, `tests/{test_scopes,test_spawn,test_daemon,test_hooks}.py`\n\nFailures-only test output:\n- `test_spawn.py`: 2 existing fixture errors involving missing `goal/G`.\n- Full `tests-green.sh` gate: passed.\n- Worktree clean.",
+        "executed_by": "codex:luna",
+        "thread": "01a1029a-18fc-7f73-9a5e-24a15f4a3270",
+        "usage": {
+          "input_tokens": 2513612,
+          "cached_input_tokens": 2429696,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8735,
+          "reasoning_output_tokens": 2888,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791045488.555281,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791045682.542819,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1791045683.470134,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        }
+      }
+    },
+    {
+      "ts": 1791045683.7251751,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        },
+        "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+      }
+    },
+    {
+      "ts": 1791045683.736182,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        },
+        "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+        "gated_at_done": 1791045683.7359848
+      }
+    },
+    {
+      "ts": 1791045721.033761,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791045782.185409,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        },
+        "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+        "gated_at_done": 1791045683.7359848,
+        "merged_at": 1791045782.1851048,
+        "merged_at_lease": 1791046682.1851048
+      }
+    },
+    {
+      "ts": 1791045782.388511,
+      "status": "failed",
+      "reason": "rebase_conflict",
+      "resume_hint": {
+        "conflicts": [
+          "orchestrator/spawn.py",
+          "tests/test_spawn.py"
+        ],
+        "hunks": "diff --cc orchestrator/spawn.py\nindex 9b9e73b,8766c28..0000000\n--- a/orchestrator/spawn.py\n+++ b/orchestrator/spawn.py\n@@@ -1122,11 -1120,9 +1122,16 @@@ def review_packet(task, reviewed, *, cf\n      cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)\n      src = reviewed or task\n      wt = Path(src.get(\"worktree\") or ROOT)\n+     scope = effective_scope(src)\n      raw_diff = scoped_diff(src)\n++<<<<<<< HEAD\n +    base = scoped_diff_base(src)\n +    head = git(\"rev-parse\", \"HEAD\", cwd=wt, check=False).stdout.strip()[:12] or \"(unavailable)\"\n +    branch = src.get(\"branch\") or f\"task/{src.get('id', '(none)')}\"\n +    hint = f\"git -C {wt} diff -U3 {base}...HEAD -- {' '.join(src.get('scope', []))}\"\n++=======\n+     hint = f\"git -C {wt} diff -- {' '.join(scope)}\"\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n      changed = sorted(set(re.findall(r\"^[+\\-]{3} [ab]/(tests/\\S+)\", raw_diff, re.M)))\n      tests = [f\"{path}: present\" for path in changed]\n      for test_id in _acceptance_test_ids(src.get(\"acceptance\", [])):\n@@@ -1145,9 -1141,8 +1150,14 @@@\n          gate_lines.append(\"last_failure_head: \" + str(failure).splitlines()[0][:500])\n      sections = ([_section(\"skills\", skills[\"section\"].removeprefix(\"## skills\\n\"))]\n                  if skills and skills.get(\"section\") else []) + [_section(\"spec\", src.get(\"spec\")), _section(\"acceptance\", src.get(\"acceptance\", [])),\n++<<<<<<< HEAD\n +                _section(\"scope\", src.get(\"scope\", [])), None,\n +                _section(\"changed tests\", tests or [\"(none)\"]), _section(\"gate\", gate_lines),\n +                _section(\"review branch\", f\"{branch} @ {head}\")]\n++=======\n+                 _section(\"scope\", scope), None,\n+                 _section(\"changed tests\", tests or [\"(none)\"]), _section(\"gate\", gate_lines)]\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n      reviewer_role = (task.get(\"constraints\") or {}).get(\"reviewer_role\")\n      role_focus = {\n          \"acceptance\": (\"Focus: every acceptance criterion met by the diff, functional correctness, regressions \"\n@@@ -1885,8 -1875,9 +1895,14 @@@ def scoped_diff(src)\n      reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't\n      include its predecessor's already-merged hunks.\"\"\"\n      wt = src.get(\"worktree\") or ROOT\n++<<<<<<< HEAD\n +    base = scoped_diff_base(src)\n +    r = git(\"diff\", \"-U3\", f\"{base}...HEAD\", \"--\", *src[\"scope\"], cwd=wt, check=False)\n++=======\n+     parent = src.get(\"parent\")\n+     base = f\"goal/{parent}\" if parent and branch_exists(f\"goal/{parent}\") else \"origin/main\"\n+     r = git(\"diff\", \"-U3\", f\"{base}...HEAD\", \"--\", *effective_scope(src), cwd=wt, check=False)\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n      return r.stdout[:40000] or \"(empty diff)\"\n  \n  \ndiff --cc tests/test_spawn.py\nindex 1dd43c8,d0bec20..0000000\n--- a/tests/test_spawn.py\n+++ b/tests/test_spawn.py\n@@@ -1453,37 -1444,20 +1453,54 @@@ class SpawnBase(unittest.TestCase)\n          self.assertIn(\"+B = 1\", diff)\n          self.assertNotIn(\"+A = 1\", diff)                              # predecessor's hunk, already in goal/G\n  \n++<<<<<<< HEAD\n +    def test_review_packet_hint_names_base_range_and_branch(self):\n +        task = bus.create_task(\"review hint\", \"s\", [\"a\"], [\"hint.py\"], role=\"execute\", parent=\"G\")\n +        wt = spawn.ensure_worktree(task[\"id\"], base=\"goal/G\")\n +        bus.update(task[\"id\"], worktree=str(wt))\n +        (wt / \"hint.py\").write_text(\"hint = True\\n\")\n +        self.g(\"add\", \"hint.py\", cwd=wt); self.g(\"commit\", \"-qm\", \"review hint\", cwd=wt)\n +        task = {**bus.get(task[\"id\"]), \"branch\": \"review/custom\"}\n +        base_sha = self.g(\"rev-parse\", \"goal/G\", cwd=TMP).stdout.strip()[:12]\n +        head_sha = self.g(\"rev-parse\", \"HEAD\", cwd=wt).stdout.strip()[:12]\n +        raw = \"diff --git a/hint.py b/hint.py\\n\" + \"\\n\".join(f\"+line {i:05d}\" for i in range(1500))\n +        with mock.patch.object(spawn, \"scoped_diff\", return_value=raw):\n +            packet = spawn.review_packet(task, task, cfg={\"context_router\": {\"mode\": \"shadow\"}})\n +        hint = f\"git -C {wt} diff -U3 goal/G...HEAD -- hint.py\"\n +        self.assertIn(hint, packet)\n +        self.assertIn(f\"base {base_sha} \", packet.splitlines()[0])\n +        self.assertIn(\"review/custom @ \" + head_sha, packet)\n +\n +    def test_review_packet_diff_budget_honours_review_diff_chars(self):\n +        task = bus.create_task(\"review budget\", \"s\", [\"a\"], [\"budget.py\"], role=\"execute\", parent=\"G\")\n +        wt = spawn.ensure_worktree(task[\"id\"], base=\"goal/G\")\n +        bus.update(task[\"id\"], worktree=str(wt))\n +        task = bus.get(task[\"id\"])\n +        raw = \"diff --git a/budget.py b/budget.py\\n\" + \"\\n\".join(f\"+line {i:05d}\" for i in range(1500))\n +        hint = f\"git -C {wt} diff -U3 goal/G...HEAD -- budget.py\"\n +        for cap, truncated in ((20000, False), (3000, True)):\n +            with self.subTest(cap=cap), mock.patch.object(spawn, \"scoped_diff\", return_value=raw):\n +                packet = spawn.review_packet(task, task, cfg={\"context_router\": {\"mode\": \"shadow\"},\n +                                                               \"limits\": {\"review_diff_chars\": cap}})\n +            self.assertEqual(\"more lines\" in packet, truncated)\n +            if truncated:\n +                self.assertIn(hint, packet)\n++=======\n+     def test_review_diff_includes_grant_scope_paths(self):\n+         t = bus.create_task(\"grant review\", \"s\", [\"a\"], [\"shared.py\"], role=\"execute\", parent=\"G\",\n+                             constraints={\"grant_scope\": [\"grant.py\"]})\n+         wt = spawn.ensure_worktree(t[\"id\"])\n+         bus.update(t[\"id\"], worktree=str(wt))\n+         (wt / \"shared.py\").write_text(\"shared = 1\\n\")\n+         (wt / \"grant.py\").write_text(\"granted = 1\\n\")\n+         self.g(\"add\", \"-A\", cwd=wt)\n+         self.g(\"commit\", \"-qm\", \"scoped grant\", cwd=wt)\n+ \n+         diff = spawn.scoped_diff(bus.get(t[\"id\"]))\n+         self.assertIn(\"grant.py\", diff)\n+         packet = spawn.review_packet(bus.get(t[\"id\"]), bus.get(t[\"id\"]))\n+         self.assertIn(\"grant.py\", packet)\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n  \n  \n  class SecretsForRole(unittest.TestCase):\n"
+      }
+    },
+    {
+      "ts": 1791045782.521039,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        },
+        "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+        "gated_at_done": 1791045683.7359848,
+        "merged_at": 1791045782.1851048,
+        "merged_at_lease": 1791046682.1851048,
+        "merged_at_done": 1791045782.5208142
+      }
+    },
+    {
+      "ts": 1791045782.523037,
+      "status": "held",
+      "hold_reason": "merge conflict"
+    },
+    {
+      "ts": 1791045783.636836,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        },
+        "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+        "gated_at_done": 1791045683.7359848,
+        "merged_at": 1791045782.1851048,
+        "merged_at_lease": 1791046682.1851048,
+        "merged_at_done": 1791045782.5208142,
+        "failure_kind": "conflict"
+      }
+    },
+    {
+      "ts": 1791045785.2654111,
+      "pipeline": {
+        "first_ready_at": 1791044649.750535,
+        "dispatched_at": 1791044649.752513,
+        "dispatched_at_lease": 1791045549.752513,
+        "dispatched_at_done": 1791044663.361346,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791045002.113919
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791045682.542621,
+        "gated_at_lease": 1791046582.542621,
+        "first_green_at": 1791045682.5420501,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1639",
+          "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/daemon.py",
+              "orchestrator/spawn.py",
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py",
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1637",
+              "T-1641"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope",
+            "acceptance_test"
+          ],
+          "checked_at": 1791045683.469547,
+          "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+        },
+        "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+        "gated_at_done": 1791045683.7359848,
+        "merged_at": 1791045782.1851048,
+        "merged_at_lease": 1791046682.1851048,
+        "merged_at_done": 1791045782.5208142,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1791045782.523037": true
+        }
+      }
+    },
+    {
+      "ts": 1791045869.059849,
+      "status": "superseded",
+      "reason": "merge conflict with D-reviewhint on goal/T-1403; finished by T-1645 (squash of task/T-1639 with conflicts resolved); stamp merged after T-1645 merges"
+    },
+    {
+      "ts": 1791046949.806456,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "T-1645",
+      "hold_reason": null,
+      "reason": "landed on goal/T-1403 via T-1645 (fc452eb squash); stamped by the Planner 2026-10-03"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791044649.750535,
+    "dispatched_at": 1791044649.752513,
+    "dispatched_at_lease": 1791045549.752513,
+    "dispatched_at_done": 1791044663.361346,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791045002.113919
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "ff0af80b44f2b25a3b07846f89b5b1848826cd8b",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1791045682.542621,
+    "gated_at_lease": 1791046582.542621,
+    "first_green_at": 1791045682.5420501,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1639",
+      "goal_head": "c14a9b9814a4ec9c6063aa1ab6b6b5a5f04d8358",
+      "moved_count": 4,
+      "stale_paths": [
+        "orchestrator/daemon.py",
+        "orchestrator/spawn.py",
+        "tests/test_daemon.py",
+        "tests/test_spawn.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [
+          "orchestrator/daemon.py",
+          "orchestrator/spawn.py",
+          "tests/test_daemon.py",
+          "tests/test_spawn.py"
+        ],
+        "changed_files_moved": [
+          "orchestrator/daemon.py",
+          "orchestrator/spawn.py",
+          "tests/test_daemon.py",
+          "tests/test_spawn.py"
+        ],
+        "tests_changed": [
+          "tests/test_daemon.py",
+          "tests/test_spawn.py"
+        ],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": [
+          "T-1637",
+          "T-1641"
+        ]
+      },
+      "risk": "high",
+      "risk_reasons": [
+        "scoped_files_changed",
+        "changed_files_moved",
+        "tests_changed",
+        "overlapping_merge"
+      ],
+      "graph": "stale",
+      "severity": "high",
+      "severity_reasons": [
+        "write_scope",
+        "acceptance_test"
+      ],
+      "checked_at": 1791045683.469547,
+      "head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e"
+    },
+    "reviewed_sha": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+    "gated_at_done": 1791045683.7359848,
+    "merged_at": 1791045782.1851048,
+    "merged_at_lease": 1791046682.1851048,
+    "merged_at_done": 1791045782.5208142,
+    "failure_kind": "conflict",
+    "auto_fix_skipped": {
+      "1791045782.523037": true
+    }
+  },
+  "packet_meta": {
+    "chars": 6971,
+    "est_tokens": 1742,
+    "presented_tokens": 1742,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "5cde68d1e2c3d8d286f84ff3f5eebbbbda7572e6fd0ee2c31132c22b23eaa213"
+      },
+      "objective": {
+        "chars": 2669,
+        "est_tokens": 667,
+        "sha256": "5bba4403c6e9c4ea72534c858e20cd171370eb163087016489b82cfb60e0fdd4"
+      },
+      "acceptance": {
+        "chars": 2045,
+        "est_tokens": 511,
+        "sha256": "1e2ccfac64884fa4feafb36e658e699744196f8888feae6be4a23f29212147ae"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "43bf7752477f8dbe36b41ce2ac7b3a824acb1c9479494e6569fb862858f5e170"
+      },
+      "write_scope": {
+        "chars": 179,
+        "est_tokens": 44,
+        "sha256": "aeee5edf6b28361de851dc3e4d982f3aa570011ff682871cd43fd371a958d1a5"
+      },
+      "read_scope": {
+        "chars": 1437,
+        "est_tokens": 359,
+        "sha256": "bec668a302685b024ad783686c337b543cdcdc451941c5f29e80b2e662d14ced"
+      },
+      "constraints": {
+        "chars": 201,
+        "est_tokens": 50,
+        "sha256": "72d4f52eb9f1bc1d5046ccbb6ed194ac3488911862b932eddd8c6ce3198d0842"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "f298c4b26a95",
+    "version": "f298c4b26a95",
+    "candidate_known": true,
+    "base": "408738b4f46e",
+    "sources": "pool.toml@ff24348c30dc gotchas@533a3df532c5 memory@notes over cap by 2171 chars: acceptance kept whole routed=shadow",
+    "policy_version": "ff24348c30dc",
+    "gotchas": "533a3df532c5",
+    "candidate_tokens": 4020,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 19195,
+    "routed_reduction_ratio": 0.8681984712108192,
+    "routed_hidden": 61,
+    "routed_ambiguous": 15,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "bb7c9af200db",
+      "4d11f773aed4",
+      "d2029f834660",
+      "c4239671ce8c",
+      "34891102c166",
+      "197a97a3d5a3",
+      "4e69580dd865",
+      "c9373171f433",
+      "1abede74550a",
+      "5de74ac90a48",
+      "5e9bcae7ed92",
+      "63407adb9b84",
+      "6bc5ed5c9a5f",
+      "9467fb8c20b0",
+      "10357d124edf",
+      "506593215e9e",
+      "2db17589af9c",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "1e8bb14425a8",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "2ccea77faf96",
+      "e13b05dcafb4",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "25ee5f8920dc",
+      "26adf6a241ea",
+      "718b545b1eca",
+      "5b872ee10528",
+      "622de2bd3ec8",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "d0e646881f9e",
+      "b676757c3fa9",
+      "84ae4852296a",
+      "d80d1256695d",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "48de25429ecb",
+      "d500754708e5",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "453b6e50c221",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "041199286363",
+      "acfaa314d8bc",
+      "28a564cd538d",
+      "0f1d68687edd",
+      "3ec2adada116",
+      "64b680375800",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "18f9ce631e61",
+      "ce80308dc309",
+      "051786ba0165",
+      "d8c56b24a84f",
+      "ef73848f43b6",
+      "d38dc8f56565",
+      "15635a7332d0",
+      "d0e0813e68c7",
+      "b4bd74f47864",
+      "ccbfe70fac51",
+      "e85902ae399c",
+      "0b4b19fe9e7b",
+      "1dacdf4da4b3",
+      "71b238c46143",
+      "69321709f433",
+      "fb0463969ed6",
+      "3cab1e35d706",
+      "7e1d1cae2f7e",
+      "5cc9e40e40ce",
+      "97b675e98731",
+      "1306c222e85f",
+      "f2e8cb6cb127",
+      "20deadf14569",
+      "01685e27cbc9",
+      "5764aba2f72e",
+      "fcdb086b4ccd",
+      "074cb4957865",
+      "913f472f7cfe",
+      "0d50926114f2",
+      "120a18ed3aa4",
+      "a81841ba52a0",
+      "ae34305cb07d",
+      "4c0733920458",
+      "8f7f932f348a",
+      "eb2a0506ff95",
+      "92c1f6f994a2",
+      "ffd37cfc2d11",
+      "eb1401356815",
+      "7207f99467f4",
+      "5594ba70135a",
+      "419c419e681f",
+      "6e60f4e260b9",
+      "b8c759d079b3",
+      "e4c630cc87b3",
+      "e146114ba8ec",
+      "e325ae44fe23",
+      "d876d051610f",
+      "f5f8de2fdaa8",
+      "7f65565c4e40",
+      "66ab1306ccfc",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "f5e9df567728",
+      "db9174a961da",
+      "d02e6bc9902a",
+      "bb8ef90a30f4",
+      "caa80180ae36"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 7850,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 411,
+    "instruction_tokens_modular": 411,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "active",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791045014.049469,
+  "rounds": 0,
+  "executor": "luna",
+  "codex_thread_head": "b422ffa17aee95aa6877ee892a1c8870abb3ed4e",
+  "review_verdict": "approve",
+  "reason": "landed on goal/T-1403 via T-1645 (fc452eb squash); stamped by the Planner 2026-10-03",
+  "resume_hint": {
+    "conflicts": [
+      "orchestrator/spawn.py",
+      "tests/test_spawn.py"
+    ],
+    "hunks": "diff --cc orchestrator/spawn.py\nindex 9b9e73b,8766c28..0000000\n--- a/orchestrator/spawn.py\n+++ b/orchestrator/spawn.py\n@@@ -1122,11 -1120,9 +1122,16 @@@ def review_packet(task, reviewed, *, cf\n      cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)\n      src = reviewed or task\n      wt = Path(src.get(\"worktree\") or ROOT)\n+     scope = effective_scope(src)\n      raw_diff = scoped_diff(src)\n++<<<<<<< HEAD\n +    base = scoped_diff_base(src)\n +    head = git(\"rev-parse\", \"HEAD\", cwd=wt, check=False).stdout.strip()[:12] or \"(unavailable)\"\n +    branch = src.get(\"branch\") or f\"task/{src.get('id', '(none)')}\"\n +    hint = f\"git -C {wt} diff -U3 {base}...HEAD -- {' '.join(src.get('scope', []))}\"\n++=======\n+     hint = f\"git -C {wt} diff -- {' '.join(scope)}\"\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n      changed = sorted(set(re.findall(r\"^[+\\-]{3} [ab]/(tests/\\S+)\", raw_diff, re.M)))\n      tests = [f\"{path}: present\" for path in changed]\n      for test_id in _acceptance_test_ids(src.get(\"acceptance\", [])):\n@@@ -1145,9 -1141,8 +1150,14 @@@\n          gate_lines.append(\"last_failure_head: \" + str(failure).splitlines()[0][:500])\n      sections = ([_section(\"skills\", skills[\"section\"].removeprefix(\"## skills\\n\"))]\n                  if skills and skills.get(\"section\") else []) + [_section(\"spec\", src.get(\"spec\")), _section(\"acceptance\", src.get(\"acceptance\", [])),\n++<<<<<<< HEAD\n +                _section(\"scope\", src.get(\"scope\", [])), None,\n +                _section(\"changed tests\", tests or [\"(none)\"]), _section(\"gate\", gate_lines),\n +                _section(\"review branch\", f\"{branch} @ {head}\")]\n++=======\n+                 _section(\"scope\", scope), None,\n+                 _section(\"changed tests\", tests or [\"(none)\"]), _section(\"gate\", gate_lines)]\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n      reviewer_role = (task.get(\"constraints\") or {}).get(\"reviewer_role\")\n      role_focus = {\n          \"acceptance\": (\"Focus: every acceptance criterion met by the diff, functional correctness, regressions \"\n@@@ -1885,8 -1875,9 +1895,14 @@@ def scoped_diff(src)\n      reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't\n      include its predecessor's already-merged hunks.\"\"\"\n      wt = src.get(\"worktree\") or ROOT\n++<<<<<<< HEAD\n +    base = scoped_diff_base(src)\n +    r = git(\"diff\", \"-U3\", f\"{base}...HEAD\", \"--\", *src[\"scope\"], cwd=wt, check=False)\n++=======\n+     parent = src.get(\"parent\")\n+     base = f\"goal/{parent}\" if parent and branch_exists(f\"goal/{parent}\") else \"origin/main\"\n+     r = git(\"diff\", \"-U3\", f\"{base}...HEAD\", \"--\", *effective_scope(src), cwd=wt, check=False)\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n      return r.stdout[:40000] or \"(empty diff)\"\n  \n  \ndiff --cc tests/test_spawn.py\nindex 1dd43c8,d0bec20..0000000\n--- a/tests/test_spawn.py\n+++ b/tests/test_spawn.py\n@@@ -1453,37 -1444,20 +1453,54 @@@ class SpawnBase(unittest.TestCase)\n          self.assertIn(\"+B = 1\", diff)\n          self.assertNotIn(\"+A = 1\", diff)                              # predecessor's hunk, already in goal/G\n  \n++<<<<<<< HEAD\n +    def test_review_packet_hint_names_base_range_and_branch(self):\n +        task = bus.create_task(\"review hint\", \"s\", [\"a\"], [\"hint.py\"], role=\"execute\", parent=\"G\")\n +        wt = spawn.ensure_worktree(task[\"id\"], base=\"goal/G\")\n +        bus.update(task[\"id\"], worktree=str(wt))\n +        (wt / \"hint.py\").write_text(\"hint = True\\n\")\n +        self.g(\"add\", \"hint.py\", cwd=wt); self.g(\"commit\", \"-qm\", \"review hint\", cwd=wt)\n +        task = {**bus.get(task[\"id\"]), \"branch\": \"review/custom\"}\n +        base_sha = self.g(\"rev-parse\", \"goal/G\", cwd=TMP).stdout.strip()[:12]\n +        head_sha = self.g(\"rev-parse\", \"HEAD\", cwd=wt).stdout.strip()[:12]\n +        raw = \"diff --git a/hint.py b/hint.py\\n\" + \"\\n\".join(f\"+line {i:05d}\" for i in range(1500))\n +        with mock.patch.object(spawn, \"scoped_diff\", return_value=raw):\n +            packet = spawn.review_packet(task, task, cfg={\"context_router\": {\"mode\": \"shadow\"}})\n +        hint = f\"git -C {wt} diff -U3 goal/G...HEAD -- hint.py\"\n +        self.assertIn(hint, packet)\n +        self.assertIn(f\"base {base_sha} \", packet.splitlines()[0])\n +        self.assertIn(\"review/custom @ \" + head_sha, packet)\n +\n +    def test_review_packet_diff_budget_honours_review_diff_chars(self):\n +        task = bus.create_task(\"review budget\", \"s\", [\"a\"], [\"budget.py\"], role=\"execute\", parent=\"G\")\n +        wt = spawn.ensure_worktree(task[\"id\"], base=\"goal/G\")\n +        bus.update(task[\"id\"], worktree=str(wt))\n +        task = bus.get(task[\"id\"])\n +        raw = \"diff --git a/budget.py b/budget.py\\n\" + \"\\n\".join(f\"+line {i:05d}\" for i in range(1500))\n +        hint = f\"git -C {wt} diff -U3 goal/G...HEAD -- budget.py\"\n +        for cap, truncated in ((20000, False), (3000, True)):\n +            with self.subTest(cap=cap), mock.patch.object(spawn, \"scoped_diff\", return_value=raw):\n +                packet = spawn.review_packet(task, task, cfg={\"context_router\": {\"mode\": \"shadow\"},\n +                                                               \"limits\": {\"review_diff_chars\": cap}})\n +            self.assertEqual(\"more lines\" in packet, truncated)\n +            if truncated:\n +                self.assertIn(hint, packet)\n++=======\n+     def test_review_diff_includes_grant_scope_paths(self):\n+         t = bus.create_task(\"grant review\", \"s\", [\"a\"], [\"shared.py\"], role=\"execute\", parent=\"G\",\n+                             constraints={\"grant_scope\": [\"grant.py\"]})\n+         wt = spawn.ensure_worktree(t[\"id\"])\n+         bus.update(t[\"id\"], worktree=str(wt))\n+         (wt / \"shared.py\").write_text(\"shared = 1\\n\")\n+         (wt / \"grant.py\").write_text(\"granted = 1\\n\")\n+         self.g(\"add\", \"-A\", cwd=wt)\n+         self.g(\"commit\", \"-qm\", \"scoped grant\", cwd=wt)\n+ \n+         diff = spawn.scoped_diff(bus.get(t[\"id\"]))\n+         self.assertIn(\"grant.py\", diff)\n+         packet = spawn.review_packet(bus.get(t[\"id\"]), bus.get(t[\"id\"]))\n+         self.assertIn(\"grant.py\", packet)\n++>>>>>>> b422ffa (T-1639 honor grant scope precedence and review routing)\n  \n  \n  class SecretsForRole(unittest.TestCase):\n"
+  },
+  "hold_reason": null,
+  "merged_into": "goal/T-1403",
+  "merged_via": "T-1645"
+}

@@ -1,0 +1,120 @@
+{
+  "id": "T-0478",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P2b: fix rounds resume the parent Codex thread when the worktree is compatible \u2014 daemon.auto_fix_round and Planner fix-round tasks dispatch as executor.reply with a delta (failures or review comments) on the held task's thread instead of a fresh exec with the full spec; fresh dispatch only when incompatible, with the reason recorded; run rows log resume mode so tokens for resumed vs fresh fix rounds are comparable",
+  "spec": "Phase I P2 (brief .orchestrator/phase-i-program.md: preserve resume, avoid forcing models to reread unchanged state). Base goal/T-0445 after P1c (T-0463) merges (P1a already merged: packets reach Codex, packet_meta and prompt_chars on rows). Scout facts: executor.reply resumes the same codex thread with a short delta when _resume_compatible (worktree clean, expected head an ancestor of HEAD), MAX_ROUNDS 5, and falls back to packet()+delta as a fresh exec when incompatible (executor.py:17, 155-170, 309-339); daemon.auto_fix_round creates a new bus task with a fresh worktree and a fresh codex thread through the normal dispatch path (daemon.py:139-201, _fix_round_spec 104-136); fix-round lineage via constraints.fix_round_for and auto_round; H7 added the worktree compatibility check.\n1. daemon.dispatch for a task with constraints.fix_round_for = P (the held parent): if P has a codex_thread and executor._resume_compatible(P's worktree, P's expected head) holds and P's rounds < MAX_ROUNDS, dispatch the fix round as executor.reply(P, delta) where delta = the fix-round task's spec reduced to its failure section (resume_hint.failures or the review comments and the acceptance ids), not the full packet; the fix-round task records pipeline.resume = {\"mode\": \"resume\", \"thread\": <id>, \"parent\": P} and the resulting commit lands on P's branch, which the fix-round task then adopts as its worktree and branch (so gate and merge treat it as before). Otherwise dispatch fresh as today (P1a packet) with pipeline.resume = {\"mode\": \"fresh\", \"reason\": \"no_thread\" | \"incompatible_worktree\" | \"rounds_exhausted\" | \"executor_not_codex\"}.\n2. executor.reply logs its run row with resume_mode = \"resume\" and the fix-round task id (so attribution puts the row in bucket fix_round under the lineage root); fresh fix rounds log resume_mode = \"fresh\". Existing MAX_ROUNDS and the incompatible-resume repair path stay.\n3. The fix-round task remains its own bus task with its own id and lineage (P0 metrics and G7 reconciliation unchanged); only the executor invocation changes.\nTests tests/test_daemon.py: test_fix_round_dispatch_resumes_parent_thread_when_compatible (mock executor.reply, assert called with the parent and a delta containing the failures and not the full spec; pipeline.resume mode resume), test_fix_round_dispatch_fresh_when_worktree_incompatible_records_reason, test_fix_round_dispatch_fresh_when_parent_has_no_thread; tests/test_executor.py: test_reply_run_row_logs_resume_mode_and_fix_round_task, test_fresh_fix_round_row_logs_resume_mode_fresh. Existing tests green (the H7 resume tests and G7 lineage tests stay); .claude/hooks/tests-green.sh exits 0; commit with the task id including every named test; report sha and failures only.",
+  "inputs": [
+    "T-0466"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_fix_round_dispatch_resumes_parent_thread_when_compatible, test_fix_round_dispatch_fresh_when_worktree_incompatible_records_reason, test_fix_round_dispatch_fresh_when_parent_has_no_thread pass",
+    "tests/test_executor.py::test_reply_run_row_logs_resume_mode_and_fix_round_task, test_fresh_fix_round_row_logs_resume_mode_fresh pass",
+    "a compatible fix round never re-sends the full spec or packet; every fix-round task carries pipeline.resume with mode and reason; lineage and MAX_ROUNDS unchanged",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0478",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 543,
+        "issue": "_dispatch_reply_worker only handles r[\"status\"] in {\"done\",\"failed\"}. executor.reply() can also return \"held\" (executor.py:340-342 when the parent's own executor is cooling/saturated, or the usage-limit branch inside _run at executor.py:140-144) or \"refused\" (executor.py:329-330 if the parent got merged concurrently). All of reply()'s bus.update side effects target task_id=parent_id, not the fix task, so on any of these outcomes the fix task itself never gets a result posted and its status stays \"queued\" forever. Since dispatch() already stamped pipeline.dispatched_at and immediately called complete(t[\"id\"], \"dispatched_at\") before spawning the worker, dispatch() will never retry it (stamp() short-circuits once dispatched_at is set), sweep_leases() skips it too (it skips any stage whose `_done` marker is already set, and dispatched_at_done was set by that same complete() call), and reconcile_dead() only reconciles status==\"running\" tasks. Net effect: a Codex usage-limit/cooldown hit during a compatible fix-round resume permanently strands the fix task in \"queued\" with no path to completion, review, or retry.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 52,
+        "issue": "No test exercises reply() returning \"held\" (or any status other than done/failed) from the resume dispatch path, and no test covers the \"rounds_exhausted\" or \"executor_not_codex\" fresh-fallback reasons in dispatch()'s fix-round routing (only \"no_thread\" and \"incompatible_worktree\" are tested). The orphaning bug above lives exactly in this untested gap.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 577,
+        "issue": "dispatch()'s fix-round compatibility check (no_thread/rounds_exhausted/executor_not_codex/_resume_compatible) is fully re-evaluated inside executor.reply() itself (executor.py:332-352) moments later using a freshly re-fetched parent record. If the two checks disagree (e.g. the worktree becomes dirty or the parent's rounds/executor changes between dispatch()'s read and reply()'s), reply() silently falls into its own \"incompatible\" branch and runs a brand-new exec (not a resume) while writing all resulting state (codex_thread, codex_thread_head, rounds) onto the parent task under the fix task's identity \u2014 duplicating the compatibility policy in two places with no single source of truth, and letting the parent's thread/round bookkeeping get rewritten from what dispatch() thought was going to be a plain resume.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789932460.5872471,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0478",
+      "claimed_at": 1789932460.586914
+    },
+    {
+      "ts": 1789932460.588692,
+      "account": "B"
+    },
+    {
+      "ts": 1789932460.630917,
+      "pid": 81010,
+      "account": "B"
+    },
+    {
+      "ts": 1789932762.105397,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 543,
+            "issue": "_dispatch_reply_worker only handles r[\"status\"] in {\"done\",\"failed\"}. executor.reply() can also return \"held\" (executor.py:340-342 when the parent's own executor is cooling/saturated, or the usage-limit branch inside _run at executor.py:140-144) or \"refused\" (executor.py:329-330 if the parent got merged concurrently). All of reply()'s bus.update side effects target task_id=parent_id, not the fix task, so on any of these outcomes the fix task itself never gets a result posted and its status stays \"queued\" forever. Since dispatch() already stamped pipeline.dispatched_at and immediately called complete(t[\"id\"], \"dispatched_at\") before spawning the worker, dispatch() will never retry it (stamp() short-circuits once dispatched_at is set), sweep_leases() skips it too (it skips any stage whose `_done` marker is already set, and dispatched_at_done was set by that same complete() call), and reconcile_dead() only reconciles status==\"running\" tasks. Net effect: a Codex usage-limit/cooldown hit during a compatible fix-round resume permanently strands the fix task in \"queued\" with no path to completion, review, or retry.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 52,
+            "issue": "No test exercises reply() returning \"held\" (or any status other than done/failed) from the resume dispatch path, and no test covers the \"rounds_exhausted\" or \"executor_not_codex\" fresh-fallback reasons in dispatch()'s fix-round routing (only \"no_thread\" and \"incompatible_worktree\" are tested). The orphaning bug above lives exactly in this untested gap.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 577,
+            "issue": "dispatch()'s fix-round compatibility check (no_thread/rounds_exhausted/executor_not_codex/_resume_compatible) is fully re-evaluated inside executor.reply() itself (executor.py:332-352) moments later using a freshly re-fetched parent record. If the two checks disagree (e.g. the worktree becomes dirty or the parent's rounds/executor changes between dispatch()'s read and reply()'s), reply() silently falls into its own \"incompatible\" branch and runs a brand-new exec (not a resume) while writing all resulting state (codex_thread, codex_thread_head, rounds) onto the parent task under the fix task's identity \u2014 duplicating the compatibility policy in two places with no single source of truth, and letting the parent's thread/round bookkeeping get rewritten from what dispatch() thought was going to be a plain resume.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789932762.107496,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789932460.586914,
+  "account": "B",
+  "pid": 81010,
+  "review_verdict": "request_changes"
+}

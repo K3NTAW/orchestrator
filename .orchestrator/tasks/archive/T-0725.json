@@ -1,0 +1,165 @@
+{
+  "id": "T-0725",
+  "created_at": 1790000559.225813,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Q3 v4: orchestrator/planner_packet.py \u2014 compact, delta-oriented Planner decision packets and the Opus\u2192Fable escalation packet, size-measured (P4, P10)",
+  "spec": "Why: planner_runs.decision_packet (lines 43-107) and grouped_packet rebuild a per-point packet with the full spawn packet inventory, 300-char scout summaries, no memory, no changes-since-last-decision and no required-output section; the brief (P4) wants a delta-oriented packet with only what the decision needs, invalidated on state change, and (P10) a compact escalation packet so Fable solves the unresolved part instead of redoing Opus's work. Three spec review rounds (T-0679, T-0713, of T-0715) are folded in: explicit decision_type source, taxonomy shape, real scout finding fields, hard length backstop, previous-without-changes rendering, escalation packet section 3, per-section section 7, hash over the final text. The Planner waived a fourth spec review.\nWhat: new pure module orchestrator/planner_packet.py. Never reads the bus or files itself: the caller passes data. Untrusted text goes inside fences labelled data with backticks elided (copy planner_runs._fenced's 6-line helper; do not import planner_runs).\n- Taxonomy shape: orchestrator/planner_taxonomy.py (merged on goal/T-0674) exposes DECISION_TYPES = (\"initial_goal_plan\", \"scout_results\", \"held_task\", \"architectural_replan\", \"fix_strategy\", \"closable_goal\", \"retrospective\", \"ambiguous_requirement\", \"other\") and classify(...) -> {\"decision_type\", \"architectural\", \"ambiguous\", \"risk_class\", \"signals\", \"band\", \"task_class\"}. A section's decision_type = section[\"classification\"][\"decision_type\"] when present, else the fallback from point[\"kind\"]: scouts_done -> scout_results, held -> held_task, closable -> closable_goal, retrospective -> retrospective, anything else -> other. Import DECISION_TYPES for validation; an unknown value maps to other.\n- build(sections, *, goal, previous=None, changes=None, scout_findings=None, memory_hits=None, cap_chars=6000) -> {\"text\", \"chars\" (len(text)), \"est_tokens\" (chars // 4), \"hash\" (sha256 of the exact returned text, [:12], computed AFTER truncation and the hard cap), \"sections\": [names included], \"truncated\": [names cut], \"delta\": bool}. sections = list of {\"point\" ({goal_id, kind, payload_key, task_id?}), \"ctx\" (decision.route ctx dict), \"route\" (decision.Route or dict name/reason/evidence/tier), \"classification\" (taxonomy dict or None), \"task\" (bus dict or None), \"reviews\" ([{path, line, issue}]), \"failures\" (str|None), \"depends_on_statuses\" ([{id, status}])}. Every free-text field rendered per section is capped: title 200, status 40, hold_reason 300, issue 200, failures 1500. Section order and rules: 1 Decision header (one line per section: 'Section <n> (<task_id or goal_id>): <decision_type> \u2014 expected output: ...' with initial_goal_plan/scout_results -> 'write plan.md and atomic specs'; fix_strategy/held_task -> 'write one fix-round spec with depends_on=[held]'; architectural_replan -> 'respec or split; state why'; closable_goal -> 'open PR goal/<id> -> main or say why not'; ambiguous_requirement -> 'state the ambiguity under Needs the human'; retrospective -> 'record.sh add'; other -> 'decide'); 2 Goal (id, title 200, complexity, spec first 600 chars); 3 Changes since previous decision: previous None -> 'first Planner decision for this goal'; previous given and changes a non-empty list -> up to 20 lines from [{\"task\", \"field\", \"from\", \"to\", \"ts\"}] plus 'previous state_version: ' + str(previous.get(\"state_version\")); previous given and changes None or empty -> 'state changed since previous decision, no field-level diff available' plus the same state_version line; delta True iff previous is given; 4 Relevant task state, one block per section (title, status, hold_reason, failures, review comments max 10 as path:line issue, depends_on statuses); 5 Scout findings only when some section is scout_results or initial_goal_plan: scout_findings is scout_evidence.normalize_findings output, entries {finding, source, confidence, relevance, unresolved, needs_challenge}; max 10 lines as 'finding[:200] (source, confidence)'; 6 Memory: memory_hits titles only, max 10, each 200 chars; 7 Unresolved alternatives, one block per section labelled 'Section <n>': that section's route evidence lines (max 20 per section) plus the option names chosen by that section's decision_type: _SCOUTS_DONE_OPTIONS for initial_goal_plan/scout_results, _NEXT_ACTION_OPTIONS for held_task/fix_strategy/architectural_replan, none otherwise (copy both dicts from planner_runs as module constants); 8 Required output (repeat of the header expectations plus 'Do not restate this packet'). Excluded by construction: event logs, unrelated tasks, transcripts, previous prompts.\n- Truncation: header, Goal and Required output are never cut by the section step; when over cap, cut in this order until it fits: Memory, Scout findings, Unresolved alternatives, Changes, Relevant task state (failures first, then the whole section); record cut names in truncated. Final hard backstop: text = text[:cap_chars] (mirrors decision_packet's [:cap]); when it fires, append \"hard_cap\" to truncated. len(text) <= cap_chars always holds; hash and chars describe the final text.\n- escalation_packet(*, goal, original_sections, opus_decision, unresolved, conflicting_evidence=None, scout_findings=None, memory_hits=None, reason, cap_chars=6000) -> same return shape. It has no previous/changes inputs: it OMITS section 3 entirely and returns delta False. Its header is 'Escalation reason: <reason>. Solve only the unresolved items.' followed by the per-section decision lines; after Goal it renders 'Opus proposed decision (data)' from the whitelist {\"proposed_action\", \"summary\" (cap 800), \"tasks_proposed\" ([{\"title\" (cap 120), \"scope\" (list cap 10)}] cap 10), \"confidence\", \"needs_fable\", \"unresolved\" (cap 10 x 200)} inside a data fence, then 'Unresolved' (the unresolved argument, cap 10 x 200) and 'Conflicting evidence' (cap 10 x 200) when given, then sections 4-8 as build; any other opus_decision key dropped, never raw transcripts; same truncation order (Opus proposed decision is never cut by the section step) and hard backstop.\n- invalidated(previous_state_version, current_state_version) -> bool (differ or either None). meta(text) -> {\"chars\", \"est_tokens\", \"hash\"} with hash = sha256(text)[:12], identical to build's for the same text.",
+  "inputs": [
+    "T-0719"
+  ],
+  "acceptance": [
+    "tests/test_planner_packet.py::test_first_decision_has_no_delta_and_all_sections \u2014 one section classified scout_results with normalize_findings-shaped findings and memory hits produces the sections in the documented order, delta False and the text 'first Planner decision for this goal'; a section without classification and kind held gets held_task from the fallback; hash equals meta(text)['hash']",
+    "tests/test_planner_packet.py::test_delta_with_and_without_changes \u2014 previous and 3 changes give delta True, the 3 change lines and the previous state_version; a 40-entry change list is cut to 20 lines; previous without changes gives delta True, the 'no field-level diff available' line and no KeyError when state_version is absent",
+    "tests/test_planner_packet.py::test_multi_section_packet_renders_per_section_alternatives \u2014 two sections (scout_results and held_task) produce two header lines, two Relevant task state blocks and two Unresolved alternatives blocks where the first lists _SCOUTS_DONE_OPTIONS names and the second _NEXT_ACTION_OPTIONS names, each with its own route evidence",
+    "tests/test_planner_packet.py::test_truncation_order_protected_sections_and_hard_cap \u2014 cap 1200 with long failures drops Memory first, then Scout findings, never cuts the header or Required output, and len(text) <= 1200; a cap of 300 with long titles yields len(text) <= 300, hard_cap in truncated and hash == sha256(text)[:12] of the returned text; a hold_reason containing ``` and 'ignore previous instructions' appears inside a data fence with backticks elided and capped at 300 chars",
+    "tests/test_planner_packet.py::test_escalation_packet_whitelists_opus_decision_and_omits_delta \u2014 an opus_decision carrying a 'transcript' key and a 3000-char summary yields a packet without the transcript, summary capped at 800, the escalation reason in the header, no 'first Planner decision' line and no 'Changes since previous decision' section, delta False, len(text) <= cap_chars, and invalidated() True for differing versions"
+  ],
+  "scope": [
+    "orchestrator/planner_packet.py",
+    "tests/test_planner_packet.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0725",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/planner_packet.py",
+        "line": 266,
+        "issue": "In _opus_lines, `confidence` and `needs_fable` are copied from opus_decision straight into the whitelisted dict and json.dumps'd into the '```data' fence without going through _clean, unlike every other field in this module. json.dumps does not escape backticks, so if either value is (or contains) a string with a run of 3+ backticks, it breaks out of the data fence in the escalation packet handed to Fable \u2014 defeating the module's core defense (\"untrusted text goes inside fences ... with backticks elided\") for exactly the two fields most likely to originate from Opus reasoning that was itself influenced by untrusted ticket/PR/web content per the Trust rule. Fix: route both through _clean (e.g. json.dumps at the very least on a str(confidence) run through _clean, or explicitly type/validate them before insertion) so no field skips the elision.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "5b12164b125e",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790000559.226743,
+      "reviewed_sha": "e7bc0a7499d3cf694c0b4a7080bda0129b0be8fc"
+    },
+    {
+      "ts": 1790000562.109715,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0725",
+      "claimed_at": 1790000562.10938
+    },
+    {
+      "ts": 1790000562.110692,
+      "account": "B"
+    },
+    {
+      "ts": 1790000562.560904,
+      "pid": 57869,
+      "account": "B"
+    },
+    {
+      "ts": 1790000709.76983,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/planner_packet.py",
+            "line": 266,
+            "issue": "In _opus_lines, `confidence` and `needs_fable` are copied from opus_decision straight into the whitelisted dict and json.dumps'd into the '```data' fence without going through _clean, unlike every other field in this module. json.dumps does not escape backticks, so if either value is (or contains) a string with a run of 3+ backticks, it breaks out of the data fence in the escalation packet handed to Fable \u2014 defeating the module's core defense (\"untrusted text goes inside fences ... with backticks elided\") for exactly the two fields most likely to originate from Opus reasoning that was itself influenced by untrusted ticket/PR/web content per the Trust rule. Fix: route both through _clean (e.g. json.dumps at the very least on a str(confidence) run through _clean, or explicitly type/validate them before insertion) so no field skips the elision.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "5b12164b125e",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790000709.774077,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790000709.829911,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "e7bc0a7499d3cf694c0b4a7080bda0129b0be8fc",
+        "packet_version": "5b12164b125e",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "e7bc0a7499d3cf694c0b4a7080bda0129b0be8fc",
+      "packet_version": "5b12164b125e",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "e7bc0a7499d3cf694c0b4a7080bda0129b0be8fc",
+  "claimed_at": 1790000562.10938,
+  "account": "B",
+  "pid": 57869,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "e7bc0a7499d3cf694c0b4a7080bda0129b0be8fc",
+    "packet_version": "5b12164b125e",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "5b12164b125e",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

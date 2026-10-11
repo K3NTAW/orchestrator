@@ -1,0 +1,1213 @@
+{
+  "id": "T-1508",
+  "created_at": 1790894353.5033011,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 5,
+  "title": "MCP execute tool for any executor row; codex/codex_reply refuse without an enabled codex row; executor_fallback reports Claude rows; CLAUDE.md names the execute tool",
+  "spec": "Goal T-1403, wave 2, plan label B3. With Codex off, the Planner's only dispatch tools are `codex`/`codex_reply`\n(orchestrator/mcp.py:123-136), named after a provider that no longer runs; CLAUDE.md:4 and :8 tell the Planner to\ndelegate through them.\n\nFacts (goal/T-1403 at 92c1a98):\n- mcp.py:123-128 codex(task_id, prompt) = executor.start(task_id, prompt) + executor.post_tool_result; 131-136\n  codex_reply = executor.reply + post_tool_result(replace_result=True). executor.start (executor.py:347) already\n  picks any eligible row via pool.pick_executor, Claude rows included (routes to spawn.run_worker through\n  _exhausted(tier=...)).\n- mcp.py:152-161 executor_fallback(complexity) uses p.codex_available() (legacy pool.codex) and p.cfg['codex']\n  ['on_exhausted'] (KeyError without a [codex] table).\n- tool_catalog.py:31-49 _MCP lists the Planner tools with one-line descriptions ('codex', 'codex_reply',\n  'executor_fallback'); specialist.py:18-19 lists the same names in the Planner tool allowlist;\n  tests/test_specialist.py:54 pins that list.\n- B2a (T-1504, merged before this task) adds executor.codex_rows(pool) (enabled execute rows with provider codex).\n  Use executor.codex_rows(Pool()) here (mcp.py already imports executor) so the predicate stays shared; mcp.py does not import daemon.\n\nChange:\n1. mcp.py: new tool execute(task_id, prompt, executor_id=None) -> executor.start(task_id, prompt,\n   executor_id=executor_id) + post_tool_result, identical shape to codex() (docstring: 'Executor: dispatch one\n   atomic execute task to the cheapest eligible executor row (Claude or Codex) in its worktree'). codex() and\n   codex_reply() return {'status': 'refused', 'reason': 'no enabled codex row; use execute'} without calling\n   executor when Pool() has no enabled codex execute row. executor_fallback(complexity): when no enabled codex\n   row exists return {'use': 'execute', 'rows': [ids of enabled Claude execute rows whose band covers\n   complexity, via Pool.row_covers]} (empty list -> {'use': 'hold', 'hint': 'no row covers this complexity'}); read on_exhausted with\n   .get(..., 'hold') so a pool.toml without a [codex] table never raises (T-1500 #8 follow-up); legacy branch unchanged when a codex row is enabled.\n2. tool_catalog.py _MCP: add 'execute': ('dispatch an execute task to an executor row', 'executor'); keep codex\n   entries. specialist.py:18-19: add 'execute' to the Planner allowlist. tests/test_specialist.py:54 pins the\n   list: update it.\n3. CLAUDE.md lines 4 and 8: the executor is 'the execute tool (any enabled executor row; codex/codex_reply only\n   while a codex row is enabled)'; keep the rest of each sentence. Only those two lines change.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_mcp.py (grep 'codex') and tests/test_specialist.py:54;\nupdate to the new contract. Run tests/test_mcp.py, tests/test_tool_catalog.py, tests/test_specialist.py.\n\nDepends on B2a T-1504 (shared predicate; its merge lands first). Out of scope: executor.py, daemon.py, pool.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.\n\nRe-filed 2026-10-01 (replaces T-1455): depends_on re-pointed to T-1467 after the B2v3/B4v3 respecs; the spec, acceptance and scope are unchanged.\n\nRe-filed 2026-10-02 (replaces T-1471): depends_on re-pointed to T-1488 after the round-3 respecs (B2v4, B4a/B4b, E12v3); spec, acceptance and scope unchanged.\n\nRe-filed 2026-10-02 00:50 (replaces T-1493): B2 was split into B2a T-1504 (executor/pool/capacity) and B2b T-1506 (daemon.py); depends_on re-pointed to T-1504, the predicate sentence now names executor.codex_rows and the executor_fallback KeyError fix is spelled out; acceptance and scope unchanged.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_mcp.py::test_execute_tool_dispatches_and_codex_tools_refuse_without_codex_row: passes: with executor.start patched, mcp.execute(task_id, prompt) calls it with executor_id passthrough and returns its result plus posted/posted_reason; on a pool whose enabled execute rows are only Claude rows, mcp.codex and mcp.codex_reply return status 'refused' with reason naming the execute tool and never call executor.start/reply; with an enabled codex row they call through as before",
+    "tests/test_mcp.py::test_executor_fallback_reports_claude_rows_without_codex: passes: executor_fallback(5) on a pool with no enabled codex row and no [codex] table returns use 'execute' with the ids of enabled Claude execute rows whose band covers 5, and use 'hold' when no row covers the complexity",
+    "tests/test_tool_catalog.py::test_catalog_lists_execute_tool: passes: tool_catalog.CATALOG['execute'] exists with category 'executor' and specialist's Planner allowlist contains 'execute'",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/mcp.py",
+    "orchestrator/tool_catalog.py",
+    "orchestrator/specialist.py",
+    "CLAUDE.md",
+    "tests/test_mcp.py",
+    "tests/test_tool_catalog.py",
+    "tests/test_specialist.py"
+  ],
+  "depends_on": [
+    "T-1504"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B3",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1493"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1508",
+  "codex_thread": "01a0f9cc-4f2f-7781-be91-4775d3d5c115",
+  "result": {
+    "summary": "Summary: Added executor dispatch, Codex refusal guards, Claude fallback reporting, catalog/allowlist updates, and Planner documentation. Committed as `8e0773a`.\n\nFiles changed: 7 scoped files.\n\nFailures-only test output: empty. Focused tests passed: 32/32. Worktree clean.",
+    "executed_by": "codex:luna",
+    "thread": "01a0f9cc-4f2f-7781-be91-4775d3d5c115",
+    "usage": {
+      "input_tokens": 550684,
+      "cached_input_tokens": 509184,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7451,
+      "reasoning_output_tokens": 3233,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790897083.868547,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503
+      }
+    },
+    {
+      "ts": 1790897083.870222,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718
+      }
+    },
+    {
+      "ts": 1790897083.8711529,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718
+      }
+    },
+    {
+      "ts": 1790897088.649527,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7356,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790897088.651851,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766
+      }
+    },
+    {
+      "ts": 1790897308.596271,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        }
+      }
+    },
+    {
+      "ts": 1790897310.314328,
+      "packet_meta": {
+        "chars": 6477,
+        "est_tokens": 1619,
+        "presented_tokens": 1619,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "1c699a91526a52e2b12d970e25c4d0fcde3da78eeeb69b0f0e7f8d5ff0e79cd1"
+          },
+          "objective": {
+            "chars": 4074,
+            "est_tokens": 1018,
+            "sha256": "cb8224da7aa896e332afea25d3e6d31056985260edbc768af13d5cf8ec02e03d"
+          },
+          "acceptance": {
+            "chars": 1042,
+            "est_tokens": 260,
+            "sha256": "a5982ec45ca5615fded48824c0c392fb0a51038ccbe8c1433fade9363927b04a"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 185,
+            "est_tokens": 46,
+            "sha256": "4293f7a827a3077152e7bdab017758a5b0d4662436124149578329f8f3a92454"
+          },
+          "read_scope": {
+            "chars": 540,
+            "est_tokens": 135,
+            "sha256": "471a1df5cbf06d84cd436bc7e07adb3290fb4d95a3a70be1b8bdff59aa548c94"
+          },
+          "constraints": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "e55ada8af658146a69c5d4a37d459460204a7e7006e9c78c50169e42cec28961"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "51350a6fdf13",
+        "version": "51350a6fdf13",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@e9b20feac56f gotchas@9403ebf6843f memory@notes over cap by 1677 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "9403ebf6843f",
+        "candidate_tokens": 3637,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 18004,
+        "routed_reduction_ratio": 0.9526429969839674,
+        "routed_hidden": 21,
+        "routed_ambiguous": 20,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "a277751849d3",
+          "1fa4d327a94d",
+          "edd332b8dfd7",
+          "9282bc989e77",
+          "42cb7220e835",
+          "4c714185194e",
+          "1e3f981fe275",
+          "ab45dc0d1990",
+          "2da05e8ac186",
+          "0c85a8732556",
+          "39808ddf0b60",
+          "166e54614b83",
+          "6cfe8c026bbf",
+          "d65c04802e92",
+          "504365aa02ad",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "2ccea77faf96",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "2b71081a619f",
+          "d500754708e5",
+          "00db509188f0",
+          "84b6fb0bf229",
+          "28a564cd538d",
+          "3ec2adada116",
+          "4e7c92225364",
+          "d1571618d8cc",
+          "ae1c36885112",
+          "b2f02fddaefc",
+          "b7ecea1f9450",
+          "b96df7902ae7",
+          "66fc32009533",
+          "f8790c87b40c",
+          "667d0ac2276b",
+          "cf426a915bf6",
+          "a16105e9063f",
+          "8d0ae1272a90",
+          "c91ff0b4c432",
+          "5302de9098a7",
+          "f380df61f578",
+          "289620ec5411",
+          "0d7b76531f4c",
+          "da2ba8e51bfb",
+          "dab7f9c5c84d",
+          "4ca173da800c",
+          "c333257b6943",
+          "4a11db28908c",
+          "675f399ea734",
+          "e297d0278f40",
+          "384a8fa1324a",
+          "1544372198f7",
+          "a4deecc9c274",
+          "4e92e44d0c5d",
+          "ac6cfdd62c8e",
+          "ce2c1b6baed2",
+          "583eb26f0ac4",
+          "2acc8f35fdd4",
+          "bde7e2a1f4bc",
+          "a83b046ca782",
+          "b2acbde61c74",
+          "35bac0cfafe0",
+          "b47ba4d76f7d",
+          "7e1ea501fcb6",
+          "47ec4cd5d02a",
+          "a7bd1f0a42e0",
+          "45e8fb3c84d6",
+          "867cc4832e07",
+          "37029bdf7549",
+          "c47154a93561",
+          "8b57ac0f37a7",
+          "bbbc0ec77e41",
+          "83406e2b84b7",
+          "a8e6b6b492b8",
+          "73b0f594d921",
+          "d876d051610f",
+          "a11d7f95bbbb",
+          "289757f7c20f"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7356,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790897310.316329,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1508",
+      "claimed_at": 1790897310.3158169
+    },
+    {
+      "ts": 1790897310.3176441,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1790897554.732088,
+      "codex_thread": "01a0f9cc-4f2f-7781-be91-4775d3d5c115",
+      "codex_thread_head": "8e0773a40bc88b956ecaa685873679121a04a75d"
+    },
+    {
+      "ts": 1790897554.734268,
+      "packet_meta": {
+        "chars": 6477,
+        "est_tokens": 1619,
+        "presented_tokens": 1619,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "1c699a91526a52e2b12d970e25c4d0fcde3da78eeeb69b0f0e7f8d5ff0e79cd1"
+          },
+          "objective": {
+            "chars": 4074,
+            "est_tokens": 1018,
+            "sha256": "cb8224da7aa896e332afea25d3e6d31056985260edbc768af13d5cf8ec02e03d"
+          },
+          "acceptance": {
+            "chars": 1042,
+            "est_tokens": 260,
+            "sha256": "a5982ec45ca5615fded48824c0c392fb0a51038ccbe8c1433fade9363927b04a"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 185,
+            "est_tokens": 46,
+            "sha256": "4293f7a827a3077152e7bdab017758a5b0d4662436124149578329f8f3a92454"
+          },
+          "read_scope": {
+            "chars": 540,
+            "est_tokens": 135,
+            "sha256": "471a1df5cbf06d84cd436bc7e07adb3290fb4d95a3a70be1b8bdff59aa548c94"
+          },
+          "constraints": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "e55ada8af658146a69c5d4a37d459460204a7e7006e9c78c50169e42cec28961"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "51350a6fdf13",
+        "version": "51350a6fdf13",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@e9b20feac56f gotchas@9403ebf6843f memory@notes over cap by 1677 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "9403ebf6843f",
+        "candidate_tokens": 3637,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 18004,
+        "routed_reduction_ratio": 0.9526429969839674,
+        "routed_hidden": 21,
+        "routed_ambiguous": 20,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "a277751849d3",
+          "1fa4d327a94d",
+          "edd332b8dfd7",
+          "9282bc989e77",
+          "42cb7220e835",
+          "4c714185194e",
+          "1e3f981fe275",
+          "ab45dc0d1990",
+          "2da05e8ac186",
+          "0c85a8732556",
+          "39808ddf0b60",
+          "166e54614b83",
+          "6cfe8c026bbf",
+          "d65c04802e92",
+          "504365aa02ad",
+          "1e8bb14425a8",
+          "65c4d2b5db00",
+          "2ccea77faf96",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "26adf6a241ea",
+          "718b545b1eca",
+          "2b71081a619f",
+          "d500754708e5",
+          "00db509188f0",
+          "84b6fb0bf229",
+          "28a564cd538d",
+          "3ec2adada116",
+          "4e7c92225364",
+          "d1571618d8cc",
+          "ae1c36885112",
+          "b2f02fddaefc",
+          "b7ecea1f9450",
+          "b96df7902ae7",
+          "66fc32009533",
+          "f8790c87b40c",
+          "667d0ac2276b",
+          "cf426a915bf6",
+          "a16105e9063f",
+          "8d0ae1272a90",
+          "c91ff0b4c432",
+          "5302de9098a7",
+          "f380df61f578",
+          "289620ec5411",
+          "0d7b76531f4c",
+          "da2ba8e51bfb",
+          "dab7f9c5c84d",
+          "4ca173da800c",
+          "c333257b6943",
+          "4a11db28908c",
+          "675f399ea734",
+          "e297d0278f40",
+          "384a8fa1324a",
+          "1544372198f7",
+          "a4deecc9c274",
+          "4e92e44d0c5d",
+          "ac6cfdd62c8e",
+          "ce2c1b6baed2",
+          "583eb26f0ac4",
+          "2acc8f35fdd4",
+          "bde7e2a1f4bc",
+          "a83b046ca782",
+          "b2acbde61c74",
+          "35bac0cfafe0",
+          "b47ba4d76f7d",
+          "7e1ea501fcb6",
+          "47ec4cd5d02a",
+          "a7bd1f0a42e0",
+          "45e8fb3c84d6",
+          "867cc4832e07",
+          "37029bdf7549",
+          "c47154a93561",
+          "8b57ac0f37a7",
+          "bbbc0ec77e41",
+          "83406e2b84b7",
+          "a8e6b6b492b8",
+          "73b0f594d921",
+          "d876d051610f",
+          "a11d7f95bbbb",
+          "289757f7c20f"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7356,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790897555.200316,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790897555.203451,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Added executor dispatch, Codex refusal guards, Claude fallback reporting, catalog/allowlist updates, and Planner documentation. Committed as `8e0773a`.\n\nFiles changed: 7 scoped files.\n\nFailures-only test output: empty. Focused tests passed: 32/32. Worktree clean.",
+        "executed_by": "codex:luna",
+        "thread": "01a0f9cc-4f2f-7781-be91-4775d3d5c115",
+        "usage": {
+          "input_tokens": 550684,
+          "cached_input_tokens": 509184,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7451,
+          "reasoning_output_tokens": 3233,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790897561.708821,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790897744.60899,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790897744.608787,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n"
+      }
+    },
+    {
+      "ts": 1790897749.3630872,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790897749.476309,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790897749.477877,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790897744.608787,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790897750.917279,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790897744.608787,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790897744.60899": true
+        }
+      }
+    },
+    {
+      "ts": 1790897831.012415,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790898088.872726,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790898379.8891652,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790898460.704334,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790898866.123627,
+      "codex_thread": "01a0f9cc-4f2f-7781-be91-4775d3d5c115",
+      "codex_thread_head": "5c4ba3dec2818af11b7711144f6fede011c3cbd7"
+    },
+    {
+      "ts": 1790898867.236852,
+      "rounds": 1
+    },
+    {
+      "ts": 1790899047.5377479,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790897744.608787,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790897744.60899": true
+        },
+        "first_green_at": 1790899047.535352,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790899317.7531981,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1527 5c4ba3dec2818af11b7711144f6fede011c3cbd7",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790897083.868503,
+        "dispatched_at": 1790897083.8701718,
+        "dispatched_at_lease": 1790897983.8701718,
+        "dispatched_at_done": 1790897088.651766,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790897308.595936
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790897744.608787,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790897744.60899": true
+        },
+        "first_green_at": 1790899047.535352,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790899317.7509801
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790897083.868503,
+    "dispatched_at": 1790897083.8701718,
+    "dispatched_at_lease": 1790897983.8701718,
+    "dispatched_at_done": 1790897088.651766,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790897308.595936
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "a3a0b0340a494fd66c48d01efcfbc65fd61e167a",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790897744.608787,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_skipped": {
+      "1790897744.60899": true
+    },
+    "first_green_at": 1790899047.535352,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790899317.7509801
+  },
+  "packet_meta": {
+    "chars": 6477,
+    "est_tokens": 1619,
+    "presented_tokens": 1619,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "1c699a91526a52e2b12d970e25c4d0fcde3da78eeeb69b0f0e7f8d5ff0e79cd1"
+      },
+      "objective": {
+        "chars": 4074,
+        "est_tokens": 1018,
+        "sha256": "cb8224da7aa896e332afea25d3e6d31056985260edbc768af13d5cf8ec02e03d"
+      },
+      "acceptance": {
+        "chars": 1042,
+        "est_tokens": 260,
+        "sha256": "a5982ec45ca5615fded48824c0c392fb0a51038ccbe8c1433fade9363927b04a"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+      },
+      "write_scope": {
+        "chars": 185,
+        "est_tokens": 46,
+        "sha256": "4293f7a827a3077152e7bdab017758a5b0d4662436124149578329f8f3a92454"
+      },
+      "read_scope": {
+        "chars": 540,
+        "est_tokens": 135,
+        "sha256": "471a1df5cbf06d84cd436bc7e07adb3290fb4d95a3a70be1b8bdff59aa548c94"
+      },
+      "constraints": {
+        "chars": 196,
+        "est_tokens": 49,
+        "sha256": "e55ada8af658146a69c5d4a37d459460204a7e7006e9c78c50169e42cec28961"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "51350a6fdf13",
+    "version": "51350a6fdf13",
+    "candidate_known": true,
+    "base": "355583cf1c12",
+    "sources": "pool.toml@e9b20feac56f gotchas@9403ebf6843f memory@notes over cap by 1677 chars: acceptance kept whole routed=shadow",
+    "policy_version": "e9b20feac56f",
+    "gotchas": "9403ebf6843f",
+    "candidate_tokens": 3637,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 18004,
+    "routed_reduction_ratio": 0.9526429969839674,
+    "routed_hidden": 21,
+    "routed_ambiguous": 20,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "a277751849d3",
+      "1fa4d327a94d",
+      "edd332b8dfd7",
+      "9282bc989e77",
+      "42cb7220e835",
+      "4c714185194e",
+      "1e3f981fe275",
+      "ab45dc0d1990",
+      "2da05e8ac186",
+      "0c85a8732556",
+      "39808ddf0b60",
+      "166e54614b83",
+      "6cfe8c026bbf",
+      "d65c04802e92",
+      "504365aa02ad",
+      "1e8bb14425a8",
+      "65c4d2b5db00",
+      "2ccea77faf96",
+      "9d078ea9fe66",
+      "0768ddd89e7e",
+      "26adf6a241ea",
+      "718b545b1eca",
+      "2b71081a619f",
+      "d500754708e5",
+      "00db509188f0",
+      "84b6fb0bf229",
+      "28a564cd538d",
+      "3ec2adada116",
+      "4e7c92225364",
+      "d1571618d8cc",
+      "ae1c36885112",
+      "b2f02fddaefc",
+      "b7ecea1f9450",
+      "b96df7902ae7",
+      "66fc32009533",
+      "f8790c87b40c",
+      "667d0ac2276b",
+      "cf426a915bf6",
+      "a16105e9063f",
+      "8d0ae1272a90",
+      "c91ff0b4c432",
+      "5302de9098a7",
+      "f380df61f578",
+      "289620ec5411",
+      "0d7b76531f4c",
+      "da2ba8e51bfb",
+      "dab7f9c5c84d",
+      "4ca173da800c",
+      "c333257b6943",
+      "4a11db28908c",
+      "675f399ea734",
+      "e297d0278f40",
+      "384a8fa1324a",
+      "1544372198f7",
+      "a4deecc9c274",
+      "4e92e44d0c5d",
+      "ac6cfdd62c8e",
+      "ce2c1b6baed2",
+      "583eb26f0ac4",
+      "2acc8f35fdd4",
+      "bde7e2a1f4bc",
+      "a83b046ca782",
+      "b2acbde61c74",
+      "35bac0cfafe0",
+      "b47ba4d76f7d",
+      "7e1ea501fcb6",
+      "47ec4cd5d02a",
+      "a7bd1f0a42e0",
+      "45e8fb3c84d6",
+      "867cc4832e07",
+      "37029bdf7549",
+      "c47154a93561",
+      "8b57ac0f37a7",
+      "bbbc0ec77e41",
+      "83406e2b84b7",
+      "a8e6b6b492b8",
+      "73b0f594d921",
+      "d876d051610f",
+      "a11d7f95bbbb",
+      "289757f7c20f"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 7356,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 411,
+    "instruction_tokens_modular": 411,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790897310.3158169,
+  "rounds": 1,
+  "executor": "luna",
+  "codex_thread_head": "5c4ba3dec2818af11b7711144f6fede011c3cbd7",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '- Ed[25 chars] via `codex` / `codex_reply`; Codex cooling \u2192 [631 chars].md.' != '- Ed[25 chars] via the execute tool (any enabled executor ro[704 chars].md.'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1508/.orchestrator/runs/tests/T-1508-20261002-013544.log\n",
+    "flaky_runs": [
+      {
+        "ids": [
+          "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+      }
+    ],
+    "rejected_ids": [
+      "(failures=1)"
+    ]
+  },
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1527 5c4ba3dec2818af11b7711144f6fede011c3cbd7"
+}

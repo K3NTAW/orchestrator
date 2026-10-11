@@ -1,0 +1,199 @@
+{
+  "id": "T-0901",
+  "created_at": 1790111028.121664,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Active path 1: context_router active sends the routed evidence packet to execute and review workers (byte change gated by mode), with recovery logging (v2)",
+  "spec": "Today (T-0800) context_router mode \"active\" is treated as shadow with a one-time warning in spawn._shadow_route / the packet builders. Build the real active branch. Facts: spawn._packet_body assembles sections (objective, acceptance, base, write_scope, read_scope, constraints, relevant_tests, symbols, gotchas, decisions, verify, evidence, dependencies) and caps at 4800 chars; the shadow path builds Evidence candidates and context_router.route()/render() produce a routed \"## evidence (routed v1)\" block plus per-item levels; review_packet does the same for the diff. The eval suite (orchestrator context-eval, T-0841) checks seven fixture categories.\nDo:\n1. Active for execute: when promotion.mode(\"context_router\") == \"active\", the sections symbols, gotchas, decisions, evidence and read_scope are REPLACED by the routed rendering of their candidates (HIDE items omitted, SHORT one-liners, LONG summaries, FULL verbatim), while objective, acceptance, base, write_scope, constraints, relevant_tests, verify and dependencies stay exactly as today (hard constraints: task contract and failing output are never routed away). The 4800-char cap still applies after routing; the packet header records \"routed v1 active\".\n2. Active for review and security_review: the diff stays FULL for in-scope files; prior review findings and previous results follow the routed levels; the security section is never routed away.\n3. Recovery logging (P21 context_recovery_rate): when a worker running under an active packet later reads a file whose evidence was HIDE or SHORT (jev_gate read_economy classification sees the Read), record a decision_log row kind \"evidence_reuse\" with reason \"recovery_read\" and the evidence id; context_scorecard exposes recovery_rate = recovery reads / hidden items per role; `scorecard --economy` shows it.\n4. Safety: active is refused (falls back to shadow with a notify line) when the last .orchestrator/context_eval.json is missing, older than 7 days, or suite_passed is false. Document this in docs/context-economy/05-context-router.md (Active section) with the revert path (mode back to shadow).\nTests (unittest): tests/test_spawn.py::test_execute_packet_active_replaces_routed_sections_only (objective/acceptance/write_scope identical to shadow; symbols/gotchas replaced by the routed block; HIDE items absent), ::test_review_packet_active_keeps_diff_and_security_section, ::test_active_refused_without_passing_context_eval (mode active + no context_eval.json \u2192 packet equals shadow packet and a notify line mentions the refusal); tests/test_context_scorecard.py::test_recovery_rate_from_evidence_reuse_rows. context-eval must still pass in both modes (add an \"active\" column to its table: routed packet text length).\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-22 22:55) after spec review T-0850 (request_changes), binding on top of v1:\n- Execute, replaced sections are exactly: gotchas (memory_entry candidates), decisions (decision candidates), evidence (previous_result candidates) and read_scope (source_chunk candidates NOT in write scope, rendered SHORT). `symbols` stays exactly as today. In-scope source_chunk candidates (write scope) are never rendered into the packet in any mode: FULL for them means \"the executor opens the file\", so active never injects file bodies. Each replaced section renders only its own candidates (tag candidates with the section name at creation: Evidence.relevance[\"section\"]).\n- Review and security_review: a new section \"## routed-findings\" placed directly after \"fix-round context\" (present or not) carries the routed review_finding and previous_result items; the diff and security sections are untouched. Acceptance test asserts a LONG review_finding text appears under that heading and a HIDE one does not.\n- Recovery detection wiring: jev_gate passes evidence=EvidencePool(goal) and head_sha (from the task's merge-base recorded in packet meta or the worktree HEAD) into read_economy.classify; the level for a path comes from the task's most recent context_selection decision row (candidates \"id:level\" mapped through the pool's evidence locations). Only HIDE or SHORT levels produce an evidence_reuse row (reason recovery_read). promotion.collect's context_recovery_rate switches to the same evidence_reuse rows (the read_economy kind it looks for today is never written); orchestrator/promotion.py joins the scope. Test tests/test_jev_gate.py::test_recovery_read_records_evidence_reuse_for_hidden_evidence exercises jev_gate.run directly with a seeded pool, decision row and a Read of a HIDE path.\n- Header marker: append a trailing token \" routed=active\" (or routed=shadow) to the end of the sources field in packet()'s header; packet_run_meta keeps parsing because sources is a greedy group and the legacy sub-match anchors at the start of sources. Test: tests/test_spawn.py::test_packet_run_meta_parses_routed_marker.\n- Cap-trim: a routed section is a list of atomic items (each item's text may contain a fenced block); the trim loop removes whole items, lowest level first (SHORT, then LONG, then FULL), never trailing lines, so no fence is left open. Test: tests/test_spawn.py::test_cap_trim_removes_whole_routed_items.",
+  "inputs": [
+    "T-0855"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_packet_active_replaces_routed_sections_only passes",
+    "tests/test_spawn.py::test_review_packet_active_keeps_diff_and_security_section passes",
+    "tests/test_spawn.py::test_active_refused_without_passing_context_eval passes",
+    "tests/test_context_scorecard.py::test_recovery_rate_from_evidence_reuse_rows passes",
+    "`uv run orchestrator context-eval` exits 0 with the active column; docs/context-economy/05-context-router.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_jev_gate.py::test_recovery_read_records_evidence_reuse_for_hidden_evidence passes",
+    "tests/test_spawn.py::test_packet_run_meta_parses_routed_marker passes",
+    "tests/test_spawn.py::test_cap_trim_removes_whole_routed_items passes"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/context_router.py",
+    "orchestrator/context_eval.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/jev_gate.py",
+    "tests/test_spawn.py",
+    "tests/test_context_scorecard.py",
+    "tests/test_context_eval.py",
+    "docs/context-economy/05-context-router.md",
+    "orchestrator/promotion.py",
+    "orchestrator/evidence.py",
+    "orchestrator/read_economy.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0901",
+  "codex_thread": null,
+  "result": {
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 466,
+        "issue": "_shadow_route used to do `candidates = [pool.add(candidate) for candidate in candidates]`, replacing candidates with EvidencePool.add's return value -- which is the *redacted* Evidence (jev.redact applied to content, summary_short, summary_long; see evidence.py EvidencePool.add). This diff changed it to `for candidate in candidates: pool.add(candidate)` and discards the redacted copies, so the original *unredacted* `candidates` list is what gets passed to context_router.route(...) and later used as the lookup dict `{ev.id: ev for ev in candidates}` for context_router.section_items() in active mode. That lookup is what renders gotchas/decisions/evidence/read_scope/routed-findings sections into the actual packet sent to the executor/reviewer. Result: secret-like strings (API keys, ghp_ tokens, KEY=VALUE secrets, Bearer tokens -- exactly what jev.redact strips) that live in a previous task's bus result, a memory gotcha/decision note, or a repo file summary will now flow straight into a live active-mode packet instead of being scrubbed first. This is a real regression versus the pre-diff behavior and defeats the stated purpose of EvidencePool.add's redaction; there is no other redact call anywhere in spawn.py to compensate.",
+        "severity": "high"
+      }
+    ],
+    "summary": "Active-mode packet building discards the redacted Evidence objects returned by EvidencePool.add and instead routes/renders the original, unredacted candidates. Because active mode now actually injects routed section content into packets (unlike the prior shadow-only telemetry path), this reintroduces exactly the secret-leak risk jev.redact exists to prevent, for gotchas/decisions/evidence/read_scope/routed-findings sections at SHORT, LONG and FULL levels alike. Everything else checked (protected sections held constant, cap-trim removing whole routed items with fence balance, header routed= marker and parsing, review routed-findings placement, recovery-rate wiring in jev_gate/read_economy/context_scorecard/promotion) matches the spec and looks correct.",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ],
+    "packet_version": "af461cb661b4"
+  },
+  "events": [
+    {
+      "ts": 1790111028.122546,
+      "reviewed_sha": "b61cc0177f5fdb5036703509b80319f0efe6f466"
+    },
+    {
+      "ts": 1790111031.818451,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0901",
+      "claimed_at": 1790111031.764224
+    },
+    {
+      "ts": 1790111031.82027,
+      "account": "B"
+    },
+    {
+      "ts": 1790111032.819971,
+      "pid": 88526,
+      "account": "B"
+    },
+    {
+      "ts": 1790111208.526452,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 466,
+            "issue": "_shadow_route used to do `candidates = [pool.add(candidate) for candidate in candidates]`, replacing candidates with EvidencePool.add's return value -- which is the *redacted* Evidence (jev.redact applied to content, summary_short, summary_long; see evidence.py EvidencePool.add). This diff changed it to `for candidate in candidates: pool.add(candidate)` and discards the redacted copies, so the original *unredacted* `candidates` list is what gets passed to context_router.route(...) and later used as the lookup dict `{ev.id: ev for ev in candidates}` for context_router.section_items() in active mode. That lookup is what renders gotchas/decisions/evidence/read_scope/routed-findings sections into the actual packet sent to the executor/reviewer. Result: secret-like strings (API keys, ghp_ tokens, KEY=VALUE secrets, Bearer tokens -- exactly what jev.redact strips) that live in a previous task's bus result, a memory gotcha/decision note, or a repo file summary will now flow straight into a live active-mode packet instead of being scrubbed first. This is a real regression versus the pre-diff behavior and defeats the stated purpose of EvidencePool.add's redaction; there is no other redact call anywhere in spawn.py to compensate.",
+            "severity": "high"
+          }
+        ],
+        "summary": "Active-mode packet building discards the redacted Evidence objects returned by EvidencePool.add and instead routes/renders the original, unredacted candidates. Because active mode now actually injects routed section content into packets (unlike the prior shadow-only telemetry path), this reintroduces exactly the secret-leak risk jev.redact exists to prevent, for gotchas/decisions/evidence/read_scope/routed-findings sections at SHORT, LONG and FULL levels alike. Everything else checked (protected sections held constant, cap-trim removing whole routed items with fence balance, header routed= marker and parsing, review routed-findings placement, recovery-rate wiring in jev_gate/read_economy/context_scorecard/promotion) matches the spec and looks correct.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790111214.155475,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 466,
+            "issue": "_shadow_route used to do `candidates = [pool.add(candidate) for candidate in candidates]`, replacing candidates with EvidencePool.add's return value -- which is the *redacted* Evidence (jev.redact applied to content, summary_short, summary_long; see evidence.py EvidencePool.add). This diff changed it to `for candidate in candidates: pool.add(candidate)` and discards the redacted copies, so the original *unredacted* `candidates` list is what gets passed to context_router.route(...) and later used as the lookup dict `{ev.id: ev for ev in candidates}` for context_router.section_items() in active mode. That lookup is what renders gotchas/decisions/evidence/read_scope/routed-findings sections into the actual packet sent to the executor/reviewer. Result: secret-like strings (API keys, ghp_ tokens, KEY=VALUE secrets, Bearer tokens -- exactly what jev.redact strips) that live in a previous task's bus result, a memory gotcha/decision note, or a repo file summary will now flow straight into a live active-mode packet instead of being scrubbed first. This is a real regression versus the pre-diff behavior and defeats the stated purpose of EvidencePool.add's redaction; there is no other redact call anywhere in spawn.py to compensate.",
+            "severity": "high"
+          }
+        ],
+        "summary": "Active-mode packet building discards the redacted Evidence objects returned by EvidencePool.add and instead routes/renders the original, unredacted candidates. Because active mode now actually injects routed section content into packets (unlike the prior shadow-only telemetry path), this reintroduces exactly the secret-leak risk jev.redact exists to prevent, for gotchas/decisions/evidence/read_scope/routed-findings sections at SHORT, LONG and FULL levels alike. Everything else checked (protected sections held constant, cap-trim removing whole routed items with fence balance, header routed= marker and parsing, review routed-findings placement, recovery-rate wiring in jev_gate/read_economy/context_scorecard/promotion) matches the spec and looks correct.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ],
+        "packet_version": "af461cb661b4"
+      }
+    },
+    {
+      "ts": 1790111214.1564832,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790111214.2192981,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "b61cc0177f5fdb5036703509b80319f0efe6f466",
+        "packet_version": "af461cb661b4",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "b61cc0177f5fdb5036703509b80319f0efe6f466",
+      "packet_version": "af461cb661b4",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "b61cc0177f5fdb5036703509b80319f0efe6f466",
+  "claimed_at": 1790111031.764224,
+  "account": "B",
+  "pid": 88526,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "b61cc0177f5fdb5036703509b80319f0efe6f466",
+    "packet_version": "af461cb661b4",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "af461cb661b4",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

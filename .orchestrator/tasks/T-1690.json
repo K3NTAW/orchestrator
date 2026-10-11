@@ -1,0 +1,723 @@
+{
+  "id": "T-1690",
+  "created_at": 1791322274.863094,
+  "parent": "T-1667",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: review packets for fix rounds cover the whole lineage diff; fix-only approvals do not count for the merge",
+  "spec": "Reviews of fix rounds must cover the whole change, not only the fix commit.\n\nEvidence 2026-10-06: the watchdog (T-1679 -> fix T-1682) and auto-merge (T-1678 -> fixes T-1681, T-1683) each reached\n\"approved\" through reviews of a fix round only (T-1684, T-1685, T-1686); each review saw just the fix's diff (a test or\none prompt line) and said so, while ~700-900 lines of security-path code had never been reviewed. Independent full-diff\nreviews then found 3 high-severity defects in each. A review spec that told the reviewer to read the full diff was\nignored because the packet showed only the fix diff.\n\nChange orchestrator/spawn.py review_packet() (~line 1082) and whatever computes the diff range for a review of a task:\n1. For a review whose input task has constraints.fix_round_for (follow the chain to the root execute task), the packet's\n   diff is the whole lineage: from the merge-base with the goal branch (or origin/main when there is no goal branch) to\n   the fix's head, i.e. everything that will land, not the fix commit alone. Keep the fix-only diff as a second, labelled\n   section (\"this round's change\") when it fits.\n2. If the lineage diff exceeds the packet budget, include the file list with per-file stats and the instruction to read\n   the rest with `git diff <base>..<head> -- <file>`, naming the exact range; never silently truncate to the fix diff.\n3. The daemon's review gate counts only reviews whose packet covered the lineage: stamp pipeline.review_range =\n   \"<base>..<head>\" on the review task and, in merge_reviewed (daemon.py), ignore an approval whose review_range base is\n   not the lineage base. Older reviews without the stamp count as today.\nTests in tests/test_spawn.py and tests/test_daemon.py: test_fix_round_review_packet_covers_lineage,\ntest_lineage_diff_over_budget_lists_files_and_range, test_merge_ignores_fix_only_approval,\ntest_plain_task_review_unchanged.\n",
+  "inputs": [
+    "T-1689"
+  ],
+  "acceptance": [
+    "the four named tests exist and pass",
+    "a review of a fix round shows origin/goal base..fix head, with the fix-only diff as a labelled extra section"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1690",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 1744,
+        "issue": "The spec never mentions that scoped_diff() ends with `-- *src[\"scope\"]`. A fix task's scope is narrow (a test or one prompt file), and the fix worktree is already cut from task/<parent> (spawn.py:301). So `goal/<parent>...HEAD` would already include the parent's commits, and the pathspec is probably why the packet showed only the fix's files. Changing only the base would leave the diff narrow. The lineage diff has to use the union of scopes across the chain, or no pathspec at all. That choice is unspecified.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 1752,
+        "issue": "scoped_diff silently cuts output at `[:40000]`, and review_packet then applies a second budget of at most 8000 chars minus other sections. For a 700-900 line lineage the first cut discards files before bounded_diff or any file list is built. That is the silent truncation item 2 forbids. The file list has to come from `git diff --numstat <base>..<head>`, not from the already truncated text.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 1166,
+        "issue": "bounded_diff walks hunks in order and drops later files entirely. Its marker only reports a count of omitted lines, with no per-file stats and no per-file range. Item 2 therefore needs a new numstat-based helper that always fits inside the 8000-char packet. The spec also doesn't say how the lineage diff and the labelled 'this round's change' section share that one small budget, or which gets priority.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1594,
+        "issue": "Ignoring a fix-only approval leaves approved short of needed, with nothing pending and nothing stuck. The code falls through to the final branch and holds the task with 'review state unknown: ' and an empty id list. Nothing opens a lineage review, so the task is stuck until the Planner steps in. The spec has to say what happens to an ignored approval: open a fresh lineage review via _open_reviews, or hold with an explicit reason such as 'review range not lineage base'.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1255,
+        "issue": "Where review_range is stamped is unspecified. _open_reviews already stamps reviewed_sha from the task's HEAD at creation, and the packet is built later at spawn time. Stamping in the packet builder lets the stamp drift from the head the reviewer actually saw, and risks never being written if the spawn path is skipped. Stamp it in _open_reviews, using one shared helper that computes (base, head). Have review_packet read that stamp instead of recomputing it.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1585,
+        "issue": "The lineage base is merge-base(goal/<parent>, head). It moves if the goal branch is merged into the task branch or the branch is rebased after the review was stamped. Comparing the stamped base to a recomputed one would then reject valid approvals, and reviewed_sha handling doesn't cover that case. The spec should say whether the comparison is against the base recomputed at merge time or a base pinned on the root task. It should also say how the head-moved void path interacts with it.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 1140,
+        "issue": "Chain walking has no failure behaviour. A missing ancestor (bus.get raises KeyError), a cycle, a root without a worktree, or git failing on merge-base would each need a decision. The spec doesn't say to fail closed (hold or flag the review as lineage-unavailable), so an implementer will likely fall back silently to the fix-only diff, which is the exact defect being fixed. Other code does follow the chain with a seen-set (strategy.py:45, failures.py:16), so a shared root-resolver already exists to reuse.",
+        "severity": "med"
+      }
+    ],
+    "suggested_spec_changes": [
+      "State that the lineage diff must not be limited to the fix task's own scope. Use the union of scopes along the fix_round_for chain, or no pathspec, and say which. Also drop or raise the 40000-char slice in scoped_diff for this path.",
+      "Build the over-budget fallback from `git diff --numstat <base>..<head>`. Always include the exact `git diff <base>..<head> -- <file>` command. Define the budget priority between the lineage diff, the file list and the 'this round's change' section within the 8000-char packet.",
+      "Define what merge_reviewed does with an ignored approval: open a fresh lineage review through _open_reviews, or hold with an explicit reason string. It must never fall into the empty 'review state unknown' hold.",
+      "Stamp pipeline.review_range inside _open_reviews, next to reviewed_sha, using one shared helper that returns (lineage_base, head). The packet should read the stamp. State that the base check applies only to reviews of fix-round tasks, and that unstamped legacy reviews count as today.",
+      "Say how the lineage base is pinned or recomputed so a goal-branch merge or rebase can't void approvals forever. Say whether the check compares to the base at merge time.",
+      "Require fail-closed behaviour when the chain or git lookup fails: mark the packet 'lineage unavailable' and hold the review. Never fall back to the fix-only diff. Reuse the existing root-resolver (daemon root()) where possible.",
+      "Add acceptance for: the stamp is present, a correct-base approval merges, a legacy unstamped approval still merges, and a broken chain holds rather than falling back. Add a rollback note: the change is confined to the four scoped files and reverts with `git revert <sha>`."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6490,
+      "trimmed": {
+        "risks": 2
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791322285.550988,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3291,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791322285.569196,
+      "packet_meta": {
+        "chars": 2552,
+        "est_tokens": 638,
+        "presented_tokens": 638,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "63aecdad04aedeaed4b7ff6f1a8bb47e01c67265bf2d605d00b693d18ec45aa8"
+          },
+          "spec": {
+            "chars": 1914,
+            "est_tokens": 478,
+            "sha256": "c277e8d3ce58f20858d0dd6d1bb17a8c68501980549016f9c6e3fc3f755f6580"
+          },
+          "acceptance": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+          },
+          "scope": {
+            "chars": 103,
+            "est_tokens": 25,
+            "sha256": "5530e3b6072a16b707fb26702233e4dfc96c0e386e38f19cd38f856282d1ffaf"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 252,
+            "est_tokens": 63,
+            "sha256": "0a5c2054539772c6a4f40d6daacfb9de9f72eafa84dd27c7b7d9eaf032c873d9"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "591a9fedeaa0",
+        "version": "591a9fedeaa0",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1689 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3291,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791322287.7507799,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1690",
+      "claimed_at": 1791322287.7503161
+    },
+    {
+      "ts": 1791322287.752328,
+      "account": "B"
+    },
+    {
+      "ts": 1791322296.540614,
+      "pid": 21020,
+      "account": "B"
+    },
+    {
+      "ts": 1791322345.315925,
+      "packet_meta": {
+        "chars": 2552,
+        "est_tokens": 638,
+        "presented_tokens": 638,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "63aecdad04aedeaed4b7ff6f1a8bb47e01c67265bf2d605d00b693d18ec45aa8"
+          },
+          "spec": {
+            "chars": 1914,
+            "est_tokens": 478,
+            "sha256": "c277e8d3ce58f20858d0dd6d1bb17a8c68501980549016f9c6e3fc3f755f6580"
+          },
+          "acceptance": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+          },
+          "scope": {
+            "chars": 103,
+            "est_tokens": 25,
+            "sha256": "5530e3b6072a16b707fb26702233e4dfc96c0e386e38f19cd38f856282d1ffaf"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 252,
+            "est_tokens": 63,
+            "sha256": "0a5c2054539772c6a4f40d6daacfb9de9f72eafa84dd27c7b7d9eaf032c873d9"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "591a9fedeaa0",
+        "version": "591a9fedeaa0",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1689 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3291,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "4ab72ffa-2524-4012-ba22-5b349213876c"
+      }
+    },
+    {
+      "ts": 1791322345.349637,
+      "packet_meta": {
+        "chars": 2552,
+        "est_tokens": 638,
+        "presented_tokens": 638,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "63aecdad04aedeaed4b7ff6f1a8bb47e01c67265bf2d605d00b693d18ec45aa8"
+          },
+          "spec": {
+            "chars": 1914,
+            "est_tokens": 478,
+            "sha256": "c277e8d3ce58f20858d0dd6d1bb17a8c68501980549016f9c6e3fc3f755f6580"
+          },
+          "acceptance": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+          },
+          "scope": {
+            "chars": 103,
+            "est_tokens": 25,
+            "sha256": "5530e3b6072a16b707fb26702233e4dfc96c0e386e38f19cd38f856282d1ffaf"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 252,
+            "est_tokens": 63,
+            "sha256": "0a5c2054539772c6a4f40d6daacfb9de9f72eafa84dd27c7b7d9eaf032c873d9"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "591a9fedeaa0",
+        "version": "591a9fedeaa0",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1689 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3291,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "4ab72ffa-2524-4012-ba22-5b349213876c",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791322346.6041322,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 1744,
+            "issue": "The spec never mentions that scoped_diff() ends with `-- *src[\"scope\"]`. A fix task's scope is narrow (a test or one prompt file), and the fix worktree is already cut from task/<parent> (spawn.py:301). So `goal/<parent>...HEAD` would already include the parent's commits, and the pathspec is probably why the packet showed only the fix's files. Changing only the base would leave the diff narrow. The lineage diff has to use the union of scopes across the chain, or no pathspec at all. That choice is unspecified.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 1752,
+            "issue": "scoped_diff silently cuts output at `[:40000]`, and review_packet then applies a second budget of at most 8000 chars minus other sections. For a 700-900 line lineage the first cut discards files before bounded_diff or any file list is built. That is the silent truncation item 2 forbids. The file list has to come from `git diff --numstat <base>..<head>`, not from the already truncated text.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 1166,
+            "issue": "bounded_diff walks hunks in order and drops later files entirely. Its marker only reports a count of omitted lines, with no per-file stats and no per-file range. Item 2 therefore needs a new numstat-based helper that always fits inside the 8000-char packet. The spec also doesn't say how the lineage diff and the labelled 'this round's change' section share that one small budget, or which gets priority.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1594,
+            "issue": "Ignoring a fix-only approval leaves approved short of needed, with nothing pending and nothing stuck. The code falls through to the final branch and holds the task with 'review state unknown: ' and an empty id list. Nothing opens a lineage review, so the task is stuck until the Planner steps in. The spec has to say what happens to an ignored approval: open a fresh lineage review via _open_reviews, or hold with an explicit reason such as 'review range not lineage base'.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1255,
+            "issue": "Where review_range is stamped is unspecified. _open_reviews already stamps reviewed_sha from the task's HEAD at creation, and the packet is built later at spawn time. Stamping in the packet builder lets the stamp drift from the head the reviewer actually saw, and risks never being written if the spawn path is skipped. Stamp it in _open_reviews, using one shared helper that computes (base, head). Have review_packet read that stamp instead of recomputing it.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1585,
+            "issue": "The lineage base is merge-base(goal/<parent>, head). It moves if the goal branch is merged into the task branch or the branch is rebased after the review was stamped. Comparing the stamped base to a recomputed one would then reject valid approvals, and reviewed_sha handling doesn't cover that case. The spec should say whether the comparison is against the base recomputed at merge time or a base pinned on the root task. It should also say how the head-moved void path interacts with it.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 1140,
+            "issue": "Chain walking has no failure behaviour. A missing ancestor (bus.get raises KeyError), a cycle, a root without a worktree, or git failing on merge-base would each need a decision. The spec doesn't say to fail closed (hold or flag the review as lineage-unavailable), so an implementer will likely fall back silently to the fix-only diff, which is the exact defect being fixed. Other code does follow the chain with a seen-set (strategy.py:45, failures.py:16), so a shared root-resolver already exists to reuse.",
+            "severity": "med"
+          }
+        ],
+        "suggested_spec_changes": [
+          "State that the lineage diff must not be limited to the fix task's own scope. Use the union of scopes along the fix_round_for chain, or no pathspec, and say which. Also drop or raise the 40000-char slice in scoped_diff for this path.",
+          "Build the over-budget fallback from `git diff --numstat <base>..<head>`. Always include the exact `git diff <base>..<head> -- <file>` command. Define the budget priority between the lineage diff, the file list and the 'this round's change' section within the 8000-char packet.",
+          "Define what merge_reviewed does with an ignored approval: open a fresh lineage review through _open_reviews, or hold with an explicit reason string. It must never fall into the empty 'review state unknown' hold.",
+          "Stamp pipeline.review_range inside _open_reviews, next to reviewed_sha, using one shared helper that returns (lineage_base, head). The packet should read the stamp. State that the base check applies only to reviews of fix-round tasks, and that unstamped legacy reviews count as today.",
+          "Say how the lineage base is pinned or recomputed so a goal-branch merge or rebase can't void approvals forever. Say whether the check compares to the base at merge time.",
+          "Require fail-closed behaviour when the chain or git lookup fails: mark the packet 'lineage unavailable' and hold the review. Never fall back to the fix-only diff. Reuse the existing root-resolver (daemon root()) where possible.",
+          "Add acceptance for: the stamp is present, a correct-base approval merges, a legacy unstamped approval still merges, and a broken chain holds rather than falling back. Add a rollback note: the change is confined to the four scoped files and reverts with `git revert <sha>`."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6490,
+          "trimmed": {
+            "risks": 2
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791322346.608709,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1744,
+          "issue": "The spec never mentions that scoped_diff() ends with `-- *src[\"scope\"]`. A fix task's scope is narrow (a test or one prompt file), and the fix worktree is already cut from task/<parent> (spawn.py:301). So `goal/<parent>...HEAD` would already include the parent's commits, and the pathspec is probably why the packet showed only the fix's files. Changing only the base would leave the diff narrow. The lineage diff has to use the union of scopes across the chain, or no pathspec at all. That choice is unspecified.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1752,
+          "issue": "scoped_diff silently cuts output at `[:40000]`, and review_packet then applies a second budget of at most 8000 chars minus other sections. For a 700-900 line lineage the first cut discards files before bounded_diff or any file list is built. That is the silent truncation item 2 forbids. The file list has to come from `git diff --numstat <base>..<head>`, not from the already truncated text.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1166,
+          "issue": "bounded_diff walks hunks in order and drops later files entirely. Its marker only reports a count of omitted lines, with no per-file stats and no per-file range. Item 2 therefore needs a new numstat-based helper that always fits inside the 8000-char packet. The spec also doesn't say how the lineage diff and the labelled 'this round's change' section share that one small budget, or which gets priority.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1594,
+          "issue": "Ignoring a fix-only approval leaves approved short of needed, with nothing pending and nothing stuck. The code falls through to the final branch and holds the task with 'review state unknown: ' and an empty id list. Nothing opens a lineage review, so the task is stuck until the Planner steps in. The spec has to say what happens to an ignored approval: open a fresh lineage review via _open_reviews, or hold with an explicit reason such as 'review range not lineage base'.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1255,
+          "issue": "Where review_range is stamped is unspecified. _open_reviews already stamps reviewed_sha from the task's HEAD at creation, and the packet is built later at spawn time. Stamping in the packet builder lets the stamp drift from the head the reviewer actually saw, and risks never being written if the spawn path is skipped. Stamp it in _open_reviews, using one shared helper that computes (base, head). Have review_packet read that stamp instead of recomputing it.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1585,
+          "issue": "The lineage base is merge-base(goal/<parent>, head). It moves if the goal branch is merged into the task branch or the branch is rebased after the review was stamped. Comparing the stamped base to a recomputed one would then reject valid approvals, and reviewed_sha handling doesn't cover that case. The spec should say whether the comparison is against the base recomputed at merge time or a base pinned on the root task. It should also say how the head-moved void path interacts with it.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1140,
+          "issue": "Chain walking has no failure behaviour. A missing ancestor (bus.get raises KeyError), a cycle, a root without a worktree, or git failing on merge-base would each need a decision. The spec doesn't say to fail closed (hold or flag the review as lineage-unavailable), so an implementer will likely fall back silently to the fix-only diff, which is the exact defect being fixed. Other code does follow the chain with a seen-set (strategy.py:45, failures.py:16), so a shared root-resolver already exists to reuse.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1088,
+          "issue": "raw_diff also feeds the semantic security regex, the 'changed tests' list, and the evidence source_chunk candidates handed to _shadow_route. Swapping in the lineage diff changes security triggers, routed evidence and the shadow-route inputs. test_plain_task_review_unchanged only covers plain tasks, so nothing checks that this coupling behaves correctly for fix rounds.",
+          "severity": "low"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "issue": "The acceptance bullets are weaker than the spec. They don't require testing the stamp (review_range written on the review task), an unstamped legacy approval still counting, a stamped approval with the right base counting, or the empty-lineage and chain-failure cases. As written, test_merge_ignores_fix_only_approval can pass with a trivially wrong implementation.",
+          "severity": "low"
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 2552,
+    "est_tokens": 638,
+    "presented_tokens": 638,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "63aecdad04aedeaed4b7ff6f1a8bb47e01c67265bf2d605d00b693d18ec45aa8"
+      },
+      "spec": {
+        "chars": 1914,
+        "est_tokens": 478,
+        "sha256": "c277e8d3ce58f20858d0dd6d1bb17a8c68501980549016f9c6e3fc3f755f6580"
+      },
+      "acceptance": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "860213db0e6a578d8cf72d64d273da81b1b2b31d74b93a09a53360a36c75cd33"
+      },
+      "scope": {
+        "chars": 103,
+        "est_tokens": 25,
+        "sha256": "5530e3b6072a16b707fb26702233e4dfc96c0e386e38f19cd38f856282d1ffaf"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 252,
+        "est_tokens": 63,
+        "sha256": "0a5c2054539772c6a4f40d6daacfb9de9f72eafa84dd27c7b7d9eaf032c873d9"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "591a9fedeaa0",
+    "version": "591a9fedeaa0",
+    "candidate_known": false,
+    "base": "247fe58bae3d",
+    "sources": "task@T-1689 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 3291,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "4ab72ffa-2524-4012-ba22-5b349213876c",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791322287.7503161,
+  "account": "B",
+  "pid": 21020,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1744,
+      "issue": "The spec never mentions that scoped_diff() ends with `-- *src[\"scope\"]`. A fix task's scope is narrow (a test or one prompt file), and the fix worktree is already cut from task/<parent> (spawn.py:301). So `goal/<parent>...HEAD` would already include the parent's commits, and the pathspec is probably why the packet showed only the fix's files. Changing only the base would leave the diff narrow. The lineage diff has to use the union of scopes across the chain, or no pathspec at all. That choice is unspecified.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1752,
+      "issue": "scoped_diff silently cuts output at `[:40000]`, and review_packet then applies a second budget of at most 8000 chars minus other sections. For a 700-900 line lineage the first cut discards files before bounded_diff or any file list is built. That is the silent truncation item 2 forbids. The file list has to come from `git diff --numstat <base>..<head>`, not from the already truncated text.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1166,
+      "issue": "bounded_diff walks hunks in order and drops later files entirely. Its marker only reports a count of omitted lines, with no per-file stats and no per-file range. Item 2 therefore needs a new numstat-based helper that always fits inside the 8000-char packet. The spec also doesn't say how the lineage diff and the labelled 'this round's change' section share that one small budget, or which gets priority.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1594,
+      "issue": "Ignoring a fix-only approval leaves approved short of needed, with nothing pending and nothing stuck. The code falls through to the final branch and holds the task with 'review state unknown: ' and an empty id list. Nothing opens a lineage review, so the task is stuck until the Planner steps in. The spec has to say what happens to an ignored approval: open a fresh lineage review via _open_reviews, or hold with an explicit reason such as 'review range not lineage base'.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1255,
+      "issue": "Where review_range is stamped is unspecified. _open_reviews already stamps reviewed_sha from the task's HEAD at creation, and the packet is built later at spawn time. Stamping in the packet builder lets the stamp drift from the head the reviewer actually saw, and risks never being written if the spawn path is skipped. Stamp it in _open_reviews, using one shared helper that computes (base, head). Have review_packet read that stamp instead of recomputing it.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1585,
+      "issue": "The lineage base is merge-base(goal/<parent>, head). It moves if the goal branch is merged into the task branch or the branch is rebased after the review was stamped. Comparing the stamped base to a recomputed one would then reject valid approvals, and reviewed_sha handling doesn't cover that case. The spec should say whether the comparison is against the base recomputed at merge time or a base pinned on the root task. It should also say how the head-moved void path interacts with it.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1140,
+      "issue": "Chain walking has no failure behaviour. A missing ancestor (bus.get raises KeyError), a cycle, a root without a worktree, or git failing on merge-base would each need a decision. The spec doesn't say to fail closed (hold or flag the review as lineage-unavailable), so an implementer will likely fall back silently to the fix-only diff, which is the exact defect being fixed. Other code does follow the chain with a seen-set (strategy.py:45, failures.py:16), so a shared root-resolver already exists to reuse.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1088,
+      "issue": "raw_diff also feeds the semantic security regex, the 'changed tests' list, and the evidence source_chunk candidates handed to _shadow_route. Swapping in the lineage diff changes security triggers, routed evidence and the shadow-route inputs. test_plain_task_review_unchanged only covers plain tasks, so nothing checks that this coupling behaves correctly for fix rounds.",
+      "severity": "low"
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "issue": "The acceptance bullets are weaker than the spec. They don't require testing the stamp (review_range written on the review task), an unstamped legacy approval still counting, a stamped approval with the right base counting, or the empty-lineage and chain-failure cases. As written, test_merge_ignores_fix_only_approval can pass with a trivially wrong implementation.",
+      "severity": "low"
+    }
+  ]
+}

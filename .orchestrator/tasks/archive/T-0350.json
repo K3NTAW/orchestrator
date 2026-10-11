@@ -1,0 +1,109 @@
+{
+  "id": "T-0350",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G8 fix round 1: rebase diff-hash guard and semantic pattern detection fail closed on git errors, with tests; the six acceptance tests at 85220de stay green (review T-0346)",
+  "spec": "STEP 0: the worktree must contain d85335f and 85220de (T-0277, semantic review triggers plus its six acceptance tests) in git log; never drop or amend them. The missing-tests concern is already answered by 85220de; confirm the six named tests exist and pass, do not rewrite them.\nFindings of review T-0346 on T-0277, both to be addressed:\n1. (high) orchestrator/merge.py _diff_hash returns None on any nonzero git returncode, and merge() runs the rebase-changed-diff guard only when both before_diff and after_diff are non-None, so a transient git failure silently skips the reviewed_sha approval binding and the merge proceeds. Fail closed like the rebase-conflict path just below: when either hash is unavailable, return status \"failed\" (or a distinct status such as diff_unavailable that report_merge treats as a hold) with a reason naming the failing git call, never merge. Test: test_merge.py::test_diff_hash_failure_blocks_merge with the git call mocked to a nonzero returncode.\n2. (med) orchestrator/daemon.py _added_diff_lines returns None on a nonzero returncode and _matching_semantic_pattern treats that as no match, so if the name-only diff succeeds but the unified diff fails, semantic pattern detection is skipped and the task can merge with review_reason none. Follow changed_paths()'s fail-closed contract: an unavailable unified diff yields the same diff_unavailable outcome the rest of _review_plan uses (one review on security_review_tier, review_reason records why). Test: test_daemon.py::test_semantic_pattern_diff_failure_fails_closed.\nKeep all six T-0277 tests and the existing suite green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id in the message; report sha and failures only.",
+  "inputs": [
+    "T-0348"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 85220de and d85335f below your commit",
+    "tests/test_merge.py::test_diff_hash_failure_blocks_merge passes: a nonzero git returncode in _diff_hash makes merge() return a non-merged status with a reason and no fast-forward happens",
+    "tests/test_daemon.py::test_semantic_pattern_diff_failure_fails_closed passes: a failing unified diff yields the diff_unavailable review plan, not review_reason none",
+    "tests/test_daemon.py::test_semantic_path_triggers_review, ::test_semantic_pattern_triggers_review, ::test_review_records_reviewed_sha, ::test_head_moved_after_approval_spawns_new_review and tests/test_merge.py::test_rebase_changing_diff_returns_status, ::test_clean_rebase_keeps_approval still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/merge.py",
+    "orchestrator/daemon.py",
+    "tests/test_merge.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0350",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_merge.py",
+        "line": 63,
+        "issue": "Acceptance requires tests/test_merge.py::test_diff_hash_failure_blocks_merge to pass, but this diff never adds a test by that name (only test_rebase_changing_diff_returns_status and test_clean_rebase_keeps_approval, which exercise a successful diff computation, not a failing git returncode from _diff_hash). Grepped the whole repo: no match. The underlying merge() logic at merge.py (before_diff/after_diff None checks) appears to fail closed correctly, but with no test pinning 'a nonzero git returncode in _diff_hash blocks merge with a non-merged status and no fast-forward', a future change could silently flip this to fail-open without breaking CI.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 693,
+        "issue": "Acceptance requires tests/test_daemon.py::test_semantic_pattern_diff_failure_fails_closed to pass, but no such test exists in the diff or the repo (grepped for 'diff_hash', 'fails_closed', 'diff_unavailable': only the pre-existing test_diff_unavailable_fails_closed, which covers changed_paths() returning None and never reaches _matching_semantic_pattern/_added_diff_lines at all). _review_plan's fail-closed branch for _SEMANTIC_DIFF_UNAVAILABLE (when changed_paths succeeds but the unified diff via _added_diff_lines fails) is therefore completely untested. Logic looks correct by inspection, but the specific acceptance-named test is missing so acceptance criteria are not met as written.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789854129.638359,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0350",
+      "claimed_at": 1789854129.6379929
+    },
+    {
+      "ts": 1789854129.639756,
+      "account": "B"
+    },
+    {
+      "ts": 1789854129.670403,
+      "pid": 85262,
+      "account": "B"
+    },
+    {
+      "ts": 1789854315.435233,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_merge.py",
+            "line": 63,
+            "issue": "Acceptance requires tests/test_merge.py::test_diff_hash_failure_blocks_merge to pass, but this diff never adds a test by that name (only test_rebase_changing_diff_returns_status and test_clean_rebase_keeps_approval, which exercise a successful diff computation, not a failing git returncode from _diff_hash). Grepped the whole repo: no match. The underlying merge() logic at merge.py (before_diff/after_diff None checks) appears to fail closed correctly, but with no test pinning 'a nonzero git returncode in _diff_hash blocks merge with a non-merged status and no fast-forward', a future change could silently flip this to fail-open without breaking CI.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 693,
+            "issue": "Acceptance requires tests/test_daemon.py::test_semantic_pattern_diff_failure_fails_closed to pass, but no such test exists in the diff or the repo (grepped for 'diff_hash', 'fails_closed', 'diff_unavailable': only the pre-existing test_diff_unavailable_fails_closed, which covers changed_paths() returning None and never reaches _matching_semantic_pattern/_added_diff_lines at all). _review_plan's fail-closed branch for _SEMANTIC_DIFF_UNAVAILABLE (when changed_paths succeeds but the unified diff via _added_diff_lines fails) is therefore completely untested. Logic looks correct by inspection, but the specific acceptance-named test is missing so acceptance criteria are not met as written.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789854315.438007,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789854129.6379929,
+  "account": "B",
+  "pid": 85262,
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,152 @@
+{
+  "id": "T-0408",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 2,
+  "title": "H4 fix round 6: executor tracks the fallback worker threads it spawns so tests (and shutdown) can join them; the reservation hand-off test joins the thread instead of racing the next test on the shared state file (review T-0406)",
+  "spec": "STEP 0: the worktree must contain ade6b74, 530c2ab, c1ba47c, aca3bb2, d54104f, a214aaf and f3ef147 (T-0362 lineage through T-0404) in git log; never drop or amend them.\nReview T-0406 on T-0404, one high finding: the full gate fails intermittently (exit 2 reproduced) in tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes with AssertionError 'T-0010' unexpectedly found in the reservation set. Root cause: executor._exhausted() starts the fallback worker with threading.Thread(daemon=True).start() and never joins or exposes it; in the full suite a still-running thread from an earlier test writes the shared reservation PERSIST file after a later test has recreated it and reused the same sequential task id.\nFix: (1) executor keeps a registry of fallback worker threads it starts (module-level list or a small helper: executor.fallback_threads(), executor.join_fallback_threads(timeout)); _exhausted appends the thread; the registry drops finished threads. (2) The test suite's executor tests join the registry in tearDown (or the harness base class does) so no background worker outlives its test; the hand-off test asserts the reservation is present while the worker is blocked on an event, then releases the event, joins, and asserts a single release. (3) daemon shutdown (the stop path added in T-0386) joins the registry with a bounded timeout so the process does not exit mid-write. No behaviour change for production dispatch otherwise. Prove it: python -m unittest tests.test_executor twice, then .claude/hooks/tests-green.sh from the worktree root twice in a row, exit 0 both times. git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0404",
+    "T-0406"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f3ef147 and the rest of the T-0362 lineage below your commit",
+    "tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes passes deterministically (two consecutive full-suite runs) and joins the worker thread through the executor registry",
+    "executor exposes the fallback thread registry and a bounded join used by the tests' tearDown and by the daemon stop path (grep)",
+    "tests/test_executor.py::test_refused_or_exception_path_releases_immediately, ::test_exhausted_hold_releases_dispatch_reservation, ::test_fallback_claude_when_codex_cooling and tests/test_daemon.py::test_reservation_owner_matches_running_executor, ::test_failed_dispatch_stamp_releases_reservation still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "tests/test_executor.py",
+    "tests/_harness.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "fix_round_for": "T-0404",
+    "task_class": "budget"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0408",
+  "codex_thread": "01a0bef7-df62-77f1-bff2-c90bd8ba1784",
+  "result": {
+    "summary": "Summary: Added bounded fallback-worker registry/joining and teardown isolation; committed `43ab83f`.\n\nFiles changed: `orchestrator/executor.py`, `orchestrator/daemon.py`, `tests/test_executor.py`.\n\nTests: executor suite \u00d72 and `.claude/hooks/tests-green.sh .` \u00d72 passed. `scripts/tests_green.sh` is absent. Failures-only output: empty.",
+    "executed_by": "codex:terra",
+    "thread": "01a0bef7-df62-77f1-bff2-c90bd8ba1784",
+    "usage": {
+      "input_tokens": 412221,
+      "cached_input_tokens": 381696,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 3891,
+      "reasoning_output_tokens": 1823
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789910309.08709,
+      "pipeline": {
+        "dispatched_at": 1789910309.087036
+      }
+    },
+    {
+      "ts": 1789910310.5103738,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0408",
+      "claimed_at": 1789910310.509998
+    },
+    {
+      "ts": 1789910310.511745,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789910533.26949,
+      "codex_thread": "01a0bef7-df62-77f1-bff2-c90bd8ba1784"
+    },
+    {
+      "ts": 1789910533.273375,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Added bounded fallback-worker registry/joining and teardown isolation; committed `43ab83f`.\n\nFiles changed: `orchestrator/executor.py`, `orchestrator/daemon.py`, `tests/test_executor.py`.\n\nTests: executor suite \u00d72 and `.claude/hooks/tests-green.sh .` \u00d72 passed. `scripts/tests_green.sh` is absent. Failures-only output: empty.",
+        "executed_by": "codex:terra",
+        "thread": "01a0bef7-df62-77f1-bff2-c90bd8ba1784",
+        "usage": {
+          "input_tokens": 412221,
+          "cached_input_tokens": 381696,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3891,
+          "reasoning_output_tokens": 1823
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789910638.8587148,
+      "pipeline": {
+        "dispatched_at": 1789910309.087036,
+        "gated_at": 1789910638.858606,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789910898.256799,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789910911.301501,
+      "pipeline": {
+        "dispatched_at": 1789910309.087036,
+        "gated_at": 1789910638.858606,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789910911.301389
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0409 (request_changes)"
+    },
+    {
+      "ts": 1789915459.314728,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "rebase T-0431 df2ae89",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789915618.6637912,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0431 df2ae89",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789910309.087036,
+    "gated_at": 1789910638.858606,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789910911.301389
+  },
+  "claimed_at": 1789910310.509998,
+  "rounds": 0,
+  "executor": "terra",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0431 df2ae89"
+}

@@ -1,0 +1,701 @@
+{
+  "id": "T-1672",
+  "created_at": 1791317761.1988459,
+  "parent": "T-1667",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: watchdog: restart dead daemons, report spawn failures and stalled queues; resolve the claude CLI without PATH",
+  "spec": "Stall watchdog and the PATH root cause.\n\nRoot cause first: worker spawns run the `claude` CLI found on the daemon's PATH; a daemon started from a shell without the\nHomebrew bin dir failed every spawn with \"claude CLI not found on PATH\" (luna-inbox review T-0599, 2026-10-06).\n1. Resolve the CLI once per spawn: shutil.which(\"claude\") on PATH, else the first existing of\n   /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.local/bin/claude, ~/.claude/local/claude; pass the absolute path.\n   Find every place that spawns claude (grep orchestrator/ for \"claude\" in subprocess argv) and route them through one helper.\n2. New orchestrator/watchdog.py and CLI `orchestrator watchdog [--once] [--install-launchd]`, machine level:\n   - Repos to watch: every repo with a .orchestrator/daemon.lock known to the machine registry (~/.orchestrator-machine,\n     orchestrator/machine.py) or listed in [watchdog].repos of the orchestrator's pool.toml.\n   - Every 5 minutes per repo: (a) daemon alive = its daemon.lock is held (fcntl test, no write); if not and the repo has\n     queued/running/held tasks or an open goal -> start `uv run orchestrator daemon` with ORCH_ROOT=<repo> and a PATH that\n     includes the Homebrew bin dir, log to <repo>/.orchestrator/runs/daemon-<ts>.log, notify once;\n     (b) a task \"running\" for more than 2x its timeout_s with no live worker pid -> let the daemon's reconcile_dead handle it\n     if the daemon is alive, else count it as stalled; (c) spawn failures in the last 30 minutes of bus events\n     (\"not found on PATH\", spawn error) -> notify once with the error; (d) nothing dispatched, gated or merged for 60 min\n     while ready tasks exist and accounts are not cooling -> notify once \"queue stalled\".\n   - Notifications through notify.notify_once with keys per repo+condition, so each condition is reported once until it clears.\n   - --install-launchd prints (does not write) a LaunchAgent plist that runs `orchestrator watchdog` every 300 s, and the\n     two commands the human runs to load it; installing it is the human's step.\n3. The machine registry gains the repo path when a daemon acquires its lock (machine.py), so new repos are watched automatically.\nTests tests/test_watchdog.py (temp repos, fake clock, no real daemons: patch the start function): test_claude_resolved_without_path_entry,\ntest_restarts_dead_daemon_with_work, test_no_restart_without_work, test_reports_spawn_failure_once, test_reports_stalled_queue_once,\ntest_registry_adds_repo_on_lock, test_install_launchd_prints_only.\n",
+  "inputs": [
+    "T-1670"
+  ],
+  "acceptance": [
+    "tests/test_watchdog.py: the seven named tests exist and pass",
+    "every claude spawn goes through one resolver helper",
+    "--install-launchd prints and writes nothing outside the repo"
+  ],
+  "scope": [
+    "orchestrator/watchdog.py",
+    "orchestrator/spawn.py",
+    "orchestrator/machine.py",
+    "orchestrator/cli.py",
+    "tests/test_watchdog.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1672",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Item 3 says the machine registry gains the repo path when a daemon acquires its lock. The lock is acquired in daemon.acquire_lock (daemon.py ~1949), which is outside the scope list. machine.py only holds leases and usage and has no repo registry or ~/.orchestrator-machine repo list. The registry has to be created, and something has to call it. The call is either in daemon.py (out of scope) or in the CLI path that calls acquire_lock, which the spec does not name. test_registry_adds_repo_on_lock cannot pass as scoped.",
+        "severity": "high",
+        "line": 1949
+      },
+      {
+        "path": "orchestrator/notify.py",
+        "issue": "notify.notify_once(task_id, transition, msg) dedupes through bus.get(task_id) and bus.update, using the pipeline.notification_transition field of one task in the current ORCH_ROOT bus. The watchdog is machine-level and works across repos, with keys such as repo+condition and no task. The spec's 'keys per repo+condition' does not fit the signature. Using it would hit the wrong bus or fail on a missing task. It also stores only one transition per task, so it cannot track independent conditions (a)-(d). It cannot be 'reported once until it clears' either, because the field never resets. notify.py is out of scope.",
+        "severity": "high",
+        "line": 32
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "Acceptance says every claude spawn goes through one resolver helper. goals.py:350 (planner argv) and planner_shadow.py:33 both build [\"claude\", \"-p\", ...] directly, and neither file is in scope. Only spawn.py:1317 and the which check at 1336 are covered. Planner launches would still fail with the same PATH error, so the root cause stays half fixed. The criterion cannot be checked unless a grep-style test is added.",
+        "severity": "high",
+        "line": 350
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "There are two 'not found on PATH' holds (spawn.py:1339 and 1365, the second on FileNotFoundError at Popen). Both need to use the resolved path. The spec does not say what happens when no candidate exists: keep the hold with an explicit reason that lists the paths tried. It also does not say that the daemon's PATH must stay unchanged, or that the resolved absolute path must be what is logged and cached (once per spawn, not per process).",
+        "severity": "med",
+        "line": 1336
+      },
+      {
+        "path": "orchestrator/watchdog.py",
+        "issue": "The daemon-alive check does a flock LOCK_NB on daemon.lock. If the daemon is dead, the watchdog takes the lock and could race a daemon that is starting up. It must release the lock before starting the daemon. It should open the file read-only without truncating it (daemon.acquire_lock opens it with 'w'), and it needs to handle a missing STATE dir. It should also use a start cooldown and a cap on start attempts, so a daemon that crashes immediately does not get restarted every 5 minutes without limit. The spec says nothing about this.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/watchdog.py",
+        "issue": "Conditions (b) and (d) depend on data the spec does not name: the bus task schema (timeout_s, worker pid, running since), the event types for dispatched/gated/merged, and a 'ready tasks exist' and 'accounts not cooling' predicate that normally lives in the capacity/pool modules. Reading the bus of another repo means switching ORCH_ROOT, since bus.py and daemon.py use module-level STATE constants. The spec does not say how. Without that, (b) and (d) are not testable with a fake clock. Condition (c) 'last 30 minutes of bus events' has the same gap. The spec also does not say what a 'stalled' count means for (b), or what is done with it.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add orchestrator/daemon.py to scope (or name the exact caller of acquire_lock) for the registry hook, and define the registry file format and location in machine.py (for example register_repo(path) and repos(), stored in the machine state under a lock, using the same MACHINE_DIR the harness overrides).",
+      "Do not use notify.notify_once as is. Either add a keyed, bus-independent dedupe in watchdog.py (a JSON state file per repo, key to last-reported value, cleared when the condition clears) that calls notify.notify, or add notify.py to scope with a task-independent variant.",
+      "Add orchestrator/goals.py and orchestrator/planner_shadow.py (and mcp.py if it spawns claude) to scope, or restrict the claim to spawn.py. Add a test that greps orchestrator/*.py for a literal \"claude\" as argv[0] outside the helper.",
+      "Place the resolver in spawn.py (or a small shared module), say what it returns when nothing is found (a held status with the list of paths tried), and make both held branches at spawn.py:1336 and 1365 use it.",
+      "Specify the daemon lock probe: open the file read-only without truncating it, flock LOCK_NB, release right away, tolerate a missing file. Add a restart cooldown and a cap on attempts per repo.",
+      "Name the data sources for (b)-(d): which bus fields and event kinds, how the other repo's bus is read without a global ORCH_ROOT swap, and which function decides 'ready tasks exist' and 'accounts cooling'. Inject the clock so the fake clock applies.",
+      "Add an off switch ([watchdog].enabled, default on or off stated) and say the --install-launchd plist is printed to stdout only, with absolute paths and no secrets. Add an assertion in test_install_launchd_prints_only that no file is created in HOME or the repo."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6467,
+      "trimmed": {
+        "risks": 2
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791317772.905984,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4041,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791317772.926142,
+      "packet_meta": {
+        "chars": 3302,
+        "est_tokens": 825,
+        "presented_tokens": 825,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "1e2b3323fe724035dac94fe3b8cca04c81d6dff37254faf6ccd287365086169b"
+          },
+          "spec": {
+            "chars": 2542,
+            "est_tokens": 635,
+            "sha256": "15040a64fcceff616f532e320da03de5bd38e08b543fdb17c40fa35baad0f882"
+          },
+          "acceptance": {
+            "chars": 194,
+            "est_tokens": 48,
+            "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+          },
+          "scope": {
+            "chars": 133,
+            "est_tokens": 33,
+            "sha256": "27e67289224eeafc8a624fcf0edcb7c4bf8487dc85a02b86d581174e906d0d0c"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 313,
+            "est_tokens": 78,
+            "sha256": "d9684fe4f31798d0cd58424ea32c6d446cb12771a10c5e91fa09dca4d45af736"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "c672b724faec",
+        "version": "c672b724faec",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1670 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4041,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791317774.550436,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1672",
+      "claimed_at": 1791317774.550102
+    },
+    {
+      "ts": 1791317774.552453,
+      "account": "A"
+    },
+    {
+      "ts": 1791317788.294059,
+      "pid": 19380,
+      "account": "A"
+    },
+    {
+      "ts": 1791317822.3526342,
+      "packet_meta": {
+        "chars": 3302,
+        "est_tokens": 825,
+        "presented_tokens": 825,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "1e2b3323fe724035dac94fe3b8cca04c81d6dff37254faf6ccd287365086169b"
+          },
+          "spec": {
+            "chars": 2542,
+            "est_tokens": 635,
+            "sha256": "15040a64fcceff616f532e320da03de5bd38e08b543fdb17c40fa35baad0f882"
+          },
+          "acceptance": {
+            "chars": 194,
+            "est_tokens": 48,
+            "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+          },
+          "scope": {
+            "chars": 133,
+            "est_tokens": 33,
+            "sha256": "27e67289224eeafc8a624fcf0edcb7c4bf8487dc85a02b86d581174e906d0d0c"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 313,
+            "est_tokens": 78,
+            "sha256": "d9684fe4f31798d0cd58424ea32c6d446cb12771a10c5e91fa09dca4d45af736"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "c672b724faec",
+        "version": "c672b724faec",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1670 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4041,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "bd7d8aad-c642-4aeb-92a4-6cdc3184f772"
+      }
+    },
+    {
+      "ts": 1791317822.389659,
+      "packet_meta": {
+        "chars": 3302,
+        "est_tokens": 825,
+        "presented_tokens": 825,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "1e2b3323fe724035dac94fe3b8cca04c81d6dff37254faf6ccd287365086169b"
+          },
+          "spec": {
+            "chars": 2542,
+            "est_tokens": 635,
+            "sha256": "15040a64fcceff616f532e320da03de5bd38e08b543fdb17c40fa35baad0f882"
+          },
+          "acceptance": {
+            "chars": 194,
+            "est_tokens": 48,
+            "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+          },
+          "scope": {
+            "chars": 133,
+            "est_tokens": 33,
+            "sha256": "27e67289224eeafc8a624fcf0edcb7c4bf8487dc85a02b86d581174e906d0d0c"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 313,
+            "est_tokens": 78,
+            "sha256": "d9684fe4f31798d0cd58424ea32c6d446cb12771a10c5e91fa09dca4d45af736"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "c672b724faec",
+        "version": "c672b724faec",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1670 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4041,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "bd7d8aad-c642-4aeb-92a4-6cdc3184f772",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791317823.8727748,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Item 3 says the machine registry gains the repo path when a daemon acquires its lock. The lock is acquired in daemon.acquire_lock (daemon.py ~1949), which is outside the scope list. machine.py only holds leases and usage and has no repo registry or ~/.orchestrator-machine repo list. The registry has to be created, and something has to call it. The call is either in daemon.py (out of scope) or in the CLI path that calls acquire_lock, which the spec does not name. test_registry_adds_repo_on_lock cannot pass as scoped.",
+            "severity": "high",
+            "line": 1949
+          },
+          {
+            "path": "orchestrator/notify.py",
+            "issue": "notify.notify_once(task_id, transition, msg) dedupes through bus.get(task_id) and bus.update, using the pipeline.notification_transition field of one task in the current ORCH_ROOT bus. The watchdog is machine-level and works across repos, with keys such as repo+condition and no task. The spec's 'keys per repo+condition' does not fit the signature. Using it would hit the wrong bus or fail on a missing task. It also stores only one transition per task, so it cannot track independent conditions (a)-(d). It cannot be 'reported once until it clears' either, because the field never resets. notify.py is out of scope.",
+            "severity": "high",
+            "line": 32
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "Acceptance says every claude spawn goes through one resolver helper. goals.py:350 (planner argv) and planner_shadow.py:33 both build [\"claude\", \"-p\", ...] directly, and neither file is in scope. Only spawn.py:1317 and the which check at 1336 are covered. Planner launches would still fail with the same PATH error, so the root cause stays half fixed. The criterion cannot be checked unless a grep-style test is added.",
+            "severity": "high",
+            "line": 350
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "There are two 'not found on PATH' holds (spawn.py:1339 and 1365, the second on FileNotFoundError at Popen). Both need to use the resolved path. The spec does not say what happens when no candidate exists: keep the hold with an explicit reason that lists the paths tried. It also does not say that the daemon's PATH must stay unchanged, or that the resolved absolute path must be what is logged and cached (once per spawn, not per process).",
+            "severity": "med",
+            "line": 1336
+          },
+          {
+            "path": "orchestrator/watchdog.py",
+            "issue": "The daemon-alive check does a flock LOCK_NB on daemon.lock. If the daemon is dead, the watchdog takes the lock and could race a daemon that is starting up. It must release the lock before starting the daemon. It should open the file read-only without truncating it (daemon.acquire_lock opens it with 'w'), and it needs to handle a missing STATE dir. It should also use a start cooldown and a cap on start attempts, so a daemon that crashes immediately does not get restarted every 5 minutes without limit. The spec says nothing about this.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/watchdog.py",
+            "issue": "Conditions (b) and (d) depend on data the spec does not name: the bus task schema (timeout_s, worker pid, running since), the event types for dispatched/gated/merged, and a 'ready tasks exist' and 'accounts not cooling' predicate that normally lives in the capacity/pool modules. Reading the bus of another repo means switching ORCH_ROOT, since bus.py and daemon.py use module-level STATE constants. The spec does not say how. Without that, (b) and (d) are not testable with a fake clock. Condition (c) 'last 30 minutes of bus events' has the same gap. The spec also does not say what a 'stalled' count means for (b), or what is done with it.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add orchestrator/daemon.py to scope (or name the exact caller of acquire_lock) for the registry hook, and define the registry file format and location in machine.py (for example register_repo(path) and repos(), stored in the machine state under a lock, using the same MACHINE_DIR the harness overrides).",
+          "Do not use notify.notify_once as is. Either add a keyed, bus-independent dedupe in watchdog.py (a JSON state file per repo, key to last-reported value, cleared when the condition clears) that calls notify.notify, or add notify.py to scope with a task-independent variant.",
+          "Add orchestrator/goals.py and orchestrator/planner_shadow.py (and mcp.py if it spawns claude) to scope, or restrict the claim to spawn.py. Add a test that greps orchestrator/*.py for a literal \"claude\" as argv[0] outside the helper.",
+          "Place the resolver in spawn.py (or a small shared module), say what it returns when nothing is found (a held status with the list of paths tried), and make both held branches at spawn.py:1336 and 1365 use it.",
+          "Specify the daemon lock probe: open the file read-only without truncating it, flock LOCK_NB, release right away, tolerate a missing file. Add a restart cooldown and a cap on attempts per repo.",
+          "Name the data sources for (b)-(d): which bus fields and event kinds, how the other repo's bus is read without a global ORCH_ROOT swap, and which function decides 'ready tasks exist' and 'accounts cooling'. Inject the clock so the fake clock applies.",
+          "Add an off switch ([watchdog].enabled, default on or off stated) and say the --install-launchd plist is printed to stdout only, with absolute paths and no secrets. Add an assertion in test_install_launchd_prints_only that no file is created in HOME or the repo."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6467,
+          "trimmed": {
+            "risks": 2
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791317823.874135,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Item 3 says the machine registry gains the repo path when a daemon acquires its lock. The lock is acquired in daemon.acquire_lock (daemon.py ~1949), which is outside the scope list. machine.py only holds leases and usage and has no repo registry or ~/.orchestrator-machine repo list. The registry has to be created, and something has to call it. The call is either in daemon.py (out of scope) or in the CLI path that calls acquire_lock, which the spec does not name. test_registry_adds_repo_on_lock cannot pass as scoped.",
+          "severity": "high",
+          "line": 1949
+        },
+        {
+          "path": "orchestrator/notify.py",
+          "issue": "notify.notify_once(task_id, transition, msg) dedupes through bus.get(task_id) and bus.update, using the pipeline.notification_transition field of one task in the current ORCH_ROOT bus. The watchdog is machine-level and works across repos, with keys such as repo+condition and no task. The spec's 'keys per repo+condition' does not fit the signature. Using it would hit the wrong bus or fail on a missing task. It also stores only one transition per task, so it cannot track independent conditions (a)-(d). It cannot be 'reported once until it clears' either, because the field never resets. notify.py is out of scope.",
+          "severity": "high",
+          "line": 32
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Acceptance says every claude spawn goes through one resolver helper. goals.py:350 (planner argv) and planner_shadow.py:33 both build [\"claude\", \"-p\", ...] directly, and neither file is in scope. Only spawn.py:1317 and the which check at 1336 are covered. Planner launches would still fail with the same PATH error, so the root cause stays half fixed. The criterion cannot be checked unless a grep-style test is added.",
+          "severity": "high",
+          "line": 350
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "There are two 'not found on PATH' holds (spawn.py:1339 and 1365, the second on FileNotFoundError at Popen). Both need to use the resolved path. The spec does not say what happens when no candidate exists: keep the hold with an explicit reason that lists the paths tried. It also does not say that the daemon's PATH must stay unchanged, or that the resolved absolute path must be what is logged and cached (once per spawn, not per process).",
+          "severity": "med",
+          "line": 1336
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "The daemon-alive check does a flock LOCK_NB on daemon.lock. If the daemon is dead, the watchdog takes the lock and could race a daemon that is starting up. It must release the lock before starting the daemon. It should open the file read-only without truncating it (daemon.acquire_lock opens it with 'w'), and it needs to handle a missing STATE dir. It should also use a start cooldown and a cap on start attempts, so a daemon that crashes immediately does not get restarted every 5 minutes without limit. The spec says nothing about this.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "Conditions (b) and (d) depend on data the spec does not name: the bus task schema (timeout_s, worker pid, running since), the event types for dispatched/gated/merged, and a 'ready tasks exist' and 'accounts not cooling' predicate that normally lives in the capacity/pool modules. Reading the bus of another repo means switching ORCH_ROOT, since bus.py and daemon.py use module-level STATE constants. The spec does not say how. Without that, (b) and (d) are not testable with a fake clock. Condition (c) 'last 30 minutes of bus events' has the same gap. The spec also does not say what a 'stalled' count means for (b), or what is done with it.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "--install-launchd 'prints and writes nothing outside the repo' leaves the plist content open. It has to avoid embedded secrets and tokens (house secrets rule) and use absolute paths for uv and the repo. It also needs a PATH that includes the Homebrew bin dir. The test only checks 'prints only' and does not name the files to snapshot, for example that HOME is unchanged.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_watchdog.py",
+          "issue": "No rollback or disable path for auto-starting daemons: no kill switch such as [watchdog].enabled or an env var. The tests also need to make sure the notification sink and the start function are patched, so that osascript and ORCH_NOTIFY_URL are never called from the suite. The new file also needs the 'import _harness' first line, and the machine registry must live under the harness's shared temp dir and not the real ~/.orchestrator-machine.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 3302,
+    "est_tokens": 825,
+    "presented_tokens": 825,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "1e2b3323fe724035dac94fe3b8cca04c81d6dff37254faf6ccd287365086169b"
+      },
+      "spec": {
+        "chars": 2542,
+        "est_tokens": 635,
+        "sha256": "15040a64fcceff616f532e320da03de5bd38e08b543fdb17c40fa35baad0f882"
+      },
+      "acceptance": {
+        "chars": 194,
+        "est_tokens": 48,
+        "sha256": "7e1332cbde50c17b060deb0ea6212b09f6923d68b8db387922d3f198f12c6770"
+      },
+      "scope": {
+        "chars": 133,
+        "est_tokens": 33,
+        "sha256": "27e67289224eeafc8a624fcf0edcb7c4bf8487dc85a02b86d581174e906d0d0c"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 313,
+        "est_tokens": 78,
+        "sha256": "d9684fe4f31798d0cd58424ea32c6d446cb12771a10c5e91fa09dca4d45af736"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "c672b724faec",
+    "version": "c672b724faec",
+    "candidate_known": false,
+    "base": "247fe58bae3d",
+    "sources": "task@T-1670 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 4041,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "bd7d8aad-c642-4aeb-92a4-6cdc3184f772",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791317774.550102,
+  "account": "A",
+  "pid": 19380,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Item 3 says the machine registry gains the repo path when a daemon acquires its lock. The lock is acquired in daemon.acquire_lock (daemon.py ~1949), which is outside the scope list. machine.py only holds leases and usage and has no repo registry or ~/.orchestrator-machine repo list. The registry has to be created, and something has to call it. The call is either in daemon.py (out of scope) or in the CLI path that calls acquire_lock, which the spec does not name. test_registry_adds_repo_on_lock cannot pass as scoped.",
+      "severity": "high",
+      "line": 1949
+    },
+    {
+      "path": "orchestrator/notify.py",
+      "issue": "notify.notify_once(task_id, transition, msg) dedupes through bus.get(task_id) and bus.update, using the pipeline.notification_transition field of one task in the current ORCH_ROOT bus. The watchdog is machine-level and works across repos, with keys such as repo+condition and no task. The spec's 'keys per repo+condition' does not fit the signature. Using it would hit the wrong bus or fail on a missing task. It also stores only one transition per task, so it cannot track independent conditions (a)-(d). It cannot be 'reported once until it clears' either, because the field never resets. notify.py is out of scope.",
+      "severity": "high",
+      "line": 32
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Acceptance says every claude spawn goes through one resolver helper. goals.py:350 (planner argv) and planner_shadow.py:33 both build [\"claude\", \"-p\", ...] directly, and neither file is in scope. Only spawn.py:1317 and the which check at 1336 are covered. Planner launches would still fail with the same PATH error, so the root cause stays half fixed. The criterion cannot be checked unless a grep-style test is added.",
+      "severity": "high",
+      "line": 350
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "There are two 'not found on PATH' holds (spawn.py:1339 and 1365, the second on FileNotFoundError at Popen). Both need to use the resolved path. The spec does not say what happens when no candidate exists: keep the hold with an explicit reason that lists the paths tried. It also does not say that the daemon's PATH must stay unchanged, or that the resolved absolute path must be what is logged and cached (once per spawn, not per process).",
+      "severity": "med",
+      "line": 1336
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "The daemon-alive check does a flock LOCK_NB on daemon.lock. If the daemon is dead, the watchdog takes the lock and could race a daemon that is starting up. It must release the lock before starting the daemon. It should open the file read-only without truncating it (daemon.acquire_lock opens it with 'w'), and it needs to handle a missing STATE dir. It should also use a start cooldown and a cap on start attempts, so a daemon that crashes immediately does not get restarted every 5 minutes without limit. The spec says nothing about this.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "Conditions (b) and (d) depend on data the spec does not name: the bus task schema (timeout_s, worker pid, running since), the event types for dispatched/gated/merged, and a 'ready tasks exist' and 'accounts not cooling' predicate that normally lives in the capacity/pool modules. Reading the bus of another repo means switching ORCH_ROOT, since bus.py and daemon.py use module-level STATE constants. The spec does not say how. Without that, (b) and (d) are not testable with a fake clock. Condition (c) 'last 30 minutes of bus events' has the same gap. The spec also does not say what a 'stalled' count means for (b), or what is done with it.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "--install-launchd 'prints and writes nothing outside the repo' leaves the plist content open. It has to avoid embedded secrets and tokens (house secrets rule) and use absolute paths for uv and the repo. It also needs a PATH that includes the Homebrew bin dir. The test only checks 'prints only' and does not name the files to snapshot, for example that HOME is unchanged.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_watchdog.py",
+      "issue": "No rollback or disable path for auto-starting daemons: no kill switch such as [watchdog].enabled or an env var. The tests also need to make sure the notification sink and the start function are patched, so that osascript and ORCH_NOTIFY_URL are never called from the suite. The new file also needs the 'import _harness' first line, and the machine registry must live under the harness's shared temp dir and not the real ~/.orchestrator-machine.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

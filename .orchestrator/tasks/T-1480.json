@@ -1,0 +1,663 @@
+{
+  "id": "T-1480",
+  "created_at": 1790878823.575927,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: next_wave decision point v2: file the next wave when every execute child is merged or superseded and plan.md lists unfiled labels; closable accepts superseded children; capped relaunches; fail-safe plan parsing",
+  "spec": "Goal T-1403, plan label E12v2 (respec of T-1443 after spec review T-1462 request_changes; every risk is answered\nbelow). Wave 1 of T-1403 finished 2026-10-01 09:30 and nothing happened for 8.5 h: no decision point covers\n'filed work done, plan has more waves'.\n\nFacts (goal/T-1403 after E9 T-1439; locate by symbol): planner_runs.decision_points() yields scouts_done, held and\nclosable only; closable needs every execute child merged_into, so a goal with superseded execute children never\ncloses (T-1403 has T-1405, T-1410, T-1413, T-1414 superseded). tick() routes each point through build_ctx() and\ndecision.route() (unknown kinds -> escalate 'unknown:kind'), then run_group(); run() and run_group() skip when\n_session_attached(). daemon calls planner_runs.reconcile()/tick() only when [planner].autonomous is true (live\npool.toml false; harness forces false): leave that gate. _claim's decision_requested map and _condition_resolved()\nare per kind; every non-'held' kind is goal-keyed in _decision_task, _observed_outcome, reconcile/jev and the\nclosable-only branches of build_ctx and tick (gate_state unknown, routine). planner_packet._KIND_FALLBACK maps\nkinds to decision types; a missing entry falls to 'other'. Plan text lives in STATE/plan.md: section\n'## GOAL <goal id> ...' up to the next '## ' line; wave lines start with 'Wave <n>'; additions are bullets\n'- E3 (wave 3, ...) ...'. Filed children carry constraints.plan_label.\n\nChange:\n1. planner_runs.unfiled_labels(goal_id, children) -> sorted list. Labels = tokens matching\n   (?<![\\w./:-])[A-Z]\\d{1,2}[a-z]?(?:v\\d+)?(?![\\w/:-]) on wave lines (^\\s*(?:[-*]\\s*)?Wave \\d+\\b) of the goal's\n   section, plus the leading label of bullets ^\\s*[-*]\\s*<label>\\s*\\(wave \\d+. Minus labels on lines starting\n   'Dropped:' in that section. A label is filed when a child's plan_label equals it, or equals it followed by a\n   lowercase letter or v<digits> (E11 -> E11a, A1 -> A1v2; A10 does NOT file A1). Fail safe (T-1462 #5): no\n   plan.md, no section, OSError or UnicodeDecodeError -> []. Only the goal's section is read; the read happens\n   only inside decision_points() for goals whose execute children are all merged_into or superseded (so the\n   per-tick cost is zero for goals with queued/running work, T-1462 #6). Plan text is data: it yields only label\n   tokens and never reaches a prompt except as those tokens.\n2. decision_points(): for a goal with execute children where every execute child is merged_into or status\n   'superseded', no child of any role is queued or running, no execute child is held, and unfiled_labels is\n   non-empty -> yield (goal_id, 'next_wave', f\"{goal_id}:{sha256(','.join(labels))[:12]}\") unless _blocked; do not\n   yield closable for that goal. CLOSABLE GAP DECIDED (T-1462 #2): closable now counts superseded execute children\n   as resolved (every execute child merged_into OR superseded, same predicate as next_wave); with no unfiled\n   labels a goal with superseded children becomes closable. Keep every existing closable test green by reading\n   them first; test_closable_requires_every_execute_child_merged must still fail closable for a queued/held/done-\n   unmerged child (only 'superseded' is newly accepted; adjust its fixture if it used superseded as the blocker).\n3. next_wave in the goal-keyed paths (T-1462 #4): _decision_task returns the goal; _observed_outcome returns None\n   for next_wave; tick() skips the closable-only gate_state/routine branches for next_wave; _record_running copies\n   the point as [goal_id, payload_key] like closable. build_ctx: add unfiled_labels and goal_complexity.\n   _claim decision_requested: 'file the next wave from plan.md'. _condition_resolved for next_wave: goal done, or\n   the goal's current unfiled set hashes to a different key than the record's payload_key.\n4. Retry and dedup (T-1462 #3): next_wave launches are capped PER GOAL across every payload_key: [planner].next_wave_max_launches (default 3, read with .get) bounds the number of next_wave decision runs launched for one goal (sum of attempts over the goal's next_wave records). At the cap, tick() launches nothing, notifies exactly once ('next_wave: Planner launched N times for <goal> without filing; edit plan.md, add a Dropped: line, or clear next_wave_capped') and writes next_wave_capped=true on the goal's newest next_wave record; a label-set change does NOT reset the cap, only clearing that field does. Each distinct key still follows the existing attempts/gave_up rule of _claim/reconcile.\n5. decision.route(): kind next_wave -> required field unfiled_labels checked by key presence (an empty list is\n   valid, T-1462 #6): missing -> escalate 'unknown:unfiled_labels'; empty -> none 'no_unfiled_work'; else escalate\n   'next_wave_unfiled' (planner_router picks the tier). Add unfiled_labels to the evidence fields.\n6. planner_packet._KIND_FALLBACK gains next_wave -> 'other' explicitly, with a comment, and the packet includes\n   unfiled_labels in the goal section so the decision Planner reads them (planner_packet.py joins scope, T-1462\n   #4, #7).\n7. .orchestrator/prompts/planner-decision.md: one sentence: a next_wave decision means every filed execute task of\n   the goal is merged or superseded while plan.md still lists unfiled labels; file the next wave from plan.md (SPEC\n   RULE, depends_on by plan label) or record under 'Needs the human' why not, and list labels that will never be\n   filed on a 'Dropped:' line.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_planner_runs.py::test_closable_requires_every_execute_child_merged\nand test_decision_points_scouts_done_held_closable write no plan.md and must pass (adjust only as rule 2 says);\ntests/test_decision.py::test_disabled_routes_everything_to_escalate and the unknown-field table must pass\nunchanged; tests/test_planner_taxonomy.py: next_wave classifies as decision_type 'other' (do not edit\nplanner_taxonomy.py); tests/test_planner_runs_packets.py and tests/test_planner_runs_routing.py must pass.\n\nDepends on E9 (merged). The human decides when [planner].autonomous goes true. Rollback (T-1462 #8): `git revert`\nof the merge commit; existing next_wave records stay inert because decision_points() no longer yields the kind;\nthe Planner records it in decisions.md at merge.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by the line numbers quoted here.",
+  "inputs": [
+    "T-1469"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py::test_next_wave_point_when_filed_work_resolved_and_plan_lists_unfiled_labels: passes: with STATE/plan.md holding a '## GOAL <id>' section whose wave lines name A1, A2, B1 and children plan_label A1 (merged) and A2 (superseded), decision_points() yields (goal, 'next_wave', key) and not closable; nothing is yielded while any child is queued/running or an execute child is held, or once B1 is filed (or listed on a 'Dropped:' line); a goal whose execute children are all merged or superseded with no unfiled labels yields closable; tick() records a skip and launches nothing while _session_attached() is true, and launches exactly one decision run for a next_wave point with route escalate when detached (launcher patched)",
+    "tests/test_planner_runs.py::test_unfiled_labels_fails_safe_and_matches_suffixes: passes: unfiled_labels returns [] with no plan.md, no goal section, an unreadable file (OSError patched) and a non-UTF-8 file; a wave line whose prose contains 'B1' only inside a path-like or word token is not a label; 'Dropped: B9' removes B9; E11 is filed by plan_label E11a and A1 by A1v2 but A1 is not filed by A10; after [planner].next_wave_max_launches launches without filing, tick() notifies once and launches nothing until the record is cleared",
+    "tests/test_decision.py::test_next_wave_routes_escalate_or_none: passes: decision.route on kind next_wave returns escalate 'next_wave_unfiled' with unfiled_labels in the evidence when the list is non-empty, none 'no_unfiled_work' when the list is present but empty, and escalate 'unknown:unfiled_labels' when the field is missing",
+    "tests/test_planner_runs_packets.py::test_next_wave_packet_lists_unfiled_labels: passes: the packet for a next_wave point maps to decision type 'other' and its goal section lists the unfiled labels",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    "orchestrator/planner_packet.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_planner_runs_packets.py",
+    "tests/test_decision.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1480",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Rule 2 makes superseded execute children count as resolved for closable. But build_ctx still sets all_children_merged = all(status == 'done' and merged_into), and routine_close (~line 1547) refuses unless all_children_merged. A goal like T-1403 would therefore yield closable and then route 'escalate children_unmerged' in decision.route. It would launch a Planner and never close routinely, so the stated closable gap is only half fixed. The spec lists neither build_ctx's closable branch nor the routine_close guard.",
+        "severity": "high",
+        "line": 1106
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The cap uses next_wave_capped on the newest next_wave record, and only clearing that field resets it. Nothing in the spec says who clears it or how. A manual edit of the records file is the only path, and the 'edit plan.md or add Dropped:' remedy in the notification does not reset it. It is also unclear whether a goal's later, genuinely new waves stay blocked forever. This is state that never decreases. It needs an auto-reset when a launch results in a filed child (unfiled set shrinks), or a documented clear command.",
+        "severity": "med",
+        "line": 243
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The cap sums attempts over all of a goal's next_wave records. _claim/reconcile attempts are incremented on exited_early and failed_launch, and the spec does not say whether a successful exited_ok launch counts. 'Number of runs launched' and 'attempts' can diverge: a run that exits_ok without filing might count as 0, or each retry might count twice. State exactly which counter is summed, and where the cap check sits relative to _claim, so a launch is not double counted.",
+        "severity": "med",
+        "line": 275
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "_condition_resolved for next_wave recomputes unfiled_labels, which re-reads plan.md. Under the fail-safe, [] on an OSError makes the unfiled set hash differently, so the condition reads as resolved. A transient read failure could clear or mark a running record resolved and permit a relaunch with a new key. Specify that a read failure is not 'resolved' (distinguish unreadable from empty), or that the empty-set hash is excluded.",
+        "severity": "med",
+        "line": 626
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The goal section is bounded by the next '## ' line, but plan.md is also written by the Planner (untrusted-adjacent) and wave lines are free prose. The label regex will pick up labels in unrelated wave lines, for example 'Wave 2 depends on E9 (merged)', so a label the plan merely mentions as done or external becomes 'unfiled' and drives repeated launches until the cap. The spec has only the Dropped: escape hatch. Consider restricting to labels introduced on the line (e.g. before ':' or '-') or require a test for the 'mentions merged label' case.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "tick() has a legacy branch ('routes' not in config) that calls run() for the first point only. The spec's acceptance tests do not say which config path they exercise, and next_wave in run() uses the same _claim/decision_requested paths with route=None. The spec does not say that the cap and notify logic must live where both tick paths reach it.",
+        "severity": "low",
+        "line": 1592
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add to rule 2/3: build_ctx closable branch computes all_children_merged with the same predicate as decision_points (every execute child merged_into OR status 'superseded'), and routine_close's guard uses it. Add a test that a goal with merged plus superseded children and no unfiled labels routes closable to 'routine' (green gate), not 'children_unmerged'. Alternatively, state that these goals intentionally escalate and say why.",
+      "Define how next_wave_capped is cleared: auto-clear it when the goal's unfiled set strictly shrinks or a new child is filed. Or name the supported command or edit that does it, and test it.",
+      "State precisely which counter next_wave_max_launches sums (launches[] length vs attempts) and place the cap check inside the lock/claim path so the count and the launch are atomic.",
+      "Specify that unfiled_labels failures (OSError/decode/no section) in _condition_resolved are treated as 'unknown, not resolved', and in decision_points as 'no point'. Add a test for the running-record case.",
+      "Name which tick path (routes configured or legacy) the tick acceptance tests use, and require the cap in both, or state that legacy is out of scope."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790878832.96857,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10253,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790878832.9838378,
+      "packet_meta": {
+        "chars": 9514,
+        "est_tokens": 2378,
+        "presented_tokens": 2378,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "3cd4e657b175eadf1cc6b6d627c32a9148416e8d532027c3b65683b7ec7f0621"
+          },
+          "spec": {
+            "chars": 6614,
+            "est_tokens": 1653,
+            "sha256": "f0dd4edfa1494d756fd59fab92513d73281f7380beba6da9de141a567ebd907b"
+          },
+          "acceptance": {
+            "chars": 1884,
+            "est_tokens": 471,
+            "sha256": "9b57042f52a119e6eedc44c6151519b0e320bcec3d2f38b1b75d6cf3c6b53abd"
+          },
+          "scope": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "e8a7febc1ef2e9e463e6b08ca06451a53fbd8cbf20bf84f65dfc6dfc95e25314"
+          },
+          "depends_on": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+          },
+          "existing tests": {
+            "chars": 538,
+            "est_tokens": 134,
+            "sha256": "c38ee829df2e1afc0f09e6f0abc040299591d0df53cfcfdeb5862114666df240"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "47fa63f73afc",
+        "version": "47fa63f73afc",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1469 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10253,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790878834.6345658,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1480",
+      "claimed_at": 1790878834.599801
+    },
+    {
+      "ts": 1790878834.636651,
+      "account": "A"
+    },
+    {
+      "ts": 1790878846.581253,
+      "pid": 5267,
+      "account": "A"
+    },
+    {
+      "ts": 1790878878.4257522,
+      "packet_meta": {
+        "chars": 9514,
+        "est_tokens": 2378,
+        "presented_tokens": 2378,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "3cd4e657b175eadf1cc6b6d627c32a9148416e8d532027c3b65683b7ec7f0621"
+          },
+          "spec": {
+            "chars": 6614,
+            "est_tokens": 1653,
+            "sha256": "f0dd4edfa1494d756fd59fab92513d73281f7380beba6da9de141a567ebd907b"
+          },
+          "acceptance": {
+            "chars": 1884,
+            "est_tokens": 471,
+            "sha256": "9b57042f52a119e6eedc44c6151519b0e320bcec3d2f38b1b75d6cf3c6b53abd"
+          },
+          "scope": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "e8a7febc1ef2e9e463e6b08ca06451a53fbd8cbf20bf84f65dfc6dfc95e25314"
+          },
+          "depends_on": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+          },
+          "existing tests": {
+            "chars": 538,
+            "est_tokens": 134,
+            "sha256": "c38ee829df2e1afc0f09e6f0abc040299591d0df53cfcfdeb5862114666df240"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "47fa63f73afc",
+        "version": "47fa63f73afc",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1469 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10253,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "21b3f842-fb8b-4b2b-b001-6a4394ffb03b"
+      }
+    },
+    {
+      "ts": 1790878878.45027,
+      "packet_meta": {
+        "chars": 9514,
+        "est_tokens": 2378,
+        "presented_tokens": 2378,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "3cd4e657b175eadf1cc6b6d627c32a9148416e8d532027c3b65683b7ec7f0621"
+          },
+          "spec": {
+            "chars": 6614,
+            "est_tokens": 1653,
+            "sha256": "f0dd4edfa1494d756fd59fab92513d73281f7380beba6da9de141a567ebd907b"
+          },
+          "acceptance": {
+            "chars": 1884,
+            "est_tokens": 471,
+            "sha256": "9b57042f52a119e6eedc44c6151519b0e320bcec3d2f38b1b75d6cf3c6b53abd"
+          },
+          "scope": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "e8a7febc1ef2e9e463e6b08ca06451a53fbd8cbf20bf84f65dfc6dfc95e25314"
+          },
+          "depends_on": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+          },
+          "existing tests": {
+            "chars": 538,
+            "est_tokens": 134,
+            "sha256": "c38ee829df2e1afc0f09e6f0abc040299591d0df53cfcfdeb5862114666df240"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "47fa63f73afc",
+        "version": "47fa63f73afc",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1469 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 10253,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "21b3f842-fb8b-4b2b-b001-6a4394ffb03b",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790878879.0317628,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Rule 2 makes superseded execute children count as resolved for closable. But build_ctx still sets all_children_merged = all(status == 'done' and merged_into), and routine_close (~line 1547) refuses unless all_children_merged. A goal like T-1403 would therefore yield closable and then route 'escalate children_unmerged' in decision.route. It would launch a Planner and never close routinely, so the stated closable gap is only half fixed. The spec lists neither build_ctx's closable branch nor the routine_close guard.",
+            "severity": "high",
+            "line": 1106
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The cap uses next_wave_capped on the newest next_wave record, and only clearing that field resets it. Nothing in the spec says who clears it or how. A manual edit of the records file is the only path, and the 'edit plan.md or add Dropped:' remedy in the notification does not reset it. It is also unclear whether a goal's later, genuinely new waves stay blocked forever. This is state that never decreases. It needs an auto-reset when a launch results in a filed child (unfiled set shrinks), or a documented clear command.",
+            "severity": "med",
+            "line": 243
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The cap sums attempts over all of a goal's next_wave records. _claim/reconcile attempts are incremented on exited_early and failed_launch, and the spec does not say whether a successful exited_ok launch counts. 'Number of runs launched' and 'attempts' can diverge: a run that exits_ok without filing might count as 0, or each retry might count twice. State exactly which counter is summed, and where the cap check sits relative to _claim, so a launch is not double counted.",
+            "severity": "med",
+            "line": 275
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "_condition_resolved for next_wave recomputes unfiled_labels, which re-reads plan.md. Under the fail-safe, [] on an OSError makes the unfiled set hash differently, so the condition reads as resolved. A transient read failure could clear or mark a running record resolved and permit a relaunch with a new key. Specify that a read failure is not 'resolved' (distinguish unreadable from empty), or that the empty-set hash is excluded.",
+            "severity": "med",
+            "line": 626
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The goal section is bounded by the next '## ' line, but plan.md is also written by the Planner (untrusted-adjacent) and wave lines are free prose. The label regex will pick up labels in unrelated wave lines, for example 'Wave 2 depends on E9 (merged)', so a label the plan merely mentions as done or external becomes 'unfiled' and drives repeated launches until the cap. The spec has only the Dropped: escape hatch. Consider restricting to labels introduced on the line (e.g. before ':' or '-') or require a test for the 'mentions merged label' case.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "tick() has a legacy branch ('routes' not in config) that calls run() for the first point only. The spec's acceptance tests do not say which config path they exercise, and next_wave in run() uses the same _claim/decision_requested paths with route=None. The spec does not say that the cap and notify logic must live where both tick paths reach it.",
+            "severity": "low",
+            "line": 1592
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add to rule 2/3: build_ctx closable branch computes all_children_merged with the same predicate as decision_points (every execute child merged_into OR status 'superseded'), and routine_close's guard uses it. Add a test that a goal with merged plus superseded children and no unfiled labels routes closable to 'routine' (green gate), not 'children_unmerged'. Alternatively, state that these goals intentionally escalate and say why.",
+          "Define how next_wave_capped is cleared: auto-clear it when the goal's unfiled set strictly shrinks or a new child is filed. Or name the supported command or edit that does it, and test it.",
+          "State precisely which counter next_wave_max_launches sums (launches[] length vs attempts) and place the cap check inside the lock/claim path so the count and the launch are atomic.",
+          "Specify that unfiled_labels failures (OSError/decode/no section) in _condition_resolved are treated as 'unknown, not resolved', and in decision_points as 'no point'. Add a test for the running-record case.",
+          "Name which tick path (routes configured or legacy) the tick acceptance tests use, and require the cap in both, or state that legacy is out of scope."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790878879.033083,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Rule 2 makes superseded execute children count as resolved for closable. But build_ctx still sets all_children_merged = all(status == 'done' and merged_into), and routine_close (~line 1547) refuses unless all_children_merged. A goal like T-1403 would therefore yield closable and then route 'escalate children_unmerged' in decision.route. It would launch a Planner and never close routinely, so the stated closable gap is only half fixed. The spec lists neither build_ctx's closable branch nor the routine_close guard.",
+          "severity": "high",
+          "line": 1106
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The cap uses next_wave_capped on the newest next_wave record, and only clearing that field resets it. Nothing in the spec says who clears it or how. A manual edit of the records file is the only path, and the 'edit plan.md or add Dropped:' remedy in the notification does not reset it. It is also unclear whether a goal's later, genuinely new waves stay blocked forever. This is state that never decreases. It needs an auto-reset when a launch results in a filed child (unfiled set shrinks), or a documented clear command.",
+          "severity": "med",
+          "line": 243
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The cap sums attempts over all of a goal's next_wave records. _claim/reconcile attempts are incremented on exited_early and failed_launch, and the spec does not say whether a successful exited_ok launch counts. 'Number of runs launched' and 'attempts' can diverge: a run that exits_ok without filing might count as 0, or each retry might count twice. State exactly which counter is summed, and where the cap check sits relative to _claim, so a launch is not double counted.",
+          "severity": "med",
+          "line": 275
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "_condition_resolved for next_wave recomputes unfiled_labels, which re-reads plan.md. Under the fail-safe, [] on an OSError makes the unfiled set hash differently, so the condition reads as resolved. A transient read failure could clear or mark a running record resolved and permit a relaunch with a new key. Specify that a read failure is not 'resolved' (distinguish unreadable from empty), or that the empty-set hash is excluded.",
+          "severity": "med",
+          "line": 626
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The goal section is bounded by the next '## ' line, but plan.md is also written by the Planner (untrusted-adjacent) and wave lines are free prose. The label regex will pick up labels in unrelated wave lines, for example 'Wave 2 depends on E9 (merged)', so a label the plan merely mentions as done or external becomes 'unfiled' and drives repeated launches until the cap. The spec has only the Dropped: escape hatch. Consider restricting to labels introduced on the line (e.g. before ':' or '-') or require a test for the 'mentions merged label' case.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "tick() has a legacy branch ('routes' not in config) that calls run() for the first point only. The spec's acceptance tests do not say which config path they exercise, and next_wave in run() uses the same _claim/decision_requested paths with route=None. The spec does not say that the cap and notify logic must live where both tick paths reach it.",
+          "severity": "low",
+          "line": 1592
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 9514,
+    "est_tokens": 2378,
+    "presented_tokens": 2378,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "3cd4e657b175eadf1cc6b6d627c32a9148416e8d532027c3b65683b7ec7f0621"
+      },
+      "spec": {
+        "chars": 6614,
+        "est_tokens": 1653,
+        "sha256": "f0dd4edfa1494d756fd59fab92513d73281f7380beba6da9de141a567ebd907b"
+      },
+      "acceptance": {
+        "chars": 1884,
+        "est_tokens": 471,
+        "sha256": "9b57042f52a119e6eedc44c6151519b0e320bcec3d2f38b1b75d6cf3c6b53abd"
+      },
+      "scope": {
+        "chars": 235,
+        "est_tokens": 58,
+        "sha256": "e8a7febc1ef2e9e463e6b08ca06451a53fbd8cbf20bf84f65dfc6dfc95e25314"
+      },
+      "depends_on": {
+        "chars": 146,
+        "est_tokens": 36,
+        "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+      },
+      "existing tests": {
+        "chars": 538,
+        "est_tokens": 134,
+        "sha256": "c38ee829df2e1afc0f09e6f0abc040299591d0df53cfcfdeb5862114666df240"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "47fa63f73afc",
+    "version": "47fa63f73afc",
+    "candidate_known": false,
+    "base": "db2ae815ac55",
+    "sources": "task@T-1469 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 10253,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "21b3f842-fb8b-4b2b-b001-6a4394ffb03b",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790878834.599801,
+  "account": "A",
+  "pid": 5267,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Rule 2 makes superseded execute children count as resolved for closable. But build_ctx still sets all_children_merged = all(status == 'done' and merged_into), and routine_close (~line 1547) refuses unless all_children_merged. A goal like T-1403 would therefore yield closable and then route 'escalate children_unmerged' in decision.route. It would launch a Planner and never close routinely, so the stated closable gap is only half fixed. The spec lists neither build_ctx's closable branch nor the routine_close guard.",
+      "severity": "high",
+      "line": 1106
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The cap uses next_wave_capped on the newest next_wave record, and only clearing that field resets it. Nothing in the spec says who clears it or how. A manual edit of the records file is the only path, and the 'edit plan.md or add Dropped:' remedy in the notification does not reset it. It is also unclear whether a goal's later, genuinely new waves stay blocked forever. This is state that never decreases. It needs an auto-reset when a launch results in a filed child (unfiled set shrinks), or a documented clear command.",
+      "severity": "med",
+      "line": 243
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The cap sums attempts over all of a goal's next_wave records. _claim/reconcile attempts are incremented on exited_early and failed_launch, and the spec does not say whether a successful exited_ok launch counts. 'Number of runs launched' and 'attempts' can diverge: a run that exits_ok without filing might count as 0, or each retry might count twice. State exactly which counter is summed, and where the cap check sits relative to _claim, so a launch is not double counted.",
+      "severity": "med",
+      "line": 275
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "_condition_resolved for next_wave recomputes unfiled_labels, which re-reads plan.md. Under the fail-safe, [] on an OSError makes the unfiled set hash differently, so the condition reads as resolved. A transient read failure could clear or mark a running record resolved and permit a relaunch with a new key. Specify that a read failure is not 'resolved' (distinguish unreadable from empty), or that the empty-set hash is excluded.",
+      "severity": "med",
+      "line": 626
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The goal section is bounded by the next '## ' line, but plan.md is also written by the Planner (untrusted-adjacent) and wave lines are free prose. The label regex will pick up labels in unrelated wave lines, for example 'Wave 2 depends on E9 (merged)', so a label the plan merely mentions as done or external becomes 'unfiled' and drives repeated launches until the cap. The spec has only the Dropped: escape hatch. Consider restricting to labels introduced on the line (e.g. before ':' or '-') or require a test for the 'mentions merged label' case.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "tick() has a legacy branch ('routes' not in config) that calls run() for the first point only. The spec's acceptance tests do not say which config path they exercise, and next_wave in run() uses the same _claim/decision_requested paths with route=None. The spec does not say that the cap and notify logic must live where both tick paths reach it.",
+      "severity": "low",
+      "line": 1592
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+{
+  "id": "T-0373",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 2,
+  "title": "H6 fix round 1: the new acceptance and daemon tests leak module state into the rest of the suite (bus KeyErrors, worktree added inside the task worktree, merged_into KeyError); restore sandbox isolation so the full gate is green (gate_red on T-0359)",
+  "spec": "STEP 0: the worktree must contain d362503 (T-0359, H6) in git log; never drop or amend it.\nGate red on T-0359, reproduced on a clean external run of .claude/hooks/tests-green.sh (10 errors, deterministic, the base goal/T-0353 head is green):\nERROR test_bus.Bus.test_db_leaves_no_unclosed_connection, test_depends_on, test_lifecycle_and_rules, test_read_compact_rows, test_read_full_shape_unchanged: KeyError on the fixture's own task id (bus.get reads a different tasks dir than create_task wrote; ids differ per run, so a module global such as bus STATE/TASKS or spawn.ROOT is left patched by an earlier test).\nERROR test_cli.Cli.test_scorecard_table_and_json, test_status_plain_and_json: KeyError on a task id (same cause).\nERROR test_daemon.Daemon.test_ancestor_merged_task_skips_gate_and_review: KeyError 'merged_into' (the new gate path indexes a key that fixture tasks may lack; use .get).\nERROR test_merge.MergeQueue.test_checkout_ff_when_root_has_target_checked_out, test_checkout_stale_when_root_has_conflicting_local_change: RuntimeError git worktree add <task worktree>/wt/T-xxxx (spawn.ROOT or the harness ROOT points at the checked-out worktree instead of the sandbox, again leaked module state); plus one RuntimeError boom traceback from another test's thread.\nRequired: (1) tests/test_acceptance.py and the new tests in tests/test_daemon.py use the repository's per-test sandbox harness (tests/_harness.py, the same base class or fixtures the neighbouring tests use) and never patch bus, spawn, daemon or STATE globals without restoring them in tearDown or a context manager; no test may create tasks outside the sandbox; the acceptance module must not cache ROOT or STATE at import time. (2) daemon.gate's missing-tests branch reads task fields with .get and tolerates tasks without a worktree (skip the check, let the normal path run). (3) Run the suite twice in a row from the worktree root (.claude/hooks/tests-green.sh . both times) and confirm exit 0 both times, then run only tests.test_bus and tests.test_merge after tests.test_acceptance and tests.test_daemon in one unittest invocation to prove ordering independence. Keep the five T-0359 acceptance tests green. git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0359"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows d362503 below your commit",
+    "tests/test_acceptance.py::test_named_tests_parses_full_and_shorthand_ids, ::test_missing_tests_detects_absent_definitions and tests/test_daemon.py::test_gate_red_when_acceptance_test_missing, ::test_gate_runs_suite_when_named_tests_exist, ::test_auto_fix_round_fires_on_missing_test_ids still pass",
+    "python -m unittest tests.test_acceptance tests.test_daemon tests.test_bus tests.test_merge tests.test_cli in that order exits 0",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/acceptance.py",
+    "orchestrator/daemon.py",
+    "tests/test_acceptance.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "fix_round_for": "T-0359",
+    "task_class": "reliability"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0373",
+  "codex_thread": "01a0be7b-e16c-79b3-8672-ad03e5148784",
+  "result": {
+    "summary": "Summary: isolated acceptance/daemon tests from shared state and made gate skip acceptance-file checks when no worktree is present.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_acceptance.py`, `tests/test_daemon.py`\n\nCommit: `abda0dc` (`d362503` is immediately below it)\n\nValidation: ordered unittest invocation passed (152 tests); two consecutive gate runs completed successfully.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:terra",
+    "thread": "01a0be7b-e16c-79b3-8672-ad03e5148784",
+    "usage": {
+      "input_tokens": 836323,
+      "cached_input_tokens": 775168,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6301,
+      "reasoning_output_tokens": 3028
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789902182.920623,
+      "pipeline": {
+        "dispatched_at": 1789902182.9201841
+      }
+    },
+    {
+      "ts": 1789902184.500013,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0373",
+      "claimed_at": 1789902184.4984078
+    },
+    {
+      "ts": 1789902184.5033731,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789902510.25555,
+      "codex_thread": "01a0be7b-e16c-79b3-8672-ad03e5148784"
+    },
+    {
+      "ts": 1789902510.258371,
+      "status": "done",
+      "result": {
+        "summary": "Summary: isolated acceptance/daemon tests from shared state and made gate skip acceptance-file checks when no worktree is present.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_acceptance.py`, `tests/test_daemon.py`\n\nCommit: `abda0dc` (`d362503` is immediately below it)\n\nValidation: ordered unittest invocation passed (152 tests); two consecutive gate runs completed successfully.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:terra",
+        "thread": "01a0be7b-e16c-79b3-8672-ad03e5148784",
+        "usage": {
+          "input_tokens": 836323,
+          "cached_input_tokens": 775168,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6301,
+          "reasoning_output_tokens": 3028
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789902779.0546439,
+      "pipeline": {
+        "dispatched_at": 1789902182.9201841,
+        "gated_at": 1789902779.0544481,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789902970.408999,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789902981.0841799,
+      "pipeline": {
+        "dispatched_at": 1789902182.9201841,
+        "gated_at": 1789902779.0544481,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789902981.084075
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0377 (request_changes)"
+    },
+    {
+      "ts": 1789903942.533556,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0380 68ff495",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789902182.9201841,
+    "gated_at": 1789902779.0544481,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789902981.084075
+  },
+  "claimed_at": 1789902184.4984078,
+  "rounds": 0,
+  "executor": "terra",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0380 68ff495"
+}

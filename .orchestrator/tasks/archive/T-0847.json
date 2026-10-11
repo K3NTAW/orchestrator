@@ -1,0 +1,204 @@
+{
+  "id": "T-0847",
+  "created_at": 1790104390.930536,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Active path 3: handoff-aware executor routing (start strong when expected route cost says so) within pool constraints",
+  "spec": "Today (T-0831) [handoff] mode \"active\" is treated as shadow: executor.start records a \"handoff\" decision with expected_route_cost per eligible executor but launches the baseline pick. Build the active branch. Facts: executor.start picks via pool.pick_executor + allocation (executor.py ~276-323); handoff_scorecard.expected_route_cost(task_class, executor, root, cfg) returns a number or {\"insufficient\": True}; promotion CRITERIA min_samples 20.\nDo:\n1. Active: after the baseline pick, when every eligible executor has sufficient samples for the task's class and the lowest expected_route_cost executor differs from the baseline by more than [handoff] min_gain (new key, default 0.15 = 15% cheaper expected cost-to-accept), launch that executor instead; record the decision row with selected = the chosen executor and reason \"expected_route_cost\" plus the gain; otherwise keep the baseline with reason \"insufficient_evidence\" or \"gain_below_threshold\". Hard pool constraints (eligibility, cooldowns, complexity ceilings such as Astra for \u22659, budgets) stay authoritative: the router only chooses among pool.eligible_executors.\n2. Cap: at most [handoff] max_active_share (default 0.5) of the day's execute launches may deviate from the baseline, so the baseline keeps producing comparison data; count per day in pool_state or the decision log.\n3. Outcome feedback: when a task started under an active handoff decision reaches merged or failed, decision_log.outcome(task, \"handoff\", ...) records rounds, accepted tokens and usd; handoff_scorecard.by_start already aggregates by first executor, add a column \"active_share\".\nTests: tests/test_executor.py::test_active_handoff_switches_executor_when_gain_exceeds_threshold, ::test_active_handoff_keeps_baseline_without_evidence, ::test_active_share_cap_enforced; tests/test_handoff_scorecard.py::test_active_outcome_rows_feed_by_start; docs/context-economy/08-handoffs.md Active section with the revert path ([handoff] mode shadow).\nDo not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_executor.py::test_active_handoff_switches_executor_when_gain_exceeds_threshold passes",
+    "tests/test_executor.py::test_active_handoff_keeps_baseline_without_evidence passes",
+    "tests/test_executor.py::test_active_share_cap_enforced passes",
+    "tests/test_handoff_scorecard.py::test_active_outcome_rows_feed_by_start passes",
+    "docs/context-economy/08-handoffs.md has an Active section; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/handoff_scorecard.py",
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_executor.py",
+    "tests/test_handoff_scorecard.py",
+    "docs/context-economy/08-handoffs.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded 2026-09-22 23:20 by the v2 spec T-0858 (spec review T-0851 request_changes: task-stamp outcomes instead of a daemon hook, cap_reached and allocation_active reasons, day counter under bus.locked(), handoff yields to active allocation). A fix round with depends_on=[T-0847] would never dispatch: bus.ready needs a merged dependency and T-0847 never executed.",
+    "reason": "superseded by T-0858 (v2 after spec review T-0851)",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1790104434.8047612,
+      "pipeline": {
+        "first_ready_at": 1790104434.8045938
+      }
+    },
+    {
+      "ts": 1790104434.914644,
+      "pipeline": {
+        "first_ready_at": 1790104434.8045938,
+        "spec_review_at": 1790104434.914536,
+        "spec_review_at_lease": 1790105334.914536
+      }
+    },
+    {
+      "ts": 1790104434.921515,
+      "pipeline": {
+        "first_ready_at": 1790104434.8045938,
+        "spec_review_at": 1790104434.914536,
+        "spec_review_at_lease": 1790105334.914536,
+        "spec_review_at_done": 1790104434.921269
+      }
+    },
+    {
+      "ts": 1790104647.131741,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec item 3 requires firing decision_log.outcome('handoff', ...) 'when a task started under an active handoff decision reaches merged or failed', but daemon.py has no single insertion point for that: failed status is posted from at least 8 separate bus.post_result(task_id, ..., \"failed\") call sites (lines ~548,559,568,616,617,625,629,632) plus more in executor.py, and merged_into is set in a different set of places (~1385-1391, 1528). The spec names the file but not which of these transitions to hook, so the executor must either duplicate the outcome call at every site (error-prone, likely to miss one and silently under-report) or invent a new centralized hook outside the stated scope.",
+          "severity": "high",
+          "line": 548
+        },
+        {
+          "path": "orchestrator/handoff_scorecard.py",
+          "issue": "by_start() currently aggregates purely from bus tasks/runs (_tasks()/_runs()) and never reads the decision log. Adding an 'active_share' column requires knowing, per lineage, whether its first dispatch was an active handoff switch (selected != baseline) \u2014 data that only exists in decision_log 'handoff' rows, which this module doesn't currently read or import. The spec doesn't say whether to (a) scan schedlog decisions and join by task id, or (b) stamp a field on the bus task at dispatch time and read it the way _tasks() already does. Left unspecified, the join is likely to be built inconsistently with the existing task-file-based aggregation and the acceptance test test_active_outcome_rows_feed_by_start could pass against an incomplete/mismatched join.",
+          "severity": "high",
+          "line": 140
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The three allowed decision reasons ('expected_route_cost' to switch, 'insufficient_evidence' and 'gain_below_threshold' to keep baseline) don't cover the max_active_share cap case: an executor can have sufficient samples and gain above min_gain, yet still be kept on baseline solely because the daily active-share cap is full. Without a distinct reason (e.g. 'cap_reached'), test_active_share_cap_enforced can't distinguish 'capped' from 'gain too low' from the decision row, and by_start/active_share analytics would conflate the two.",
+          "severity": "med",
+          "line": 330
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The spec's day-scoped max_active_share counter ('count per day in pool_state or the decision log') has no locking requirement, but the codebase's only existing atomic daily-state pattern is Pool's reservation-file mutate() closure used by reserve() (pool.py ~301); Pool itself has no lock around save(), and decision_log._append just appends a JSONL line with no read-check-write guard. daemon.py can dispatch multiple ready tasks concurrently, so a naive 'count today's active decisions then compare to cap' implementation can race and overshoot max_active_share silently (two concurrent start() calls both read the same under-cap count before either records their decision).",
+          "severity": "med",
+          "line": 337
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The handoff block runs after the existing allocation-active override (line 315-316: ex = pool.executors[choice['executor']]), so 'baseline' as read into the handoff decision may already be allocation's active pick, not pool.pick_executor's raw output. Spec point 1 says 'hard pool constraints stay authoritative' but doesn't address ordering/precedence between two evidence-based active layers (allocation and handoff) if both are active simultaneously \u2014 a handoff switch would silently discard an already-active allocation decision without recording that interaction.",
+          "severity": "low",
+          "line": 315
+        }
+      ]
+    },
+    {
+      "ts": 1790104647.514893,
+      "pipeline": {
+        "first_ready_at": 1790104434.8045938,
+        "spec_review_at": 1790104434.914536,
+        "spec_review_at_lease": 1790105334.914536,
+        "spec_review_at_done": 1790104434.921269,
+        "spec_review_held_at": 1790104647.514833
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790104649.80247,
+      "pipeline": {
+        "first_ready_at": 1790104434.8045938,
+        "spec_review_at": 1790104434.914536,
+        "spec_review_at_lease": 1790105334.914536,
+        "spec_review_at_done": 1790104434.921269,
+        "spec_review_held_at": 1790104647.514833,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790104650.267624,
+      "pipeline": {
+        "first_ready_at": 1790104434.8045938,
+        "spec_review_at": 1790104434.914536,
+        "spec_review_at_lease": 1790105334.914536,
+        "spec_review_at_done": 1790104434.921269,
+        "spec_review_held_at": 1790104647.514833,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790104647.514893": true
+        }
+      }
+    },
+    {
+      "ts": 1790104719.694897,
+      "status": "failed",
+      "reason": "superseded 23:05 by T-0858 (spec v2 after T-0851: task stamps instead of daemon hooks, cap_reached reason, locked day counter, allocation precedence)"
+    },
+    {
+      "ts": 1790104807.0006452,
+      "status": "failed",
+      "result": {
+        "summary": "superseded 2026-09-22 23:20 by the v2 spec T-0858 (spec review T-0851 request_changes: task-stamp outcomes instead of a daemon hook, cap_reached and allocation_active reasons, day counter under bus.locked(), handoff yields to active allocation). A fix round with depends_on=[T-0847] would never dispatch: bus.ready needs a merged dependency and T-0847 never executed.",
+        "reason": "superseded by T-0858 (v2 after spec review T-0851)",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790104434.8045938,
+    "spec_review_at": 1790104434.914536,
+    "spec_review_at_lease": 1790105334.914536,
+    "spec_review_at_done": 1790104434.921269,
+    "spec_review_held_at": 1790104647.514833,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790104647.514893": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec item 3 requires firing decision_log.outcome('handoff', ...) 'when a task started under an active handoff decision reaches merged or failed', but daemon.py has no single insertion point for that: failed status is posted from at least 8 separate bus.post_result(task_id, ..., \"failed\") call sites (lines ~548,559,568,616,617,625,629,632) plus more in executor.py, and merged_into is set in a different set of places (~1385-1391, 1528). The spec names the file but not which of these transitions to hook, so the executor must either duplicate the outcome call at every site (error-prone, likely to miss one and silently under-report) or invent a new centralized hook outside the stated scope.",
+      "severity": "high",
+      "line": 548
+    },
+    {
+      "path": "orchestrator/handoff_scorecard.py",
+      "issue": "by_start() currently aggregates purely from bus tasks/runs (_tasks()/_runs()) and never reads the decision log. Adding an 'active_share' column requires knowing, per lineage, whether its first dispatch was an active handoff switch (selected != baseline) \u2014 data that only exists in decision_log 'handoff' rows, which this module doesn't currently read or import. The spec doesn't say whether to (a) scan schedlog decisions and join by task id, or (b) stamp a field on the bus task at dispatch time and read it the way _tasks() already does. Left unspecified, the join is likely to be built inconsistently with the existing task-file-based aggregation and the acceptance test test_active_outcome_rows_feed_by_start could pass against an incomplete/mismatched join.",
+      "severity": "high",
+      "line": 140
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The three allowed decision reasons ('expected_route_cost' to switch, 'insufficient_evidence' and 'gain_below_threshold' to keep baseline) don't cover the max_active_share cap case: an executor can have sufficient samples and gain above min_gain, yet still be kept on baseline solely because the daily active-share cap is full. Without a distinct reason (e.g. 'cap_reached'), test_active_share_cap_enforced can't distinguish 'capped' from 'gain too low' from the decision row, and by_start/active_share analytics would conflate the two.",
+      "severity": "med",
+      "line": 330
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The spec's day-scoped max_active_share counter ('count per day in pool_state or the decision log') has no locking requirement, but the codebase's only existing atomic daily-state pattern is Pool's reservation-file mutate() closure used by reserve() (pool.py ~301); Pool itself has no lock around save(), and decision_log._append just appends a JSONL line with no read-check-write guard. daemon.py can dispatch multiple ready tasks concurrently, so a naive 'count today's active decisions then compare to cap' implementation can race and overshoot max_active_share silently (two concurrent start() calls both read the same under-cap count before either records their decision).",
+      "severity": "med",
+      "line": 337
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The handoff block runs after the existing allocation-active override (line 315-316: ex = pool.executors[choice['executor']]), so 'baseline' as read into the handoff decision may already be allocation's active pick, not pool.pick_executor's raw output. Spec point 1 says 'hard pool constraints stay authoritative' but doesn't address ordering/precedence between two evidence-based active layers (allocation and handoff) if both are active simultaneously \u2014 a handoff switch would silently discard an already-active allocation decision without recording that interaction.",
+      "severity": "low",
+      "line": 315
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 23:05 by T-0858 (spec v2 after T-0851: task stamps instead of daemon hooks, cap_reached reason, locked day counter, allocation precedence)"
+}

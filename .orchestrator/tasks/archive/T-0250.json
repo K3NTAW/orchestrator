@@ -1,0 +1,116 @@
+{
+  "id": "T-0250",
+  "parent": "T-0240",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "F6: a merge that comes back tests_red holds the task for the Planner instead of leaving it failed with merged_at stamped",
+  "spec": "Gotcha 2026-09-19 18:22 (T-0241): orchestrator/daemon.py merge_reviewed (about line 640) stamps pipeline.merged_at before calling merge.merge so a conflict is attempted once; when merge.merge returns status tests_red (worktree gate green, review approved, suite red only in the rebased merge run, here a flaky thread test) merge.merge sets the task failed reason tests_red, report_merge only notifies, merged_at stays stamped, and nothing retries or asks the Planner. The Planner had to notice by hand.\nChange daemon.py:\n1. In merge_reviewed, after report_merge: when the returned status is not \"merged\", set the task status held with hold_reason \"merge <status>\" (for example \"merge tests_red\", \"merge conflict\") and keep reason/resume_hint from merge.merge; clear pipeline.merged_at only for tests_red so a later fix round or Planner re-approval can retry the merge exactly once more; conflicts keep merged_at (today's once-only rule). Use stamp()/bus.update under the bus lock as the surrounding code does.\n2. held tasks with hold_reason starting \"merge \" must appear as decision points for planner_runs.decision_points() the same way review holds do (check planner_runs.py; if held tasks are already picked up generically, add a test proving it and change nothing there).\n3. notify() text unchanged apart from the hold.\nTests in tests/test_daemon.py: test_merge_tests_red_holds_task (merge.merge monkeypatched to return {\"status\": \"tests_red\", ...}: task ends held, hold_reason \"merge tests_red\", merged_at cleared), test_merge_conflict_holds_and_keeps_merged_at, test_merge_ok_unchanged. Keep every existing test green; the suite now runs spawn_async synchronously in tests (T-0245).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_merge_tests_red_holds_task, ::test_merge_conflict_holds_and_keeps_merged_at, ::test_merge_ok_unchanged pass",
+    "a held task with hold_reason starting 'merge ' is yielded by planner_runs.decision_points() (existing behaviour proven by a test, or added)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    "tests/test_daemon.py",
+    "tests/test_planner_runs.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0250",
+  "codex_thread": "01a0ba94-c8c4-7f43-b734-257f1b030f5b",
+  "result": {
+    "summary": "Codex (sol) committed 0b39a89 in wt/T-0250: daemon.merge_reviewed holds a task whose merge.merge returns a non-merged status with hold_reason 'merge <status>' (reason and resume_hint kept); tests_red clears pipeline.merged_at so one more merge attempt can follow a fix round, conflict keeps it (once-only rule). planner_runs.decision_points() already yields held tasks generically: proven by a new test in tests/test_planner_runs.py, planner_runs.py unchanged. Tests test_merge_tests_red_holds_task, test_merge_conflict_holds_and_keeps_merged_at, test_merge_ok_unchanged added. tests-green.sh wt/T-0250 exited 0 (Planner, 19:06). Posted by hand.",
+    "executed_by": "codex:sol",
+    "sha": "0b39a89",
+    "confidence": 0.9,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789836706.793996,
+      "pipeline": {
+        "dispatched_at": 1789836706.793887
+      }
+    },
+    {
+      "ts": 1789836707.996128,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0250",
+      "claimed_at": 1789836707.9958541
+    },
+    {
+      "ts": 1789836707.999768,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789836851.242978,
+      "codex_thread": "01a0ba94-c8c4-7f43-b734-257f1b030f5b"
+    },
+    {
+      "ts": 1789837141.096619,
+      "status": "done",
+      "result": {
+        "summary": "Codex (sol) committed 0b39a89 in wt/T-0250: daemon.merge_reviewed holds a task whose merge.merge returns a non-merged status with hold_reason 'merge <status>' (reason and resume_hint kept); tests_red clears pipeline.merged_at so one more merge attempt can follow a fix round, conflict keeps it (once-only rule). planner_runs.decision_points() already yields held tasks generically: proven by a new test in tests/test_planner_runs.py, planner_runs.py unchanged. Tests test_merge_tests_red_holds_task, test_merge_conflict_holds_and_keeps_merged_at, test_merge_ok_unchanged added. tests-green.sh wt/T-0250 exited 0 (Planner, 19:06). Posted by hand.",
+        "executed_by": "codex:sol",
+        "sha": "0b39a89",
+        "confidence": 0.9,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789837217.345323,
+      "pipeline": {
+        "dispatched_at": 1789836706.793887,
+        "gated_at": 1789837217.345123,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789837363.7765172,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789837369.758494,
+      "pipeline": {
+        "dispatched_at": 1789836706.793887,
+        "gated_at": 1789837217.345123,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789837369.758403
+      }
+    },
+    {
+      "ts": 1789837428.9099991,
+      "status": "done",
+      "merged_into": "goal/T-0240",
+      "sha": "1d5217e41b8915c4da95006b5a8e139fdb868a00"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789836706.793887,
+    "gated_at": 1789837217.345123,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789837369.758403
+  },
+  "claimed_at": 1789836707.9958541,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0240",
+  "sha": "1d5217e41b8915c4da95006b5a8e139fdb868a00"
+}

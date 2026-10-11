@@ -1,0 +1,1054 @@
+{
+  "id": "T-1656",
+  "created_at": 1791231210.141526,
+  "parent": "T-1654",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: scripts/with-tokens.sh: run a command with allowlisted f-tok tokens in its env, values never printed",
+  "spec": "New script scripts/with-tokens.sh in the orchestrator repo: run one command with selected stored tokens in its\nenvironment, never printing a value. Model it on luna-inbox's scripts/with-secrets.sh (read it:\n/Users/k3ntaw/code/luna-inbox/scripts/with-secrets.sh): it sources \"${HOME}/.config/f/f.sh\" and reads\n`f tok get <id> --reveal` into a variable with printf -v, never echoing.\n\nUsage:\n  scripts/with-tokens.sh ENV_NAME=token-id [ENV_NAME=token-id ...] -- command [args...]\n  scripts/with-tokens.sh --list        # prints the allowlisted token ids, one per line, nothing else\n\nRules:\n1. Allowlist: token ids allowed are the non-blank, non-# lines of ${WITH_TOKENS_ALLOWLIST:-<repo root>/.orchestrator/token-allowlist.txt}.\n   Missing or empty allowlist -> every request refused (exit 3, \"with-tokens: no allowlist\"). A token id not on the\n   list -> exit 3 \"with-tokens: <id> is not allowlisted\". The human owns this file; the script never writes it.\n2. ENV_NAME must match ^[A-Z][A-Z0-9_]*$ and must not be PATH, HOME, SHELL, IFS, BASH_ENV, ENV, LD_PRELOAD,\n   DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, PROMPT_COMMAND (exit 2 otherwise). token-id must match ^[A-Za-z0-9._-]+$.\n3. `--` and a command are required (exit 2 with usage otherwise).\n4. Source \"${WITH_TOKENS_F_SH:-$HOME/.config/f/f.sh}\" (the override exists for tests only). For each pair read the value\n   with `f tok get <id> --reveal 2>/dev/null` into a variable; empty or failed -> exit 1 \"with-tokens: missing or\n   empty token: <id>\" (the id, never the value). Export each value under its ENV_NAME and `exec` the command.\n5. Never write a value to stdout, stderr, a file or a log; no set -x; no `env`/`printenv` in the script.\n   The command's own output is the caller's responsibility (document: never run echo/printenv/env through it).\n6. Header comment: purpose, usage, the allowlist rule, and \"values reach only the child process\".\n\nTests: new tests/test_with_tokens.py (unittest, subprocess, no real secrets): a temp fake f.sh defining\n`f() { [ \"$1 $2\" = \"tok get\" ] && case \"$3\" in a-key) printf secret-a;; b-key) printf secret-b;; *) return 1;; esac; }`\npassed via WITH_TOKENS_F_SH, and a temp allowlist via WITH_TOKENS_ALLOWLIST. Named tests:\n- test_runs_command_with_token_in_env: A=a-key -- python3 -c \"import os;print(len(os.environ['A']))\" prints 8; the\n  value itself never appears in stdout or stderr of the wrapper (assert 'secret-a' not in stderr).\n- test_two_tokens\n- test_not_allowlisted_refused (exit 3, value of no token in output)\n- test_missing_allowlist_refuses_all\n- test_missing_token_exits_1_and_names_id_only\n- test_bad_env_name_refused (lowercase, PATH, LD_PRELOAD)\n- test_requires_double_dash_and_command\n- test_list_prints_allowlist_only\nRun: uv run python -m pytest -q tests/test_with_tokens.py (or unittest). Commit on the task branch.\nDo not touch .claude/hooks, .orchestrator/protected-paths.txt or the allowlist file itself (the human creates it).\n",
+  "inputs": [
+    "T-1655"
+  ],
+  "acceptance": [
+    "tests/test_with_tokens.py: the eight named tests exist and pass",
+    "No token value is ever written to stdout, stderr or a file by the script",
+    "Without .orchestrator/token-allowlist.txt every request is refused",
+    "No change under .claude/hooks or to .orchestrator/protected-paths.txt"
+  ],
+  "scope": [
+    "scripts/with-tokens.sh",
+    "tests/test_with_tokens.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1656",
+  "codex_thread": null,
+  "result": {
+    "summary": "The script meets the acceptance criteria. All eight named tests exist as unittest methods, and the file starts with `import _harness`. A missing or empty allowlist exits 3. The script prints no token value and does not use `set -x`, `env` or `printenv`. Only the two scoped files changed, so nothing under .claude/hooks or protected-paths.txt was touched. I read the code and did not run the tests. The gate on the diff reported green.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "scripts/with-tokens.sh",
+        "line": 102,
+        "issue": "Sourcing f.sh runs under `set -euo pipefail`. If the real f.sh references unset variables or returns non-zero, the wrapper aborts before the token lookup with no 'with-tokens:' message. A missing f.sh also fails with a bare bash error. Consider an explicit existence check with a clear error, or `set +u` around the source.",
+        "severity": "low"
+      },
+      {
+        "path": "scripts/with-tokens.sh",
+        "line": 117,
+        "issue": "The child inherits WITH_TOKENS_F_SH and WITH_TOKENS_ALLOWLIST from the caller's environment. Neither is a secret, so this is harmless. Unsetting them before exec would keep the child environment clean.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_with_tokens.py",
+        "line": 84,
+        "issue": "The invalid token-id case (`A=bad/id`) only asserts exit code 2 and does not check stdout or stderr for leaks. This is minor, since the id is not a secret.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "1984e75a2cb9",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791231210.142438,
+      "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c"
+    },
+    {
+      "ts": 1791231215.530066,
+      "packet_meta": {
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 11973,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791231215.554406,
+      "packet_meta": {
+        "chars": 11123,
+        "est_tokens": 2780,
+        "presented_tokens": 2780,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "bd94a5c97574ba5b4c28a72b5b0f03b86d79c88771dae719e88c48a3f6852238"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 2963,
+            "est_tokens": 740,
+            "sha256": "a811f9c100c20ed5b7cf71deb2165d0c147d4fe0c25c872aadb2008c61f7fa3a"
+          },
+          "acceptance": {
+            "chars": 296,
+            "est_tokens": 74,
+            "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+          },
+          "scope": {
+            "chars": 62,
+            "est_tokens": 15,
+            "sha256": "82475c2443d37ab34e4037f48710fbb2927a4bc0834b8ae1df1bd282cab16866"
+          },
+          "diff": {
+            "chars": 204,
+            "est_tokens": 51,
+            "sha256": "66a198cdba814e3ad745f76e70286c54107a2488200e6464f687e069d062cbd7"
+          },
+          "changed tests": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "a39810d592b7567cc2f951fb22eb5145a2610c0a0c453eb1e87936d4267b2800"
+          },
+          "gate": {
+            "chars": 108,
+            "est_tokens": 27,
+            "sha256": "a8b0cd7c06ee344557ae8068c1a755a3b6b2f8d376515b9e56a2775690e163dd"
+          },
+          "security": {
+            "chars": 137,
+            "est_tokens": 34,
+            "sha256": "209947cf2c078d9c73079bdecc11c70f82b121a772cba85c1a184ae8e37a4100"
+          },
+          "evidence": {
+            "chars": 6373,
+            "est_tokens": 1593,
+            "sha256": "d0eb00bf1c6bec6de736697e6c88909d4ac86fb044cc5d009b3a8b70ac4018f4"
+          }
+        },
+        "hash": "1984e75a2cb9",
+        "version": "1984e75a2cb9",
+        "candidate_known": true,
+        "base": "37e8f8806739",
+        "sources": "task@T-1655 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 2169,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 3705,
+        "routed_reduction_ratio": 0.7374601910828026,
+        "routed_hidden": 6,
+        "routed_ambiguous": 5,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59819cb638c5",
+          "812a65f4ae81",
+          "544f20f32144",
+          "bd62f8f3f351",
+          "e9c8377e90d6",
+          "bb982398b83d",
+          "3f39b0b7f524",
+          "59c134951a6a",
+          "0ae7bac2c35a",
+          "17323921f5fb",
+          "32c46c4b4d7a",
+          "33385380d816",
+          "3dd202ba0afc",
+          "486c48fb58bf",
+          "48d6d148d9db",
+          "51eb61db54bc",
+          "5439aa96c5bd",
+          "6445c57779e7",
+          "6a7b1fba7956",
+          "6d9fe178a44e",
+          "73c539987ff3",
+          "781ed98a0d00",
+          "8357629877aa",
+          "8da265fd289f",
+          "8e45446d7b77",
+          "90335d8aa2d7",
+          "942be77fcbe7",
+          "96143cbd81ae",
+          "969720431875",
+          "9ea39468a2ec",
+          "a49015688224",
+          "b97d90d53b77",
+          "cbf4327c7b01",
+          "d3f5ca4dc695",
+          "d636a0d6426d",
+          "deaf7fca4b22",
+          "e3214c6f07d6",
+          "e50f28598678",
+          "f27b9db40df6",
+          "f32738b12619",
+          "f5777d6fd658",
+          "fa18290813a3"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 11973,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1791231217.040538,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1656",
+      "claimed_at": 1791231217.0402298
+    },
+    {
+      "ts": 1791231217.0428312,
+      "account": "A"
+    },
+    {
+      "ts": 1791231222.763828,
+      "pid": 1309,
+      "account": "A"
+    },
+    {
+      "ts": 1791231236.794409,
+      "packet_meta": {
+        "chars": 11123,
+        "est_tokens": 2780,
+        "presented_tokens": 2780,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "bd94a5c97574ba5b4c28a72b5b0f03b86d79c88771dae719e88c48a3f6852238"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 2963,
+            "est_tokens": 740,
+            "sha256": "a811f9c100c20ed5b7cf71deb2165d0c147d4fe0c25c872aadb2008c61f7fa3a"
+          },
+          "acceptance": {
+            "chars": 296,
+            "est_tokens": 74,
+            "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+          },
+          "scope": {
+            "chars": 62,
+            "est_tokens": 15,
+            "sha256": "82475c2443d37ab34e4037f48710fbb2927a4bc0834b8ae1df1bd282cab16866"
+          },
+          "diff": {
+            "chars": 204,
+            "est_tokens": 51,
+            "sha256": "66a198cdba814e3ad745f76e70286c54107a2488200e6464f687e069d062cbd7"
+          },
+          "changed tests": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "a39810d592b7567cc2f951fb22eb5145a2610c0a0c453eb1e87936d4267b2800"
+          },
+          "gate": {
+            "chars": 108,
+            "est_tokens": 27,
+            "sha256": "a8b0cd7c06ee344557ae8068c1a755a3b6b2f8d376515b9e56a2775690e163dd"
+          },
+          "security": {
+            "chars": 137,
+            "est_tokens": 34,
+            "sha256": "209947cf2c078d9c73079bdecc11c70f82b121a772cba85c1a184ae8e37a4100"
+          },
+          "evidence": {
+            "chars": 6373,
+            "est_tokens": 1593,
+            "sha256": "d0eb00bf1c6bec6de736697e6c88909d4ac86fb044cc5d009b3a8b70ac4018f4"
+          }
+        },
+        "hash": "1984e75a2cb9",
+        "version": "1984e75a2cb9",
+        "candidate_known": true,
+        "base": "37e8f8806739",
+        "sources": "task@T-1655 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 2169,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 3705,
+        "routed_reduction_ratio": 0.7374601910828026,
+        "routed_hidden": 6,
+        "routed_ambiguous": 5,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59819cb638c5",
+          "812a65f4ae81",
+          "544f20f32144",
+          "bd62f8f3f351",
+          "e9c8377e90d6",
+          "bb982398b83d",
+          "3f39b0b7f524",
+          "59c134951a6a",
+          "0ae7bac2c35a",
+          "17323921f5fb",
+          "32c46c4b4d7a",
+          "33385380d816",
+          "3dd202ba0afc",
+          "486c48fb58bf",
+          "48d6d148d9db",
+          "51eb61db54bc",
+          "5439aa96c5bd",
+          "6445c57779e7",
+          "6a7b1fba7956",
+          "6d9fe178a44e",
+          "73c539987ff3",
+          "781ed98a0d00",
+          "8357629877aa",
+          "8da265fd289f",
+          "8e45446d7b77",
+          "90335d8aa2d7",
+          "942be77fcbe7",
+          "96143cbd81ae",
+          "969720431875",
+          "9ea39468a2ec",
+          "a49015688224",
+          "b97d90d53b77",
+          "cbf4327c7b01",
+          "d3f5ca4dc695",
+          "d636a0d6426d",
+          "deaf7fca4b22",
+          "e3214c6f07d6",
+          "e50f28598678",
+          "f27b9db40df6",
+          "f32738b12619",
+          "f5777d6fd658",
+          "fa18290813a3"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 11973,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active",
+        "session_id": "cd4452b0-eca2-40ff-892f-c2d783b2a7b8"
+      }
+    },
+    {
+      "ts": 1791231236.8211,
+      "packet_meta": {
+        "chars": 11123,
+        "est_tokens": 2780,
+        "presented_tokens": 2780,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "bd94a5c97574ba5b4c28a72b5b0f03b86d79c88771dae719e88c48a3f6852238"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 2963,
+            "est_tokens": 740,
+            "sha256": "a811f9c100c20ed5b7cf71deb2165d0c147d4fe0c25c872aadb2008c61f7fa3a"
+          },
+          "acceptance": {
+            "chars": 296,
+            "est_tokens": 74,
+            "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+          },
+          "scope": {
+            "chars": 62,
+            "est_tokens": 15,
+            "sha256": "82475c2443d37ab34e4037f48710fbb2927a4bc0834b8ae1df1bd282cab16866"
+          },
+          "diff": {
+            "chars": 204,
+            "est_tokens": 51,
+            "sha256": "66a198cdba814e3ad745f76e70286c54107a2488200e6464f687e069d062cbd7"
+          },
+          "changed tests": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "a39810d592b7567cc2f951fb22eb5145a2610c0a0c453eb1e87936d4267b2800"
+          },
+          "gate": {
+            "chars": 108,
+            "est_tokens": 27,
+            "sha256": "a8b0cd7c06ee344557ae8068c1a755a3b6b2f8d376515b9e56a2775690e163dd"
+          },
+          "security": {
+            "chars": 137,
+            "est_tokens": 34,
+            "sha256": "209947cf2c078d9c73079bdecc11c70f82b121a772cba85c1a184ae8e37a4100"
+          },
+          "evidence": {
+            "chars": 6373,
+            "est_tokens": 1593,
+            "sha256": "d0eb00bf1c6bec6de736697e6c88909d4ac86fb044cc5d009b3a8b70ac4018f4"
+          }
+        },
+        "hash": "1984e75a2cb9",
+        "version": "1984e75a2cb9",
+        "candidate_known": true,
+        "base": "37e8f8806739",
+        "sources": "task@T-1655 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 2169,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 3705,
+        "routed_reduction_ratio": 0.7374601910828026,
+        "routed_hidden": 6,
+        "routed_ambiguous": 5,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59819cb638c5",
+          "812a65f4ae81",
+          "544f20f32144",
+          "bd62f8f3f351",
+          "e9c8377e90d6",
+          "bb982398b83d",
+          "3f39b0b7f524",
+          "59c134951a6a",
+          "0ae7bac2c35a",
+          "17323921f5fb",
+          "32c46c4b4d7a",
+          "33385380d816",
+          "3dd202ba0afc",
+          "486c48fb58bf",
+          "48d6d148d9db",
+          "51eb61db54bc",
+          "5439aa96c5bd",
+          "6445c57779e7",
+          "6a7b1fba7956",
+          "6d9fe178a44e",
+          "73c539987ff3",
+          "781ed98a0d00",
+          "8357629877aa",
+          "8da265fd289f",
+          "8e45446d7b77",
+          "90335d8aa2d7",
+          "942be77fcbe7",
+          "96143cbd81ae",
+          "969720431875",
+          "9ea39468a2ec",
+          "a49015688224",
+          "b97d90d53b77",
+          "cbf4327c7b01",
+          "d3f5ca4dc695",
+          "d636a0d6426d",
+          "deaf7fca4b22",
+          "e3214c6f07d6",
+          "e50f28598678",
+          "f27b9db40df6",
+          "f32738b12619",
+          "f5777d6fd658",
+          "fa18290813a3"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 11973,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active",
+        "session_id": "cd4452b0-eca2-40ff-892f-c2d783b2a7b8",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791231237.684172,
+      "status": "done",
+      "result": {
+        "summary": "The script meets the acceptance criteria. All eight named tests exist as unittest methods, and the file starts with `import _harness`. A missing or empty allowlist exits 3. The script prints no token value and does not use `set -x`, `env` or `printenv`. Only the two scoped files changed, so nothing under .claude/hooks or protected-paths.txt was touched. I read the code and did not run the tests. The gate on the diff reported green.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "scripts/with-tokens.sh",
+            "line": 102,
+            "issue": "Sourcing f.sh runs under `set -euo pipefail`. If the real f.sh references unset variables or returns non-zero, the wrapper aborts before the token lookup with no 'with-tokens:' message. A missing f.sh also fails with a bare bash error. Consider an explicit existence check with a clear error, or `set +u` around the source.",
+            "severity": "low"
+          },
+          {
+            "path": "scripts/with-tokens.sh",
+            "line": 117,
+            "issue": "The child inherits WITH_TOKENS_F_SH and WITH_TOKENS_ALLOWLIST from the caller's environment. Neither is a secret, so this is harmless. Unsetting them before exec would keep the child environment clean.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_with_tokens.py",
+            "line": 84,
+            "issue": "The invalid token-id case (`A=bad/id`) only asserts exit code 2 and does not check stdout or stderr for leaks. This is minor, since the id is not a secret.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "1984e75a2cb9",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791231237.6857338,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791231237.916576,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 3,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 3,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+        "packet_version": "1984e75a2cb9",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 3,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 3,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+      "packet_version": "1984e75a2cb9",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+  "packet_meta": {
+    "chars": 11123,
+    "est_tokens": 2780,
+    "presented_tokens": 2780,
+    "sections": {
+      "_preamble": {
+        "chars": 128,
+        "est_tokens": 32,
+        "sha256": "bd94a5c97574ba5b4c28a72b5b0f03b86d79c88771dae719e88c48a3f6852238"
+      },
+      "skills": {
+        "chars": 56,
+        "est_tokens": 14,
+        "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+      },
+      "Trigger": {
+        "chars": 44,
+        "est_tokens": 11,
+        "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+      },
+      "Objective": {
+        "chars": 100,
+        "est_tokens": 25,
+        "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+      },
+      "Procedure": {
+        "chars": 142,
+        "est_tokens": 35,
+        "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+      },
+      "Tools": {
+        "chars": 33,
+        "est_tokens": 8,
+        "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+      },
+      "Evidence requirements": {
+        "chars": 83,
+        "est_tokens": 20,
+        "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+      },
+      "Output contract": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+      },
+      "Stop conditions": {
+        "chars": 77,
+        "est_tokens": 19,
+        "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+      },
+      "Failure/recovery": {
+        "chars": 71,
+        "est_tokens": 17,
+        "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+      },
+      "spec": {
+        "chars": 2963,
+        "est_tokens": 740,
+        "sha256": "a811f9c100c20ed5b7cf71deb2165d0c147d4fe0c25c872aadb2008c61f7fa3a"
+      },
+      "acceptance": {
+        "chars": 296,
+        "est_tokens": 74,
+        "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+      },
+      "scope": {
+        "chars": 62,
+        "est_tokens": 15,
+        "sha256": "82475c2443d37ab34e4037f48710fbb2927a4bc0834b8ae1df1bd282cab16866"
+      },
+      "diff": {
+        "chars": 204,
+        "est_tokens": 51,
+        "sha256": "66a198cdba814e3ad745f76e70286c54107a2488200e6464f687e069d062cbd7"
+      },
+      "changed tests": {
+        "chars": 82,
+        "est_tokens": 20,
+        "sha256": "a39810d592b7567cc2f951fb22eb5145a2610c0a0c453eb1e87936d4267b2800"
+      },
+      "gate": {
+        "chars": 108,
+        "est_tokens": 27,
+        "sha256": "a8b0cd7c06ee344557ae8068c1a755a3b6b2f8d376515b9e56a2775690e163dd"
+      },
+      "security": {
+        "chars": 137,
+        "est_tokens": 34,
+        "sha256": "209947cf2c078d9c73079bdecc11c70f82b121a772cba85c1a184ae8e37a4100"
+      },
+      "evidence": {
+        "chars": 6373,
+        "est_tokens": 1593,
+        "sha256": "d0eb00bf1c6bec6de736697e6c88909d4ac86fb044cc5d009b3a8b70ac4018f4"
+      }
+    },
+    "hash": "1984e75a2cb9",
+    "version": "1984e75a2cb9",
+    "candidate_known": true,
+    "base": "37e8f8806739",
+    "sources": "task@T-1655 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+    "candidate_tokens": 2169,
+    "skill_tokens_presented_l2": 178,
+    "routed_mode": "shadow",
+    "routed_tokens": 3705,
+    "routed_reduction_ratio": 0.7374601910828026,
+    "routed_hidden": 6,
+    "routed_ambiguous": 5,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "59819cb638c5",
+      "812a65f4ae81",
+      "544f20f32144",
+      "bd62f8f3f351",
+      "e9c8377e90d6",
+      "bb982398b83d",
+      "3f39b0b7f524",
+      "59c134951a6a",
+      "0ae7bac2c35a",
+      "17323921f5fb",
+      "32c46c4b4d7a",
+      "33385380d816",
+      "3dd202ba0afc",
+      "486c48fb58bf",
+      "48d6d148d9db",
+      "51eb61db54bc",
+      "5439aa96c5bd",
+      "6445c57779e7",
+      "6a7b1fba7956",
+      "6d9fe178a44e",
+      "73c539987ff3",
+      "781ed98a0d00",
+      "8357629877aa",
+      "8da265fd289f",
+      "8e45446d7b77",
+      "90335d8aa2d7",
+      "942be77fcbe7",
+      "96143cbd81ae",
+      "969720431875",
+      "9ea39468a2ec",
+      "a49015688224",
+      "b97d90d53b77",
+      "cbf4327c7b01",
+      "d3f5ca4dc695",
+      "d636a0d6426d",
+      "deaf7fca4b22",
+      "e3214c6f07d6",
+      "e50f28598678",
+      "f27b9db40df6",
+      "f32738b12619",
+      "f5777d6fd658",
+      "fa18290813a3"
+    ],
+    "prefix_sha": "a7fc6578794f",
+    "prefix_chars": 710,
+    "suffix_chars": 11973,
+    "dynamic_sections": [
+      "skills",
+      "Trigger",
+      "Objective",
+      "Procedure",
+      "Tools",
+      "Evidence requirements",
+      "Output contract",
+      "Stop conditions",
+      "Failure/recovery",
+      "spec",
+      "acceptance",
+      "scope",
+      "diff",
+      "changed tests",
+      "gate",
+      "security",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 390,
+    "instruction_tokens_modular": 390,
+    "role": "review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "specialist",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_routing_mode": "active",
+    "session_id": "cd4452b0-eca2-40ff-892f-c2d783b2a7b8",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791231217.0402298,
+  "account": "A",
+  "pid": 1309,
+  "pipeline": {
+    "skills_used": []
+  },
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 3,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 3,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+    "packet_version": "1984e75a2cb9",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 3,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 3,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "1984e75a2cb9",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,182 @@
+{
+  "id": "T-0745",
+  "created_at": 1790003361.3903759,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: B1 v3: planner_runs routing integration \u2014 taxonomy \u2192 router \u2192 tier per headless decision, mode off byte-identical, shadow Opus launch, hold instead of downgrade, telemetry rows and skip rows, re-escalation (P3, P5, P6, P9, P15, P17)",
+  "spec": "Why: planner_runs.run_group/launch_routed (planner_runs.py:1090-1236) launch every escalate-route decision on [models].planner (Fable); tick() drops routine/none points silently; run_group's early returns (same state_version, goal launch active, already decided) leave no record; usage is logged only as bus.log_run planner_decision rows. The Wave A modules are merged on goal/T-0674: planner_taxonomy.classify(point, ctx, *, goal, task); planner_router.load_cfg / fable_reserve_ok / effective_complexity / hard_escalation / decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal, sample) / record(decision, *, subject, route, jev_signal, root) / RouterDecision(tier, mode, hard, hold, hold_reason, reasons, hard_reasons, soft_score, shadow_tier, candidates, evidence, decision_type); planner_telemetry.record_launch/record_usage/snapshot/materiality/record_materiality/record_skip/read_invocations; jev_planner.should_ask(router_mode, jev_mode, hard_reasons, availability, route_name: str)/ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route: str, state_version, task, ...); planner_shadow.eligible/launch/parse/record/score; planner_scorecard.class_evidence (returns reescalation_rate None and noninferior None for under-sampled classes, without raising). Spec reviews of T-0732 and T-0738 folded in; the Planner waived a third spec review.\nWhat (planner_runs.py, decision.py, goals.py; new tests in tests/test_planner_runs_routing.py; existing tests keep passing):\n- Imports in planner_runs.py: `from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner` (module references only; planner_telemetry already imports planner_runs, so never `from .planner_telemetry import name`); planner_scorecard imported lazily inside _class_evidence with try/except ImportError.\n- goals.launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None, model=None): model None keeps cfg[\"models\"][\"planner\"]; argv otherwise unchanged. launch_routed(pool, route, prompt, account, budget, log) becomes a thin resolver: tier = route.tier or \"fable\"; model = models[\"planner\"] if tier == \"fable\" else models.get(tier, tier); return goals.launch_planner(ROOT, prompt, account.id, budget, log, model=model). Delete the duplicated argv block (lines 1096-1109). Mode off therefore produces exactly the legacy argv.\n- decision.route: kind \"retrospective\" -> routine \"retrospective_deterministic\"; ctx.get(\"state_unchanged\") True -> none \"unchanged_state\" (checked right after the infra check). Existing tests unchanged.\n- tick(): sections are 4-tuples (point, ctx, route, classification). Before routing each point: ctx[\"complexity\"] = task complexity for held points else goal complexity; ctx[\"state_version\"] = state_version(goal_id); ctx[\"state_unchanged\"] = (_goal_launches().get(goal_id) or {}).get(\"last_state_version\") == ctx[\"state_version\"]; classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task). Every point that does not reach run_group records planner_telemetry.record_skip(goal_id=..., event=\"tick\", reason=..., kind=..., payload_key=...) with reason routine, none:<route reason>, fix_round_in_flight, or unknown_gate.\n- run_group(sections, pool): every unpack site becomes 4-tuples (`for point, ctx, section_route, classification in sections`, the _blocked filter, the _claim loop, the record update loop, the skip loop, the running-record loop). Its early returns record skips for every section: same state_version -> record_skip(reason=\"same_state_version\"), goal launch active -> \"goal_launch_active\", already decided -> \"already_decided\" (event \"run_group\"); the session-attached and no-headroom paths already call _record_skip and additionally call planner_telemetry.record_skip with reasons \"planner_session_attached\" / \"no_account_headroom\". Leader section = max over sections by (route priority investigate 1 / escalate 2, planner_router.effective_complexity(classification, ctx), then the smallest payload_key string); its route, ctx and classification drive the decision and the telemetry row. rcfg = planner_router.load_cfg(pool.cfg). availability = {rcfg[\"default_tier\"]: {\"available\": models alias configured and account is not None, \"reason\": \"ok\" or why}, rcfg[\"escalation_tier\"]: same, \"fable_reserve_ok\": planner_router.fable_reserve_ok(headroom_share, rcfg)} with headroom_share None when the picked account's daily_budget is 0 else 1 - (day_tokens + planner_day_tokens) / daily_budget. evidence = _class_evidence(model, classification, pool): calls planner_scorecard.class_evidence(models[default_tier], decision_type, band, task_class, architectural, root=STATE, cfg=pool.cfg) under try/except Exception; in BOTH the success and the failure path normalise to {\"n\": int(evidence.get(\"n\") or 0), \"noninferior\": evidence.get(\"noninferior\") (True/False/None), \"reescalation_rate\": float(evidence.get(\"reescalation_rate\") or 0.0)} so soft_score never sees None. Re-escalation (P15): if the goal's latest invocation row (planner_telemetry.read_invocations() filtered by goal_id, max started_at) has tier == rcfg[\"default_tier\"] and (decision_type == \"architectural_replan\" or ctx spec_review_request_changes >= rcfg[\"hard_spec_review_request_changes_min\"] or the lineage cap is reached), set ctx[\"reescalation\"] = True before hard_escalation. hard_reasons = planner_router.hard_escalation(classification, ctx, route, rcfg). jev_signal = jev_planner.ask(classification, ctx, goal, cfg=rcfg, router_mode=rcfg[\"mode\"], hard_reasons=hard_reasons, availability=availability, route=route.name, state_version=ctx[\"state_version\"], task=held task or None) only when jev_planner.should_ask(rcfg[\"mode\"], rcfg[\"jev_mode\"], hard_reasons, availability, route.name)[0]; route.name (the plain string) in BOTH calls, never the Route object. sample = random.random(); decision = planner_router.decide(classification, ctx, route, cfg=rcfg, availability=availability, evidence=evidence, jev_signal=jev_signal, sample=sample); planner_router.record(decision, subject=goal_id, route=route, jev_signal=jev_signal).\n- Effects: decision.hold -> every section record gets status \"held_for_fable\", hold_reason = decision.hold_reason, notify.notify_once(goal_id, f\"held_for_fable:{launch_id}\", ...); return {\"launched\": False, \"reason\": decision.hold_reason}; the next tick retries (records in status held_for_fable never block and are never claimed). Otherwise before_snapshot = planner_telemetry.snapshot(goal_id); launched = launch_routed(pool, dataclasses.replace(route, tier=decision.tier), prompt, account, budget, log); planner_telemetry.record_launch(launch_id=launch_id, goal_id, event=\"tick\", decision_type, kind=leader kind, payload_keys=[per section: the bare held task id (payload_key.split(':')[0]) when kind == held else payload_key], model=resolved model id, tier=decision.tier, account=account.id, complexity=ctx[\"complexity\"], band, task_class, architectural, route=route.name, route_reason=route.reason, mode=rcfg[\"mode\"], state_version=ctx[\"state_version\"], packet_chars=len(prompt), started_at=now, reescalation=bool(ctx.get(\"reescalation\"))); records store telemetry_before and launch_started_at. Shadow: ok, why = planner_shadow.eligible(decision, rcfg, sample=sample); when ok: account_dict = the [[claude_accounts]] entry whose id == account.id; shadow = planner_shadow.launch(prompt, model=models[decision.shadow_tier], account=account_dict, budget_usd=limits.max_budget_usd.planner_shadow default 1.5, log=STATE/runs/f\"planner-shadow-{goal_id}-{launch_id}.log\"); when shadow is not None store shadow_pid, shadow_pid_start=goals._proc_start(shadow[\"pid\"]), shadow_log, shadow_started_at, shadow_tier on the records; exceptions printed to stderr and ignored.\n- _record_decision_usage(r): additionally planner_telemetry.record_usage(r[\"launch_id\"], input_tokens=..., output_tokens=..., cache_read_tokens=..., cache_write_tokens=..., usd=..., latency_s=now - r[\"launch_started_at\"], outcome=..., session_id=...) when the record has launch_id.\n- reconcile(): when a running record's process is gone and telemetry_before exists: planner_telemetry.record_materiality(launch_id, before, planner_telemetry.snapshot(goal_id)) once (flag materiality_logged). When shadow_log exists and not goals.identity_of(shadow_pid, shadow_pid_start): parsed = planner_shadow.parse(shadow_log); row = planner_shadow.record(launch_id=..., goal_id, decision_type, state_version, model, tier=shadow_tier, started_at=shadow_started_at, parsed, latency_s); r[\"shadow_agreement\"] = planner_shadow.score(row, materiality) once (flag shadow_logged).\nTests use the sandbox pattern of tests/test_planner_runs.py; patch goals.Popen / planner_shadow popen, and for the Jev case patch jev.ask (the network function) rather than jev_planner.ask so the real should_ask/ask string contract is exercised.",
+  "inputs": [
+    "T-0741"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs_routing.py::test_mode_off_argv_identical_to_legacy \u2014 with [planner.routing].mode off, run_group produces exactly the argv that goals.launch_planner produced before this change for the same decision (captured via patched Popen, compared list-equal), one Popen call only, and no held_for_fable record",
+    "tests/test_planner_runs_routing.py::test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes \u2014 shadow mode: the first Popen argv uses models.planner and .mcp.planner.json, the second uses models.opus, .mcp.planner-shadow.json and --disallowedTools; bus task files and plan.md are byte-identical after the shadow launch; the record carries shadow_log and shadow_pid_start; a launch row exists with tier fable, mode shadow and packet_chars",
+    "tests/test_planner_runs_routing.py::test_hard_decision_holds_when_fable_unavailable \u2014 active mode, goal complexity 9, escalation tier unavailable: no Popen call, every section record has status held_for_fable with hold_reason starting fable_unavailable, one notify_once, and a second tick with the tier available launches instead of giving up",
+    "tests/test_planner_runs_routing.py::test_skips_usage_materiality_and_jev_invocation \u2014 a routine point, an unchanged-state goal and a run_group same_state_version early return each produce planner_skips rows with reasons routine, none:unchanged_state and same_state_version; on a shadow-mode escalate decision with two available tiers and no hard reasons, a patched jev.ask is called exactly once and the planner_jev row has asked True (so should_ask/ask received the route name string), while a hard decision never calls jev.ask; an under-sampled class_evidence result (reescalation_rate None) does not raise; a launched decision followed by a fake exit whose log carries usage yields usage and materiality rows under the same launch_id, materiality naming the task created during the run",
+    "tests/test_planner_runs_routing.py::test_reescalation_forces_fable_after_opus_and_tie_break \u2014 a goal whose latest invocation row has tier opus and whose held point has spec_review_request_changes 2 launches on models.planner in active mode with reescalation True in the launch row and a planner_route decision row whose hard_constraints contain repeated_spec_rejection and reescalation; two escalate sections in one group pick the leader with the higher effective complexity, then the smaller payload_key; tests/test_decision.py::test_retrospective_and_unchanged_state_routes \u2014 kind retrospective routes routine retrospective_deterministic and state_unchanged True routes none unchanged_state"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    "orchestrator/goals.py",
+    "tests/test_planner_runs_routing.py",
+    "tests/test_decision.py",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0745",
+  "codex_thread": null,
+  "result": {
+    "summary": "Diff matches the spec closely: imports, launch_routed/goals.launch_planner model threading, decision.route ordering, tick()'s per-point telemetry skips, run_group's leader selection/availability/evidence/reescalation/hard-escalation/jev/shadow wiring, and reconcile's materiality+shadow scoring all line up with the packet and are covered by the new tests. Two non-blocking issues found: a telemetry-reason race in the session-attached/no-headroom skip path (re-derives _session_attached() instead of reusing it, can produce inconsistent skip reasons), and a broader-than-specified except clause in _class_evidence that could silently mask evidence-pipeline bugs. Neither breaks the stated acceptance criteria.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 1236,
+        "issue": "run_group's no-account/session-attached skip path calls _session_attached() a second time to pick the planner_telemetry.record_skip reason, instead of reusing the boolean already computed a few lines above for _record_skip's reason. If session attachment state changes between the two calls (e.g. during pool.pick()), the bus-level skip reason and the telemetry skip reason for the same event can disagree (\"no account with headroom\" vs \"planner_session_attached\"), corrupting the telemetry this spec is meant to make trustworthy.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 1195,
+        "issue": "_class_evidence wraps planner_scorecard.class_evidence in `except Exception: pass`, where the spec calls for `except ImportError`. Any non-import error (corrupted scorecard state, cfg shape mismatch, future signature drift) is silently swallowed and evidence falls back to n=0/noninferior=None, masking real bugs in the evidence pipeline instead of surfacing them.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "22481d2e54d5",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790003361.391476,
+      "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+    },
+    {
+      "ts": 1790003364.427117,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0745",
+      "claimed_at": 1790003364.426691
+    },
+    {
+      "ts": 1790003364.428291,
+      "account": "B"
+    },
+    {
+      "ts": 1790003364.909347,
+      "pid": 36335,
+      "account": "B"
+    },
+    {
+      "ts": 1790003571.577483,
+      "status": "done",
+      "result": {
+        "summary": "Diff matches the spec closely: imports, launch_routed/goals.launch_planner model threading, decision.route ordering, tick()'s per-point telemetry skips, run_group's leader selection/availability/evidence/reescalation/hard-escalation/jev/shadow wiring, and reconcile's materiality+shadow scoring all line up with the packet and are covered by the new tests. Two non-blocking issues found: a telemetry-reason race in the session-attached/no-headroom skip path (re-derives _session_attached() instead of reusing it, can produce inconsistent skip reasons), and a broader-than-specified except clause in _class_evidence that could silently mask evidence-pipeline bugs. Neither breaks the stated acceptance criteria.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 1236,
+            "issue": "run_group's no-account/session-attached skip path calls _session_attached() a second time to pick the planner_telemetry.record_skip reason, instead of reusing the boolean already computed a few lines above for _record_skip's reason. If session attachment state changes between the two calls (e.g. during pool.pick()), the bus-level skip reason and the telemetry skip reason for the same event can disagree (\"no account with headroom\" vs \"planner_session_attached\"), corrupting the telemetry this spec is meant to make trustworthy.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 1195,
+            "issue": "_class_evidence wraps planner_scorecard.class_evidence in `except Exception: pass`, where the spec calls for `except ImportError`. Any non-import error (corrupted scorecard state, cfg shape mismatch, future signature drift) is silently swallowed and evidence falls back to n=0/noninferior=None, masking real bugs in the evidence pipeline instead of surfacing them.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "22481d2e54d5",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790003571.5801332,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790003571.6214101,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+        "packet_version": "22481d2e54d5",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+      "packet_version": "22481d2e54d5",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+  "claimed_at": 1790003364.426691,
+  "account": "B",
+  "pid": 36335,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+    "packet_version": "22481d2e54d5",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "22481d2e54d5",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

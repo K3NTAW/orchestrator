@@ -1,0 +1,256 @@
+{
+  "id": "T-0963",
+  "created_at": 1790121258.3321228,
+  "parent": "T-0861",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S6: temporary specialist composition: role + selected skills + skill-declared context and tools, deterministic conflict detection between skills, a specialist packet header and decision row; no permanent roles (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P11, P12, P13, P26, P27, P28, P35 (P37 stage 6). Depends on T-0939 (active skill routing: packet \"## skills\" section, selected ids) and T-0918 (tool_disclosure active: minimal allowlist with escalation). Facts: skills carry frontmatter roles/task_classes/triggers/tools/requires_context/output (S2); context_router routes evidence candidates by role profile (T-0800/T-0855); tool_catalog.minimal_set gives keep/drop/mandatory (T-0802); evidence.EvidencePool holds per-goal evidence; strategy.derive names the workflow.\nDo:\n1. orchestrator/specialist.py (new): `compose(task, role, cfg=None) -> Specialist` with fields: role, skills (selected ids + versions from skill_router.select), context_requirements (union of the selected skills' requires_context source types), tools (tool_catalog minimal set for the role \u222a tools declared by the selected skills; mandatory never dropped; a skill-declared tool that is not in the role's legacy allowlist is NOT added, it is reported as \"unavailable_tool\" in the decision and the skill is dropped with reason \"tool_unavailable\"), model (the executor/tier the pool would pick; no change), name (deterministic: f\"{role}+{'+'.join(short skill names)}\" e.g. \"scout+trace-callers+test-gap\"), conflicts (see 2). The specialist exists only for that spawn; nothing is persisted as a role.\n2. Conflict detection (P13), deterministic: two selected skills conflict when (a) their output contracts name different top-level result shapes for the same role (the output frontmatter differs and both claim the role's final result), (b) one declares `conflicts_with: [id]` in frontmatter, (c) they declare the same script path under different arguments contract, or (d) their procedures both claim the \"Stop conditions\" of the role with contradictory commit rules (executor only). Resolution rule: keep the skill with the stronger trigger match (more matched keywords), else the role's mandatory skill, else the lexically first; record {\"kept\", \"dropped\", \"rule\"} in the decision row; never present two conflicting skills together.\n3. Packet integration (P12/P26/P27): the context router receives specialist.context_requirements so candidates of those source types get at least LONG for that spawn (a new argument to context_router.route: required_types; when the router is in shadow this only affects the logged shadow packet); tool disclosure receives the specialist's tools as the minimal set (active mode only; shadow logs); the packet header line gains \"specialist: <name>\". Evidence sharing (P28): facts consumed from the goal's EvidencePool are listed by id in the packet's evidence section; review specialists never receive another worker's verdict text (review_finding evidence from other reviewers of the same task is excluded for role review).\n4. Decision logging: the skill_selection row's extra gains \"specialist\": {\"name\", \"tools_added\", \"tools_unavailable\", \"context_requirements\", \"conflicts\"}; and a decision_log row kind \"workflow_strategy\"? No: reuse kind \"skill_selection\" only (no new kinds).\n5. docs/skill-intelligence/08-specialists.md (\u226470 lines): composition rule, conflict rules and resolution order, what is never done (no permanent roles, P35), examples from the brief (authentication-impact scout, migration reviewer, frontend executor) expressed with the existing skills, revert path ([skills] mode shadow).\nTests (unittest): tests/test_specialist.py::test_compose_scout_with_trace_callers_declares_context_and_tools, ::test_unavailable_tool_drops_skill_with_reason, ::test_conflict_detected_and_resolved_by_trigger_strength, ::test_review_specialist_excludes_other_reviewers_verdicts, ::test_name_is_deterministic_and_no_role_persisted; tests/test_spawn.py::test_packet_header_carries_specialist_name_in_active_only. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 10:30) after spec review T-0959 (request_changes), binding on top of v1:\n- Tool-name normalisation: specialist.py carries a TOOL_ALIASES table mapping the bare identifiers skills declare to catalog ids (Bash \u2192 every \"Bash(...)\" pattern of the role's legacy allowlist; Search \u2192 Grep and Glob; bus_post_result \u2192 mcp__bus__bus_post_result; bus_read \u2192 mcp__bus__bus_read; spawn_scout/status/merge and the other Planner MCP tools \u2192 their mcp__orchestrator__ ids; Read/Grep/Glob/Edit/Write unchanged). \"script:<path>\" entries are satisfied when the role's allowlist contains Bash(bash skills/*). tool_unavailable is computed only after normalisation; unknown identifiers are reported as \"unknown_tool\" (not unavailable) and do not drop the skill. Test tests/test_specialist.py::test_tool_aliases_resolve_declared_tools.\n- conflicts_with: orchestrator/skills_registry.py and tests/test_skills_registry.py join the scope; SkillRecord gains `conflicts_with: list[str]` parsed from frontmatter (default []); sync() fills it; a registry test covers a fixture skill declaring it.\n- Header line: exactly two sites carry \"specialist: <name>\": packet() (execute) and review_packet() (review and security_review); spec_review_packet and scout_packet are untouched. The acceptance test test_packet_header_carries_specialist_name_in_active_only covers both sites.\n- Rule 3 restated with the data Evidence carries: for roles review and security_review, every review_finding evidence whose location starts with f\"task:{task_id}:review:\" (findings recorded on the same task by any earlier review round) is excluded from the specialist packet; the fix-round context section (the rejecting comments a fix round must address) is unaffected because it is not evidence. Test test_review_specialist_excludes_other_reviewers_verdicts uses that location prefix.",
+  "inputs": [
+    "T-0961"
+  ],
+  "acceptance": [
+    "tests/test_specialist.py::test_compose_scout_with_trace_callers_declares_context_and_tools passes",
+    "tests/test_specialist.py::test_unavailable_tool_drops_skill_with_reason passes",
+    "tests/test_specialist.py::test_conflict_detected_and_resolved_by_trigger_strength passes",
+    "tests/test_specialist.py::test_review_specialist_excludes_other_reviewers_verdicts passes",
+    "tests/test_specialist.py::test_name_is_deterministic_and_no_role_persisted passes",
+    "tests/test_spawn.py::test_packet_header_carries_specialist_name_in_active_only passes",
+    "docs/skill-intelligence/08-specialists.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_specialist.py::test_tool_aliases_resolve_declared_tools passes",
+    "tests/test_skills_registry.py::test_conflicts_with_parsed_from_frontmatter passes"
+  ],
+  "scope": [
+    "orchestrator/specialist.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/spawn.py",
+    "orchestrator/context_router.py",
+    "orchestrator/tool_catalog.py",
+    "tests/test_specialist.py",
+    "tests/test_spawn.py",
+    "docs/skill-intelligence/08-specialists.md",
+    "orchestrator/skills_registry.py",
+    "tests/test_skills_registry.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0963",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "disclosed()/minimal_set() have no 'planner' entry; role='planner' falls back to TOOLS['scout'] / {read,search,bus} categories. The four mandatory planner skills (skills/planner/{orchestrate,memory,resume,write-spec}/SKILL.md) declare tools like spawn_scout, spawn_challenge, merge, bus_create_task, bus_events, status, codex_reply, none of which appear in any role's legacy allowlist. Under item 1's own rule ('a skill-declared tool not in the role's legacy allowlist is dropped with reason tool_unavailable'), composing a planner specialist would drop all four MANDATORY planner skills, since skill_router.MANDATORY includes a 'planner' entry and skill_router.select is a generic role argument.",
+        "severity": "high",
+        "line": 96
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Depends_on T-0918 ('tool_disclosure active passes the minimal allowlist ... v3') is not merged into this branch \u2014 verified 'git merge-base --is-ancestor 2b36177 HEAD' returns false, and spawn.py/bus.py still notify 'tool_disclosure active not implemented; running shadow'. Spec item 3 says the specialist's tools become the minimal set 'active mode only' but there is no active enforcement code path in this repo to hook into yet.",
+        "severity": "high",
+        "line": 393
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "SPEC v2's TOOL_ALIASES table maps bare Planner-MCP identifiers (spawn_scout, status, merge, ...) to 'mcp__orchestrator__'-prefixed ids, but CATALOG only prefixes bus_ tools with mcp__bus__; all other MCP entries (codex, codex_reply, spawn_scout, spawn_review, spawn_challenge, spawn_spec_review, merge, status, executor_fallback, hold_account, resume_account) are keyed by their bare name. Aliasing to a prefixed id that doesn't exist in CATALOG/any offered() list will make normalisation fail to match, defeating the alias table for exactly the Planner tools it calls out.",
+        "severity": "med",
+        "line": 68
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "SPEC v2 rule 3 excludes review_finding evidence keyed 'task:{task_id}:review:' as findings from 'earlier review rounds' on the same task, but review_packet's only review_finding evidence.make call uses location f'task:{src[\"id\"]}:...' where src = reviewed (the execute task under review) \u2014 an id shared by every parallel reviewer task (R1, R2), not the id of the reviewing task itself. specialist.compose(task, role, cfg) as specified takes one task argument (the reviewer task), which does not directly expose reviewed['id']; that requires resolving task['inputs'][0] via bus.get, which the spec never mentions compose() doing.",
+        "severity": "med",
+        "line": 810
+      },
+      {
+        "path": "orchestrator/skills_registry.py",
+        "issue": "SkillRecord is a positional-capable dataclass; adding conflicts_with must carry a default (e.g. field(default_factory=list)) and be declared after provenance_info (the current last field with a default), otherwise dataclass construction breaks for any non-keyword caller.",
+        "severity": "low",
+        "line": 58
+      },
+      {
+        "path": "docs/skill-intelligence/08-specialists.md",
+        "issue": "09-learned.md (T-0954) already exists while 08 does not \u2014 purely a numbering gap, not functional, but worth noting so the new doc's number isn't mistaken for a duplicate/reorder mistake.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Confirm T-0918's active tool_disclosure enforcement is merged before starting, or rewrite item 3 to state explicitly it only feeds decision-log shadow telemetry until an active enforcement point exists.",
+      "Scope compose()'s tool_unavailable/mandatory-drop logic to worker roles (execute/codex_execute/review/security_review/scout/challenge/spec_review) only, or add a real Planner-MCP tool allowlist to tool_catalog.py before letting compose() touch role='planner'.",
+      "Fix TOOL_ALIASES targets for non-bus MCP tools to the actual unprefixed catalog keys (spawn_scout, merge, status, codex, codex_reply, etc.), not mcp__orchestrator__-prefixed ids.",
+      "Clarify how compose() obtains the reviewed-task id (not the reviewer task's own id) for the review_finding location-prefix exclusion \u2014 pass it explicitly or specify the bus.get(task['inputs'][0]) resolution."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790121261.029265,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0963",
+      "claimed_at": 1790121260.9371688
+    },
+    {
+      "ts": 1790121261.0305579,
+      "account": "B"
+    },
+    {
+      "ts": 1790121262.2136478,
+      "pid": 49394,
+      "account": "B"
+    },
+    {
+      "ts": 1790121592.1353312,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "disclosed()/minimal_set() have no 'planner' entry; role='planner' falls back to TOOLS['scout'] / {read,search,bus} categories. The four mandatory planner skills (skills/planner/{orchestrate,memory,resume,write-spec}/SKILL.md) declare tools like spawn_scout, spawn_challenge, merge, bus_create_task, bus_events, status, codex_reply, none of which appear in any role's legacy allowlist. Under item 1's own rule ('a skill-declared tool not in the role's legacy allowlist is dropped with reason tool_unavailable'), composing a planner specialist would drop all four MANDATORY planner skills, since skill_router.MANDATORY includes a 'planner' entry and skill_router.select is a generic role argument.",
+            "severity": "high",
+            "line": 96
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Depends_on T-0918 ('tool_disclosure active passes the minimal allowlist ... v3') is not merged into this branch \u2014 verified 'git merge-base --is-ancestor 2b36177 HEAD' returns false, and spawn.py/bus.py still notify 'tool_disclosure active not implemented; running shadow'. Spec item 3 says the specialist's tools become the minimal set 'active mode only' but there is no active enforcement code path in this repo to hook into yet.",
+            "severity": "high",
+            "line": 393
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "SPEC v2's TOOL_ALIASES table maps bare Planner-MCP identifiers (spawn_scout, status, merge, ...) to 'mcp__orchestrator__'-prefixed ids, but CATALOG only prefixes bus_ tools with mcp__bus__; all other MCP entries (codex, codex_reply, spawn_scout, spawn_review, spawn_challenge, spawn_spec_review, merge, status, executor_fallback, hold_account, resume_account) are keyed by their bare name. Aliasing to a prefixed id that doesn't exist in CATALOG/any offered() list will make normalisation fail to match, defeating the alias table for exactly the Planner tools it calls out.",
+            "severity": "med",
+            "line": 68
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "SPEC v2 rule 3 excludes review_finding evidence keyed 'task:{task_id}:review:' as findings from 'earlier review rounds' on the same task, but review_packet's only review_finding evidence.make call uses location f'task:{src[\"id\"]}:...' where src = reviewed (the execute task under review) \u2014 an id shared by every parallel reviewer task (R1, R2), not the id of the reviewing task itself. specialist.compose(task, role, cfg) as specified takes one task argument (the reviewer task), which does not directly expose reviewed['id']; that requires resolving task['inputs'][0] via bus.get, which the spec never mentions compose() doing.",
+            "severity": "med",
+            "line": 810
+          },
+          {
+            "path": "orchestrator/skills_registry.py",
+            "issue": "SkillRecord is a positional-capable dataclass; adding conflicts_with must carry a default (e.g. field(default_factory=list)) and be declared after provenance_info (the current last field with a default), otherwise dataclass construction breaks for any non-keyword caller.",
+            "severity": "low",
+            "line": 58
+          },
+          {
+            "path": "docs/skill-intelligence/08-specialists.md",
+            "issue": "09-learned.md (T-0954) already exists while 08 does not \u2014 purely a numbering gap, not functional, but worth noting so the new doc's number isn't mistaken for a duplicate/reorder mistake.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Confirm T-0918's active tool_disclosure enforcement is merged before starting, or rewrite item 3 to state explicitly it only feeds decision-log shadow telemetry until an active enforcement point exists.",
+          "Scope compose()'s tool_unavailable/mandatory-drop logic to worker roles (execute/codex_execute/review/security_review/scout/challenge/spec_review) only, or add a real Planner-MCP tool allowlist to tool_catalog.py before letting compose() touch role='planner'.",
+          "Fix TOOL_ALIASES targets for non-bus MCP tools to the actual unprefixed catalog keys (spawn_scout, merge, status, codex, codex_reply, etc.), not mcp__orchestrator__-prefixed ids.",
+          "Clarify how compose() obtains the reviewed-task id (not the reviewer task's own id) for the review_finding location-prefix exclusion \u2014 pass it explicitly or specify the bus.get(task['inputs'][0]) resolution."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790121592.1375308,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "disclosed()/minimal_set() have no 'planner' entry; role='planner' falls back to TOOLS['scout'] / {read,search,bus} categories. The four mandatory planner skills (skills/planner/{orchestrate,memory,resume,write-spec}/SKILL.md) declare tools like spawn_scout, spawn_challenge, merge, bus_create_task, bus_events, status, codex_reply, none of which appear in any role's legacy allowlist. Under item 1's own rule ('a skill-declared tool not in the role's legacy allowlist is dropped with reason tool_unavailable'), composing a planner specialist would drop all four MANDATORY planner skills, since skill_router.MANDATORY includes a 'planner' entry and skill_router.select is a generic role argument.",
+          "severity": "high",
+          "line": 96
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Depends_on T-0918 ('tool_disclosure active passes the minimal allowlist ... v3') is not merged into this branch \u2014 verified 'git merge-base --is-ancestor 2b36177 HEAD' returns false, and spawn.py/bus.py still notify 'tool_disclosure active not implemented; running shadow'. Spec item 3 says the specialist's tools become the minimal set 'active mode only' but there is no active enforcement code path in this repo to hook into yet.",
+          "severity": "high",
+          "line": 393
+        },
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "SPEC v2's TOOL_ALIASES table maps bare Planner-MCP identifiers (spawn_scout, status, merge, ...) to 'mcp__orchestrator__'-prefixed ids, but CATALOG only prefixes bus_ tools with mcp__bus__; all other MCP entries (codex, codex_reply, spawn_scout, spawn_review, spawn_challenge, spawn_spec_review, merge, status, executor_fallback, hold_account, resume_account) are keyed by their bare name. Aliasing to a prefixed id that doesn't exist in CATALOG/any offered() list will make normalisation fail to match, defeating the alias table for exactly the Planner tools it calls out.",
+          "severity": "med",
+          "line": 68
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "SPEC v2 rule 3 excludes review_finding evidence keyed 'task:{task_id}:review:' as findings from 'earlier review rounds' on the same task, but review_packet's only review_finding evidence.make call uses location f'task:{src[\"id\"]}:...' where src = reviewed (the execute task under review) \u2014 an id shared by every parallel reviewer task (R1, R2), not the id of the reviewing task itself. specialist.compose(task, role, cfg) as specified takes one task argument (the reviewer task), which does not directly expose reviewed['id']; that requires resolving task['inputs'][0] via bus.get, which the spec never mentions compose() doing.",
+          "severity": "med",
+          "line": 810
+        },
+        {
+          "path": "orchestrator/skills_registry.py",
+          "issue": "SkillRecord is a positional-capable dataclass; adding conflicts_with must carry a default (e.g. field(default_factory=list)) and be declared after provenance_info (the current last field with a default), otherwise dataclass construction breaks for any non-keyword caller.",
+          "severity": "low",
+          "line": 58
+        },
+        {
+          "path": "docs/skill-intelligence/08-specialists.md",
+          "issue": "09-learned.md (T-0954) already exists while 08 does not \u2014 purely a numbering gap, not functional, but worth noting so the new doc's number isn't mistaken for a duplicate/reorder mistake.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790121260.9371688,
+  "account": "B",
+  "pid": 49394,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "disclosed()/minimal_set() have no 'planner' entry; role='planner' falls back to TOOLS['scout'] / {read,search,bus} categories. The four mandatory planner skills (skills/planner/{orchestrate,memory,resume,write-spec}/SKILL.md) declare tools like spawn_scout, spawn_challenge, merge, bus_create_task, bus_events, status, codex_reply, none of which appear in any role's legacy allowlist. Under item 1's own rule ('a skill-declared tool not in the role's legacy allowlist is dropped with reason tool_unavailable'), composing a planner specialist would drop all four MANDATORY planner skills, since skill_router.MANDATORY includes a 'planner' entry and skill_router.select is a generic role argument.",
+      "severity": "high",
+      "line": 96
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Depends_on T-0918 ('tool_disclosure active passes the minimal allowlist ... v3') is not merged into this branch \u2014 verified 'git merge-base --is-ancestor 2b36177 HEAD' returns false, and spawn.py/bus.py still notify 'tool_disclosure active not implemented; running shadow'. Spec item 3 says the specialist's tools become the minimal set 'active mode only' but there is no active enforcement code path in this repo to hook into yet.",
+      "severity": "high",
+      "line": 393
+    },
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "SPEC v2's TOOL_ALIASES table maps bare Planner-MCP identifiers (spawn_scout, status, merge, ...) to 'mcp__orchestrator__'-prefixed ids, but CATALOG only prefixes bus_ tools with mcp__bus__; all other MCP entries (codex, codex_reply, spawn_scout, spawn_review, spawn_challenge, spawn_spec_review, merge, status, executor_fallback, hold_account, resume_account) are keyed by their bare name. Aliasing to a prefixed id that doesn't exist in CATALOG/any offered() list will make normalisation fail to match, defeating the alias table for exactly the Planner tools it calls out.",
+      "severity": "med",
+      "line": 68
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "SPEC v2 rule 3 excludes review_finding evidence keyed 'task:{task_id}:review:' as findings from 'earlier review rounds' on the same task, but review_packet's only review_finding evidence.make call uses location f'task:{src[\"id\"]}:...' where src = reviewed (the execute task under review) \u2014 an id shared by every parallel reviewer task (R1, R2), not the id of the reviewing task itself. specialist.compose(task, role, cfg) as specified takes one task argument (the reviewer task), which does not directly expose reviewed['id']; that requires resolving task['inputs'][0] via bus.get, which the spec never mentions compose() doing.",
+      "severity": "med",
+      "line": 810
+    },
+    {
+      "path": "orchestrator/skills_registry.py",
+      "issue": "SkillRecord is a positional-capable dataclass; adding conflicts_with must carry a default (e.g. field(default_factory=list)) and be declared after provenance_info (the current last field with a default), otherwise dataclass construction breaks for any non-keyword caller.",
+      "severity": "low",
+      "line": 58
+    },
+    {
+      "path": "docs/skill-intelligence/08-specialists.md",
+      "issue": "09-learned.md (T-0954) already exists while 08 does not \u2014 purely a numbering gap, not functional, but worth noting so the new doc's number isn't mistaken for a duplicate/reorder mistake.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

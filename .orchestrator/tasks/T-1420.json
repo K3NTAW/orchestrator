@@ -1,0 +1,1245 @@
+{
+  "id": "T-1420",
+  "created_at": 1790806834.105828,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "fix round 1 for T-1407: treat PermissionError from os.killpg like ProcessLookupError (security review T-1415; folds T-1414)",
+  "spec": "Fix round for T-1407, requested by security review T-1415 (request_changes): with the wall-clock deadline loop, os.killpg(proc.pid, 0) in gate._run raises PermissionError (EPERM) on macOS when the group holds only zombies; the reviewer reproduced it in tests/test_gate_timeout.py test_daemon_gate_timeout_holds_as_infra_failure at gate.py:77. This fix round carries the whole T-1414 spec, which is superseded because it depended on T-1407 merging.\n\nWhy: on macOS, os.killpg(pgid, sig) raises PermissionError (EPERM), not ProcessLookupError, when every process left in the group is a zombie. orchestrator/gate.py _run catches only ProcessLookupError around each killpg (lines ~51, 58, 65-66, 71). On 2026-10-01 T-1408's gate went red on tests/test_gate_timeout.py test_cleanup_command_runs_on_timeout with PermissionError at gate.py:65 (the os.killpg(proc.pid, 0) probe after the SIGTERM grace). In production the same race crashes run_gate on a timeout instead of returning timed_out, which the daemon would record as a gate failure.\n\nWhat: in gate._run treat PermissionError exactly like ProcessLookupError at every os.killpg call (the group is gone or unkillable zombies; reap with proc.wait/communicate as today). Keep the return shape and the wall-clock deadline logic from T-1407. Add the test with os.killpg patched to raise PermissionError on the probe and on SIGKILL: run_bounded on a sleeping child with a tiny timeout returns timed_out True and does not raise.\n\nWork in wt/T-1407 on task/T-1407, on top of its commits. Commit first, then run the focused test in the foreground; never background a command, never the full gate.\n\nAlso run tests/test_gate_timeout.py as a whole three times in a row in the foreground before finishing.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gate_timeout.py::test_killpg_permission_error_is_treated_as_gone passes: with os.killpg raising PermissionError for the probe and SIGKILL, run_bounded on a timed-out child returns timed_out True without raising",
+    "tests/test_gate_timeout.py::test_deadline_counts_wall_clock_sleep still passes, and tests/test_gate_timeout.py passes three runs in a row",
+    ".claude/hooks/tests-green.sh wt/T-1407 exits 0"
+  ],
+  "scope": [
+    "orchestrator/gate.py",
+    "tests/test_gate_timeout.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 2700,
+    "task_class": "debugging",
+    "route": "straightforward",
+    "fix_round_for": "T-1407",
+    "goal_branch": "goal/T-1403",
+    "folds": "T-1414"
+  },
+  "status": "done",
+  "assigned_to": null,
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1407",
+  "codex_thread": null,
+  "result": {
+    "summary": "Fixed `PermissionError` handling during timeout cleanup and added regression coverage.\n\nFiles changed: `orchestrator/gate.py`, `tests/test_gate_timeout.py`.\n\nValidation: timeout tests passed three consecutive runs; gate exited 0 with 1,540 tests.\n\nCommit: `98dfec7ca91b6a0349cb229ff6eb855af8eb2532`. Worktree clean.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:terra",
+    "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+    "usage": {
+      "input_tokens": 1456431,
+      "cached_input_tokens": 1385600,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9060,
+      "reasoning_output_tokens": 3515
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790806834.10765,
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1407"
+    },
+    {
+      "ts": 1790807271.526915,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831
+      }
+    },
+    {
+      "ts": 1790808686.029854,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799
+      }
+    },
+    {
+      "ts": 1790808686.031845,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799
+      }
+    },
+    {
+      "ts": 1790808687.8574588,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        }
+      },
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1407",
+      "branch": "task/T-1407"
+    },
+    {
+      "ts": 1790808687.859006,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538
+      }
+    },
+    {
+      "ts": 1790808695.929326,
+      "packet_meta": {
+        "chars": 4884,
+        "est_tokens": 1221,
+        "presented_tokens": 1221,
+        "sections": {
+          "_preamble": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "8bfff479c4fb688e1f22a94483376ad10b0bb35cd4ddbd62303d02544348c8a6"
+          },
+          "objective": {
+            "chars": 1345,
+            "est_tokens": 336,
+            "sha256": "145b04e8ea8a98df984691298a1420473eb083185e93397c2debb5eea6d9f020"
+          },
+          "acceptance": {
+            "chars": 390,
+            "est_tokens": 97,
+            "sha256": "beb81148aa2fbdee66a25a59e168eca6ba0e75d16cd25e4d367d00acb37bd5ab"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "f6aa23ce4bc1bc04673061ad871fbd31edb0b39a474a5128cc59df1c974e4e9c"
+          },
+          "write_scope": {
+            "chars": 67,
+            "est_tokens": 16,
+            "sha256": "37b66b2c95c5dfbd57a162e08b014fb7d20cd3e8ee27b06b069a71539ff94aff"
+          },
+          "read_scope": {
+            "chars": 293,
+            "est_tokens": 73,
+            "sha256": "0b57eacf76b311e37ecb106266de3cd2ebf10efa59e002a1671d91c83e763184"
+          },
+          "constraints": {
+            "chars": 173,
+            "est_tokens": 43,
+            "sha256": "0213aa991b0339b2ab9a6b96c91e966a98f2387a3781ca0053bb23f75e058c1c"
+          },
+          "relevant_tests": {
+            "chars": 800,
+            "est_tokens": 200,
+            "sha256": "0b29decf5eb8b5dc6cc1994ab7adc3199db2e7ef5718a8370c193d93a207353c"
+          },
+          "symbols": {
+            "chars": 275,
+            "est_tokens": 68,
+            "sha256": "a2720eb529df76752e68da5fe9976c935aa797d463e6b72c761f15d1bced9e06"
+          },
+          "gotchas": {
+            "chars": 1146,
+            "est_tokens": 286,
+            "sha256": "102828bd99953235cf0101cadecbd43be824b0737811b523fec937e42bdf245f"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "522e639f0964",
+        "version": "522e639f0964",
+        "candidate_known": true,
+        "base": "f914a1b49df1",
+        "sources": "pool.toml@28baab364e77 gotchas@7bacc0015a0e memory@notes over cap by 84 chars: acceptance kept whole routed=shadow",
+        "policy_version": "28baab364e77",
+        "gotchas": "7bacc0015a0e",
+        "candidate_tokens": 2267,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 6255,
+        "routed_reduction_ratio": 0.9002590673575129,
+        "routed_hidden": 11,
+        "routed_ambiguous": 15,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4c11284ef662",
+          "3712a2732e98",
+          "2abec09b2d77",
+          "046287819887",
+          "bb99d02a0b43",
+          "036a97111f04",
+          "504365aa02ad",
+          "65c4d2b5db00",
+          "9d078ea9fe66",
+          "55d0ebe04a88",
+          "5b872ee10528",
+          "d500754708e5",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "4e027485077a",
+          "88fe62538f7f",
+          "d6fcb3fcde4d",
+          "68bac07ffdc6",
+          "2a9ae8717df5",
+          "515812d59d58",
+          "2588cb5940c5",
+          "d3d6c43ffeae",
+          "b9c79375f517",
+          "47eb4629d834",
+          "0032fc790147",
+          "f94905d843e0",
+          "68ecb5c1910c",
+          "e2fb302fbb71",
+          "a5ad51434325",
+          "ed3829f449f7",
+          "d68a11147a0e",
+          "d1ed6e2a5413",
+          "479b0d7e21cd",
+          "a399dd2f44b0",
+          "7866df198e16",
+          "29a297a659d5",
+          "093989ad5244",
+          "d0abb517f99a",
+          "6964c7fa3d61",
+          "7d85f06f030d",
+          "46d4f28f792d",
+          "a9b2ee306eec",
+          "6b78986f7d9a",
+          "2196e8295119",
+          "370160bb9184",
+          "c4a694cbf8bf",
+          "8bef670768a3",
+          "4fe7858da833",
+          "f7bf26a2e2b8",
+          "d61d4f280344",
+          "8ba6ae953700",
+          "9140e6d9645f",
+          "05da9ae9562e",
+          "8d75e40a41e7",
+          "d4b640abcfb0",
+          "7a5aec1ca895",
+          "af10f9bad7f2",
+          "bd014052a289"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5763,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      }
+    },
+    {
+      "ts": 1790809025.859154,
+      "packet_meta": {
+        "chars": 4884,
+        "est_tokens": 1221,
+        "presented_tokens": 1221,
+        "sections": {
+          "_preamble": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "8bfff479c4fb688e1f22a94483376ad10b0bb35cd4ddbd62303d02544348c8a6"
+          },
+          "objective": {
+            "chars": 1345,
+            "est_tokens": 336,
+            "sha256": "145b04e8ea8a98df984691298a1420473eb083185e93397c2debb5eea6d9f020"
+          },
+          "acceptance": {
+            "chars": 390,
+            "est_tokens": 97,
+            "sha256": "beb81148aa2fbdee66a25a59e168eca6ba0e75d16cd25e4d367d00acb37bd5ab"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "f6aa23ce4bc1bc04673061ad871fbd31edb0b39a474a5128cc59df1c974e4e9c"
+          },
+          "write_scope": {
+            "chars": 67,
+            "est_tokens": 16,
+            "sha256": "37b66b2c95c5dfbd57a162e08b014fb7d20cd3e8ee27b06b069a71539ff94aff"
+          },
+          "read_scope": {
+            "chars": 293,
+            "est_tokens": 73,
+            "sha256": "0b57eacf76b311e37ecb106266de3cd2ebf10efa59e002a1671d91c83e763184"
+          },
+          "constraints": {
+            "chars": 173,
+            "est_tokens": 43,
+            "sha256": "0213aa991b0339b2ab9a6b96c91e966a98f2387a3781ca0053bb23f75e058c1c"
+          },
+          "relevant_tests": {
+            "chars": 800,
+            "est_tokens": 200,
+            "sha256": "0b29decf5eb8b5dc6cc1994ab7adc3199db2e7ef5718a8370c193d93a207353c"
+          },
+          "symbols": {
+            "chars": 275,
+            "est_tokens": 68,
+            "sha256": "a2720eb529df76752e68da5fe9976c935aa797d463e6b72c761f15d1bced9e06"
+          },
+          "gotchas": {
+            "chars": 1146,
+            "est_tokens": 286,
+            "sha256": "102828bd99953235cf0101cadecbd43be824b0737811b523fec937e42bdf245f"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "522e639f0964",
+        "version": "522e639f0964",
+        "candidate_known": true,
+        "base": "f914a1b49df1",
+        "sources": "pool.toml@28baab364e77 gotchas@7bacc0015a0e memory@notes over cap by 84 chars: acceptance kept whole routed=shadow",
+        "policy_version": "28baab364e77",
+        "gotchas": "7bacc0015a0e",
+        "candidate_tokens": 2267,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 6255,
+        "routed_reduction_ratio": 0.9002590673575129,
+        "routed_hidden": 11,
+        "routed_ambiguous": 15,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4c11284ef662",
+          "3712a2732e98",
+          "2abec09b2d77",
+          "046287819887",
+          "bb99d02a0b43",
+          "036a97111f04",
+          "504365aa02ad",
+          "65c4d2b5db00",
+          "9d078ea9fe66",
+          "55d0ebe04a88",
+          "5b872ee10528",
+          "d500754708e5",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "4e027485077a",
+          "88fe62538f7f",
+          "d6fcb3fcde4d",
+          "68bac07ffdc6",
+          "2a9ae8717df5",
+          "515812d59d58",
+          "2588cb5940c5",
+          "d3d6c43ffeae",
+          "b9c79375f517",
+          "47eb4629d834",
+          "0032fc790147",
+          "f94905d843e0",
+          "68ecb5c1910c",
+          "e2fb302fbb71",
+          "a5ad51434325",
+          "ed3829f449f7",
+          "d68a11147a0e",
+          "d1ed6e2a5413",
+          "479b0d7e21cd",
+          "a399dd2f44b0",
+          "7866df198e16",
+          "29a297a659d5",
+          "093989ad5244",
+          "d0abb517f99a",
+          "6964c7fa3d61",
+          "7d85f06f030d",
+          "46d4f28f792d",
+          "a9b2ee306eec",
+          "6b78986f7d9a",
+          "2196e8295119",
+          "370160bb9184",
+          "c4a694cbf8bf",
+          "8bef670768a3",
+          "4fe7858da833",
+          "f7bf26a2e2b8",
+          "d61d4f280344",
+          "8ba6ae953700",
+          "9140e6d9645f",
+          "05da9ae9562e",
+          "8d75e40a41e7",
+          "d4b640abcfb0",
+          "7a5aec1ca895",
+          "af10f9bad7f2",
+          "bd014052a289"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5763,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790809026.178228,
+      "status": "done",
+      "result": {
+        "summary": "Fixed `PermissionError` handling during timeout cleanup and added regression coverage.\n\nFiles changed: `orchestrator/gate.py`, `tests/test_gate_timeout.py`.\n\nValidation: timeout tests passed three consecutive runs; gate exited 0 with 1,540 tests.\n\nCommit: `98dfec7ca91b6a0349cb229ff6eb855af8eb2532`. Worktree clean.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:terra",
+        "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+        "usage": {
+          "input_tokens": 1456431,
+          "cached_input_tokens": 1385600,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9060,
+          "reasoning_output_tokens": 3515
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790809359.821144,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790809552.284387,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790809552.6954198,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        }
+      }
+    },
+    {
+      "ts": 1790809552.911607,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        },
+        "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+      }
+    },
+    {
+      "ts": 1790809552.9203022,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        },
+        "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532",
+        "gated_at_done": 1790809552.9201212
+      }
+    },
+    {
+      "ts": 1790809788.951249,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790809791.10546,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        },
+        "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532",
+        "gated_at_done": 1790809552.9201212,
+        "merged_at": 1790809791.105247,
+        "merged_at_lease": 1790810691.105247
+      }
+    },
+    {
+      "ts": 1790809979.1995242,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "sha": "3d2897fed69e5af8f119984db94ae56e1506c363",
+      "merged_at": 1790809979.198656,
+      "changed_files": [
+        "orchestrator/gate.py",
+        "tests/test_gate_timeout.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        },
+        "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532",
+        "gated_at_done": 1790809552.9201212,
+        "merged_at": 1790809791.105247,
+        "merged_at_lease": 1790810691.105247
+      }
+    },
+    {
+      "ts": 1790809980.3178618,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        },
+        "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532",
+        "gated_at_done": 1790809552.9201212,
+        "merged_at": 1790809791.105247,
+        "merged_at_lease": 1790810691.105247,
+        "accepted_at": 1790809980.317256
+      }
+    },
+    {
+      "ts": 1790809980.3208761,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1420 3d2897fed69e5af8f119984db94ae56e1506c363",
+      "hold_reason": null
+    },
+    {
+      "ts": 1790810019.599189,
+      "pipeline": {
+        "first_ready_at": 1790807271.5268831,
+        "dispatched_at": 1790808686.029799,
+        "dispatched_at_lease": 1790809586.029799,
+        "resume": {
+          "mode": "resume",
+          "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+          "parent": "T-1407"
+        },
+        "dispatched_at_done": 1790808687.8588538,
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1790809552.28423,
+        "gated_at_lease": 1790810452.28423,
+        "first_green_at": 1790809552.283808,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1407",
+          "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+          "moved_count": 11,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "orchestrator/bench.py",
+            "orchestrator/bus.py",
+            "orchestrator/failures.py",
+            "orchestrator/machine.py",
+            "tests/test_bus.py",
+            "tests/test_daemon.py",
+            "tests/test_failures.py",
+            "tests/test_machine.py",
+            "tests/test_pool.py",
+            "tests/test_scorecard.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790809552.694981,
+          "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+        },
+        "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532",
+        "gated_at_done": 1790809552.9201212,
+        "merged_at": 1790809791.105247,
+        "merged_at_lease": 1790810691.105247,
+        "accepted_at": 1790809980.317256,
+        "merged_at_done": 1790810019.599017
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790807271.5268831,
+    "dispatched_at": 1790808686.029799,
+    "dispatched_at_lease": 1790809586.029799,
+    "resume": {
+      "mode": "resume",
+      "thread": "01a0f451-bd1c-7580-acc2-504fceb7c5b5",
+      "parent": "T-1407"
+    },
+    "dispatched_at_done": 1790808687.8588538,
+    "skills_used": [],
+    "gate_attempts": 1,
+    "gated_at": 1790809552.28423,
+    "gated_at_lease": 1790810452.28423,
+    "first_green_at": 1790809552.283808,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1407",
+      "goal_head": "5483967308a346aba599ff2b7e2c5c372cb061c9",
+      "moved_count": 11,
+      "stale_paths": [
+        ".orchestrator/pool.toml",
+        "orchestrator/bench.py",
+        "orchestrator/bus.py",
+        "orchestrator/failures.py",
+        "orchestrator/machine.py",
+        "tests/test_bus.py",
+        "tests/test_daemon.py",
+        "tests/test_failures.py",
+        "tests/test_machine.py",
+        "tests/test_pool.py",
+        "tests/test_scorecard.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "severity": "medium",
+      "severity_reasons": [
+        "read_scope",
+        "imported_by_write_scope"
+      ],
+      "checked_at": 1790809552.694981,
+      "head": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532"
+    },
+    "reviewed_sha": "98dfec7ca91b6a0349cb229ff6eb855af8eb2532",
+    "gated_at_done": 1790809552.9201212,
+    "merged_at": 1790809791.105247,
+    "merged_at_lease": 1790810691.105247,
+    "accepted_at": 1790809980.317256,
+    "merged_at_done": 1790810019.599017
+  },
+  "branch": "task/T-1407",
+  "packet_meta": {
+    "chars": 4884,
+    "est_tokens": 1221,
+    "presented_tokens": 1221,
+    "sections": {
+      "_preamble": {
+        "chars": 162,
+        "est_tokens": 40,
+        "sha256": "8bfff479c4fb688e1f22a94483376ad10b0bb35cd4ddbd62303d02544348c8a6"
+      },
+      "objective": {
+        "chars": 1345,
+        "est_tokens": 336,
+        "sha256": "145b04e8ea8a98df984691298a1420473eb083185e93397c2debb5eea6d9f020"
+      },
+      "acceptance": {
+        "chars": 390,
+        "est_tokens": 97,
+        "sha256": "beb81148aa2fbdee66a25a59e168eca6ba0e75d16cd25e4d367d00acb37bd5ab"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "f6aa23ce4bc1bc04673061ad871fbd31edb0b39a474a5128cc59df1c974e4e9c"
+      },
+      "write_scope": {
+        "chars": 67,
+        "est_tokens": 16,
+        "sha256": "37b66b2c95c5dfbd57a162e08b014fb7d20cd3e8ee27b06b069a71539ff94aff"
+      },
+      "read_scope": {
+        "chars": 293,
+        "est_tokens": 73,
+        "sha256": "0b57eacf76b311e37ecb106266de3cd2ebf10efa59e002a1671d91c83e763184"
+      },
+      "constraints": {
+        "chars": 173,
+        "est_tokens": 43,
+        "sha256": "0213aa991b0339b2ab9a6b96c91e966a98f2387a3781ca0053bb23f75e058c1c"
+      },
+      "relevant_tests": {
+        "chars": 800,
+        "est_tokens": 200,
+        "sha256": "0b29decf5eb8b5dc6cc1994ab7adc3199db2e7ef5718a8370c193d93a207353c"
+      },
+      "symbols": {
+        "chars": 275,
+        "est_tokens": 68,
+        "sha256": "a2720eb529df76752e68da5fe9976c935aa797d463e6b72c761f15d1bced9e06"
+      },
+      "gotchas": {
+        "chars": 1146,
+        "est_tokens": 286,
+        "sha256": "102828bd99953235cf0101cadecbd43be824b0737811b523fec937e42bdf245f"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "522e639f0964",
+    "version": "522e639f0964",
+    "candidate_known": true,
+    "base": "f914a1b49df1",
+    "sources": "pool.toml@28baab364e77 gotchas@7bacc0015a0e memory@notes over cap by 84 chars: acceptance kept whole routed=shadow",
+    "policy_version": "28baab364e77",
+    "gotchas": "7bacc0015a0e",
+    "candidate_tokens": 2267,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 6255,
+    "routed_reduction_ratio": 0.9002590673575129,
+    "routed_hidden": 11,
+    "routed_ambiguous": 15,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "4c11284ef662",
+      "3712a2732e98",
+      "2abec09b2d77",
+      "046287819887",
+      "bb99d02a0b43",
+      "036a97111f04",
+      "504365aa02ad",
+      "65c4d2b5db00",
+      "9d078ea9fe66",
+      "55d0ebe04a88",
+      "5b872ee10528",
+      "d500754708e5",
+      "d5139aa32546",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "4e027485077a",
+      "88fe62538f7f",
+      "d6fcb3fcde4d",
+      "68bac07ffdc6",
+      "2a9ae8717df5",
+      "515812d59d58",
+      "2588cb5940c5",
+      "d3d6c43ffeae",
+      "b9c79375f517",
+      "47eb4629d834",
+      "0032fc790147",
+      "f94905d843e0",
+      "68ecb5c1910c",
+      "e2fb302fbb71",
+      "a5ad51434325",
+      "ed3829f449f7",
+      "d68a11147a0e",
+      "d1ed6e2a5413",
+      "479b0d7e21cd",
+      "a399dd2f44b0",
+      "7866df198e16",
+      "29a297a659d5",
+      "093989ad5244",
+      "d0abb517f99a",
+      "6964c7fa3d61",
+      "7d85f06f030d",
+      "46d4f28f792d",
+      "a9b2ee306eec",
+      "6b78986f7d9a",
+      "2196e8295119",
+      "370160bb9184",
+      "c4a694cbf8bf",
+      "8bef670768a3",
+      "4fe7858da833",
+      "f7bf26a2e2b8",
+      "d61d4f280344",
+      "8ba6ae953700",
+      "9140e6d9645f",
+      "05da9ae9562e",
+      "8d75e40a41e7",
+      "d4b640abcfb0",
+      "7a5aec1ca895",
+      "af10f9bad7f2",
+      "bd014052a289"
+    ],
+    "prefix_sha": "ca8679e33dc1",
+    "prefix_chars": 725,
+    "suffix_chars": 5763,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "review_verdict": "approve",
+  "merged_into": "goal/T-1403",
+  "sha": "3d2897fed69e5af8f119984db94ae56e1506c363",
+  "merged_at": 1790809979.198656,
+  "changed_files": [
+    "orchestrator/gate.py",
+    "tests/test_gate_timeout.py"
+  ],
+  "merged_via": "fix round T-1420 3d2897fed69e5af8f119984db94ae56e1506c363",
+  "hold_reason": null
+}

@@ -1,0 +1,224 @@
+{
+  "id": "T-1356",
+  "created_at": 1790194311.8250601,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S2a: executor.start dispatches a provider=\"claude\" row to run_worker with the row's model",
+  "spec": "Goal T-1334 (S1 T-1352 merged: pool.executor_rows, pool.executor_identity, Pool.executor_identity, Pool.is_claude_executor). Replaces the dispatch half of T-1353 after its spec review T-1355 (output unparsed; findings read by the Planner). Today executor.start (executor.py:487) sends every non-codex pick to _exhausted(), and spawn.run_worker resolves model = cfg[\"models\"][t[\"tier\"]] first (spawn.py:1538), which raises KeyError for a row id.\n\n1. orchestrator/executor.py start(), after routing picks ex: if ex.provider == \"claude\": same budget path as Codex first: pool.reserve(task_id, ex.id, \"execute\", t) None -> identical budget handling as executor.py:492-497 (pipeline hold_note \"budget\", status queued, return {\"status\": \"budget\"}). acct = pool.pick(\"execute\"); None -> bus.update(status=\"held\", hold_reason=\"no account with headroom\"), return {\"status\": \"held\"}. Else bus.update(task_id, executor=ex.id, tier=ex.id) (tier = row id is the existing Codex convention, executor.py bus.update(..., executor=ex.id, tier=ex.id)); ex.roll_day(); ex.day_tasks += 1; pool.save(); start spawn.run_worker(task_id, account_id=acct.id) in a thread registered in _fallback_threads like _exhausted() (executor.py:557-569). Set handed_off = True only after thread.start() returns; if thread creation or start raises, release via the existing finally path and bus.update(status=\"held\", hold_reason=\"claude dispatch failed: <exc>\"). Return {\"status\": \"dispatched\", \"executor\": ex.id, \"provider\": \"claude\"}. ex None still calls _exhausted(). Any other provider (not codex, not claude) -> held, hold_reason \"unknown executor provider <p>\".\n2. orchestrator/spawn.py run_worker (spawn.py:1538): resolve the model before any cfg[\"models\"] lookup: ident = pool.executor_identity(t.get(\"executor\")); if ident[\"provider\"] == \"claude\" and t.get(\"executor\") is a row id in pool.executors: row disabled -> held \"executor row <id> disabled\", else model = ident[\"model\"]; otherwise model = cfg[\"models\"][t[\"tier\"]] as today. Execute branch (spawn.py:1564): leave t[\"executor\"] unchanged when it is a claude row id; set f\"claude:{t['tier']}\" only in the legacy fallback case (executor empty or already claude:<tier>). Prompt line \"You are a Claude fallback executor (Codex is unavailable)\" only for legacy; row-routed gets \"You are the routed executor for this task.\" executed_by (spawn.py:1657) uses t[\"executor\"]. The claim stays \"claude:<acct>\" (spawn.py:1603), so running_claude_workers keeps counting it.\n3. Fix rounds: executor.resume_plan returns fresh for non-codex parents (executor.py:279); unchanged, covered by a test.\nTests (unittest.TestCase methods; join the background thread deterministically, e.g. patch threading.Thread or join executor.fallback_threads()): positive dispatch, budget refusal, no headroom, raising thread start, row model in run_worker, disabled row, legacy tier unchanged, fresh fix round. No pool.toml edit, no new dependencies. Additive; git revert restores Codex-only dispatch.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_executor.py::test_start_runs_claude_row_with_its_model",
+    "tests/test_executor.py::test_claude_row_budget_refusal_matches_codex_path",
+    "tests/test_executor.py::test_claude_row_holds_without_headroom",
+    "tests/test_executor.py::test_claude_row_thread_start_failure_holds",
+    "tests/test_executor.py::test_fix_round_for_claude_row_is_fresh",
+    "tests/test_spawn.py::test_run_worker_uses_row_model",
+    "tests/test_spawn.py::test_run_worker_holds_disabled_row",
+    "tests/test_spawn.py::test_run_worker_legacy_tier_unchanged",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "tests/test_executor.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [
+    "T-1352"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3000,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1353",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/bus.py",
+      "orchestrator/worker_control.py",
+      "orchestrator/daemon.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Uses S1: pool.executor_identity(field, cfg), Pool.executor_identity(field), Pool.is_claude_executor(field). A claude-row task has executor == tier == row id (same convention as Codex rows) and bus claim 'claude:<account id>'. S2b (capacity) is independent: capacity.py, daemon._codex_available, README."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790194327.421538,
+      "pipeline": {
+        "first_ready_at": 1790194327.4215019
+      }
+    },
+    {
+      "ts": 1790194327.525236,
+      "pipeline": {
+        "first_ready_at": 1790194327.4215019,
+        "spec_review_at": 1790194327.5251882,
+        "spec_review_at_lease": 1790195227.5251882
+      }
+    },
+    {
+      "ts": 1790194327.533149,
+      "pipeline": {
+        "first_ready_at": 1790194327.4215019,
+        "spec_review_at": 1790194327.5251882,
+        "spec_review_at_lease": 1790195227.5251882,
+        "spec_review_at_done": 1790194327.5330932
+      }
+    },
+    {
+      "ts": 1790194382.940456,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Step 1 reserves budget under ex.id (a row id), not an account id, before pool.pick. pool.reserve keys the estimate, the per-account daily-budget check and the recorded account on that id. The row is then keyed to ex.id, so it is never counted against the account that actually runs. run_worker's later pool.reserve(task_id, acct.id, ...) is an idempotent no-op for the same run key, and it returns the ex.id row. The result is a wrong estimate and wrong usage attribution on release, and the account daily cap can be bypassed.",
+          "severity": "high",
+          "line": 492
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "start() sets handed_off=True and hands the reservation to run_worker. The new early return in run_worker for a disabled row, or one whose model cannot be resolved, sits before the try/finally that owns the release, like the existing acct-None return. That reservation is never released and holds budget until the lease expires. start() has also already done day_tasks += 1 by then. Do the disabled check before the handoff, or release explicitly on that path.",
+          "severity": "high",
+          "line": 1538
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Setting tier=ex.id leaks a row id into every reader of t['tier'] outside scope: bus.log_run tier=t['tier'] (spawn.py:1338, 1364, 1376, 1416, 1649), daemon.py:1275 _other_tier(existing[0]['tier']) for review tier selection, scorecard.py:417, and specialist.py:128, which falls back silently to the raw id. The spec does not audit these. _other_tier or model lookups may raise KeyError or pick a wrong reviewer.",
+          "severity": "high",
+          "line": 1275
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The row-routed path does not set fallback='claude' or review_rule, which _exhausted() sets. Review routing for Claude-executed work ('other account, different model') may not fire, or may see a Codex-style task. That risks a model reviewing its own output. The spec must say how review routing identifies a row-routed Claude execution, for example via pool.executor_identity in T-1347's routing, and add a test.",
+          "severity": "med",
+          "line": 557
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The model-resolution change must not override the resume_task branch, which uses recorded['model']. Also, executed_by moves from f'claude:{t[\"tier\"]}' to t['executor'], so any consumer that parses executed_by (scorecard, review) sees a row id where it used to see claude:<tier>. Neither point is verified by an acceptance test.",
+          "severity": "med",
+          "line": 1657
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Failure handling is under-specified. If run_worker raises inside the thread, the thread's finally only removes it from _fallback_threads. Nothing sets a hold or releases the reservation, and the task stays claimed or running. Thread-start failure is covered, but the bus.update(held) is not guarded against its own failure. bus.update(executor, tier) also runs before the thread starts and is not reverted when the dispatch fails, which leaves a stale executor and tier on a held task.",
+          "severity": "med",
+          "line": 557
+        },
+        {
+          "path": "tests/test_executor.py",
+          "issue": "No acceptance test covers the reservation and account accounting, the unknown-provider hold, or the row-not-in-pool.executors legacy path in start(). test_claude_row_budget_refusal_matches_codex_path only compares outcomes, not which account or key was reserved. That is why the double or mis-attributed reservation would go unnoticed.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790194407.51188,
+      "pipeline": {
+        "first_ready_at": 1790194327.4215019,
+        "spec_review_at": 1790194327.5251882,
+        "spec_review_at_lease": 1790195227.5251882,
+        "spec_review_at_done": 1790194327.5330932,
+        "spec_review_held_at": 1790194407.511826
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790194408.760386,
+      "pipeline": {
+        "first_ready_at": 1790194327.4215019,
+        "spec_review_at": 1790194327.5251882,
+        "spec_review_at_lease": 1790195227.5251882,
+        "spec_review_at_done": 1790194327.5330932,
+        "spec_review_held_at": 1790194407.511826,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790194408.868412,
+      "pipeline": {
+        "first_ready_at": 1790194327.4215019,
+        "spec_review_at": 1790194327.5251882,
+        "spec_review_at_lease": 1790195227.5251882,
+        "spec_review_at_done": 1790194327.5330932,
+        "spec_review_held_at": 1790194407.511826,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790194407.51188": true
+        }
+      }
+    },
+    {
+      "ts": 1790194474.7979252,
+      "status": "superseded",
+      "hold_reason": "respec after spec review T-1358: claude rows use id claude:<tier> and the existing fallback path"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790194327.4215019,
+    "spec_review_at": 1790194327.5251882,
+    "spec_review_at_lease": 1790195227.5251882,
+    "spec_review_at_done": 1790194327.5330932,
+    "spec_review_held_at": 1790194407.511826,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790194407.51188": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Step 1 reserves budget under ex.id (a row id), not an account id, before pool.pick. pool.reserve keys the estimate, the per-account daily-budget check and the recorded account on that id. The row is then keyed to ex.id, so it is never counted against the account that actually runs. run_worker's later pool.reserve(task_id, acct.id, ...) is an idempotent no-op for the same run key, and it returns the ex.id row. The result is a wrong estimate and wrong usage attribution on release, and the account daily cap can be bypassed.",
+      "severity": "high",
+      "line": 492
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "start() sets handed_off=True and hands the reservation to run_worker. The new early return in run_worker for a disabled row, or one whose model cannot be resolved, sits before the try/finally that owns the release, like the existing acct-None return. That reservation is never released and holds budget until the lease expires. start() has also already done day_tasks += 1 by then. Do the disabled check before the handoff, or release explicitly on that path.",
+      "severity": "high",
+      "line": 1538
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Setting tier=ex.id leaks a row id into every reader of t['tier'] outside scope: bus.log_run tier=t['tier'] (spawn.py:1338, 1364, 1376, 1416, 1649), daemon.py:1275 _other_tier(existing[0]['tier']) for review tier selection, scorecard.py:417, and specialist.py:128, which falls back silently to the raw id. The spec does not audit these. _other_tier or model lookups may raise KeyError or pick a wrong reviewer.",
+      "severity": "high",
+      "line": 1275
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The row-routed path does not set fallback='claude' or review_rule, which _exhausted() sets. Review routing for Claude-executed work ('other account, different model') may not fire, or may see a Codex-style task. That risks a model reviewing its own output. The spec must say how review routing identifies a row-routed Claude execution, for example via pool.executor_identity in T-1347's routing, and add a test.",
+      "severity": "med",
+      "line": 557
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The model-resolution change must not override the resume_task branch, which uses recorded['model']. Also, executed_by moves from f'claude:{t[\"tier\"]}' to t['executor'], so any consumer that parses executed_by (scorecard, review) sees a row id where it used to see claude:<tier>. Neither point is verified by an acceptance test.",
+      "severity": "med",
+      "line": 1657
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Failure handling is under-specified. If run_worker raises inside the thread, the thread's finally only removes it from _fallback_threads. Nothing sets a hold or releases the reservation, and the task stays claimed or running. Thread-start failure is covered, but the bus.update(held) is not guarded against its own failure. bus.update(executor, tier) also runs before the thread starts and is not reverted when the dispatch fails, which leaves a stale executor and tier on a held task.",
+      "severity": "med",
+      "line": 557
+    },
+    {
+      "path": "tests/test_executor.py",
+      "issue": "No acceptance test covers the reservation and account accounting, the unknown-provider hold, or the row-not-in-pool.executors legacy path in start(). test_claude_row_budget_refusal_matches_codex_path only compares outcomes, not which account or key was reserved. That is why the double or mis-attributed reservation would go unnoticed.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "respec after spec review T-1358: claude rows use id claude:<tier> and the existing fallback path"
+}

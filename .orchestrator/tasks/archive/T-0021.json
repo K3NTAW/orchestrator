@@ -1,0 +1,96 @@
+{
+  "id": "T-0021",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Review B1 (T-0016): [[executors]] table, pick_executor, quota-group cooldowns",
+  "spec": "Adversarial review of the T-0016 diff against its acceptance criteria (skill adversarial-review). Executed by claude:opus on account A via fallback; you must be a different model on the other account. Focus: (1) pick_executor filters: enabled, role, complexity range, cooling, max_parallel, daily budget \u2014 any path that returns a disabled or out-of-range executor? (2) cooldown_executor cools every enabled member of the quota_group, and only that group. (3) pool_state.json round trip: missing \"executors\" key on old state files must not crash; day rollover resets day_tasks. (4) codex_available() semantics preserved for existing callers (executor.start, mcp.status, cli). (5) TOML parses with tomllib; no key typos between pool.toml and the dataclass. (6) tests actually assert the behaviours rather than mirroring the implementation. Return ONLY the review JSON: {\"verdict\":\"approve|request_changes\",\"comments\":[{\"path\":\"\",\"line\":0,\"issue\":\"\",\"severity\":\"low|med|high\"}]}. Output under 3,000 chars.",
+  "inputs": [
+    "T-0016"
+  ],
+  "acceptance": [
+    "verdict approve or request_changes with line-anchored comments",
+    "each high-severity comment names a concrete failing input",
+    "result under 3,000 chars"
+  ],
+  "scope": [
+    ".orchestrator/pool.toml",
+    "orchestrator/pool.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0021",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 213,
+        "issue": "codex_available() now returns True if ANY enabled executor has headroom, probed at a hardcoded complexity=1 rather than the real task complexity, and only checks ex.provider==\"codex\" (true for every row). executor.py:81 is unchanged and always dispatches the actual `codex exec -m <model>` using pool.cfg['codex']['model'] (astra), ignoring which executor pick_executor found. Concrete failure: astra.running=2 (== its max_parallel=2) and astra.day_tasks=40 (== its daily_budget_tasks), while luna/terra/sol sit idle. A complexity=8 task (only astra's 1-10 band covers it) calls codex_available() -> pick_executor('execute',1) matches luna (band 1-6 includes the probe value 1) and returns it, so codex_available() reports True even though astra itself is exhausted and no idle row actually supports complexity 8. executor.py's start() then launches a 3rd concurrent `codex exec -m gpt-6-astra`, busting astra's own max_parallel and daily_budget_tasks caps -- the exact limits [[executors]] exists to enforce. None of the new tests exercise codex_available() with one row exhausted and another free, so this ships uncaught.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 204,
+        "issue": "_sync_legacy_codex folds self.codex.running/day_tasks into the matched executor row with max() only, never assigning down. executor.py builds a fresh Pool() per call (start()/reply() each do `pool = Pool()`) and each call's finally-block save() persists that instance's own in-memory (possibly stale) executors dict. If task A's Pool() and task B's Pool() overlap, whichever saves last can clobber the other's running/day_tasks count with a stale snapshot, and nothing ever recomputes the executor row from scratch to correct it -- so astra's tracked running/day_tasks can drift permanently away from the true self.codex value after a handful of overlapping calls.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789658118.440755,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0021",
+      "claimed_at": 1789658118.440557
+    },
+    {
+      "ts": 1789658118.487078,
+      "pid": 18817,
+      "account": "B"
+    },
+    {
+      "ts": 1789658377.854592,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 213,
+            "issue": "codex_available() now returns True if ANY enabled executor has headroom, probed at a hardcoded complexity=1 rather than the real task complexity, and only checks ex.provider==\"codex\" (true for every row). executor.py:81 is unchanged and always dispatches the actual `codex exec -m <model>` using pool.cfg['codex']['model'] (astra), ignoring which executor pick_executor found. Concrete failure: astra.running=2 (== its max_parallel=2) and astra.day_tasks=40 (== its daily_budget_tasks), while luna/terra/sol sit idle. A complexity=8 task (only astra's 1-10 band covers it) calls codex_available() -> pick_executor('execute',1) matches luna (band 1-6 includes the probe value 1) and returns it, so codex_available() reports True even though astra itself is exhausted and no idle row actually supports complexity 8. executor.py's start() then launches a 3rd concurrent `codex exec -m gpt-6-astra`, busting astra's own max_parallel and daily_budget_tasks caps -- the exact limits [[executors]] exists to enforce. None of the new tests exercise codex_available() with one row exhausted and another free, so this ships uncaught.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 204,
+            "issue": "_sync_legacy_codex folds self.codex.running/day_tasks into the matched executor row with max() only, never assigning down. executor.py builds a fresh Pool() per call (start()/reply() each do `pool = Pool()`) and each call's finally-block save() persists that instance's own in-memory (possibly stale) executors dict. If task A's Pool() and task B's Pool() overlap, whichever saves last can clobber the other's running/day_tasks count with a stale snapshot, and nothing ever recomputes the executor row from scratch to correct it -- so astra's tracked running/day_tasks can drift permanently away from the true self.codex value after a handful of overlapping calls.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789658118.440557,
+  "pid": 18817,
+  "account": "B"
+}

@@ -1,0 +1,176 @@
+{
+  "id": "T-0513",
+  "created_at": 1789946197.0916,
+  "parent": "T-0503",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S1: orchestrator/interference.py \u2014 deterministic none/soft/hard classification of task pairs from scope and dependencies, select_wave over ready tasks",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P1 (deterministic signals first; hard conflicts defined conservatively; soft conflicts lower preference without blocking) and P3 (select the best mutually compatible set). Base goal/T-0503. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nFacts: tasks are dicts with id, parent, depends_on, scope (list of entries: literal paths like orchestrator/daemon.py, file globs like orchestrator/*.py, directory prefixes like tests/ or .orchestrator/memory/), status, merged_into, complexity. A pure module, no bus or git I/O.\n1. classify(t1, t2, tasks=None, graph=None, rules=None) -> {\"level\": \"none\"|\"soft\"|\"hard\", \"reasons\": [str], \"score\": float}; symmetric; a task against itself is none. Hard reasons: \"dependency:<id>\" when either lists the other in depends_on, transitively through the tasks map when given; \"same_file:<path>\" for a literal path present in both scopes; \"glob_covers:<glob>-><path>\" when a file glob (contains * or ?) in one scope fnmatches a literal in the other; \"same_glob:<glob>\" when both list an identical file glob. Soft reasons: \"dir_contains:<prefix>-><entry>\" when a directory prefix (ends with / or **) in one scope contains an entry of the other or both list the same prefix; \"same_dir:<dir>\" for two literals with equal dirname; \"test_adjacent:<module>\" when one lists tests/test_<m>.py (or a glob covering it) and the other lists orchestrator/<m>.py; \"sibling_globs:<dir>\" for two different file globs in one directory. Score: hard 1.0; soft 0.25 per reason capped 0.9; none 0. rules dict overrides the defaults (which reasons are hard, soft_conflict_policy defer|allow); export DEFAULT_RULES.\n2. graph_signal(t1, t2, graph) -> list of reasons; this task ships it returning [] (a later task fills it); classify appends its reasons when graph is not None.\n3. pairwise(tasks_list, **kw) -> [{\"a\",\"b\",\"level\",\"reasons\"}] for unordered pairs with level != none.\n4. select_wave(ready, running, tasks, capacity, order=None, graph=None, rules=None) -> {\"wave\": [ids], \"deferred\": [{\"task\", \"reason\"}]}: iterate candidates in `order` (default the ready list); a candidate with a hard conflict against any running or already selected task is deferred \"hard:<other>\"; with soft_conflict_policy defer, a candidate with a soft conflict is queued behind all conflict-free candidates and admitted only while capacity remains, else deferred \"soft:<other>\"; capacity exhausted -> \"capacity\". Never returns a task not in ready; never exceeds capacity; deterministic for equal inputs.\n5. Tests tests/test_interference.py: test_same_file_is_hard, test_glob_covering_literal_is_hard, test_dependency_transitive_is_hard, test_directory_prefix_is_soft, test_test_adjacency_is_soft, test_disjoint_scopes_are_none, test_select_wave_defers_hard_and_orders_soft_last, test_select_wave_respects_capacity_and_is_deterministic. Existing tests stay green.",
+  "inputs": [
+    "T-0506"
+  ],
+  "acceptance": [
+    "interference.classify returns hard for same literal file, glob covering a literal, identical glob and direct or transitive dependency; soft for directory containment, same directory, test adjacency and sibling globs; none for disjoint scopes; symmetric and deterministic",
+    "interference.select_wave never co-selects hard-conflicting tasks, orders soft-conflicting candidates after conflict-free ones under the defer policy, never exceeds capacity and reports a reason for every deferred ready task",
+    "graph_signal(t1, t2, graph) exists, returns [] and classify appends its reasons when a graph is given",
+    "tests test_same_file_is_hard, test_glob_covering_literal_is_hard, test_dependency_transitive_is_hard, test_directory_prefix_is_soft, test_test_adjacency_is_soft, test_disjoint_scopes_are_none, test_select_wave_defers_hard_and_orders_soft_last, test_select_wave_respects_capacity_and_is_deterministic pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/interference.py",
+    "tests/test_interference.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0513",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/interference.py",
+        "line": 118,
+        "issue": "The loop `for glob, path in ((*((glob, path) for glob in globs_a for path in literals_b),), *((glob, path) for glob in globs_b for path in literals_a)):` is malformed: the first generator is wrapped as `(*gen,)` and placed as a single non-starred element of the outer tuple, instead of being unpacked with `*` alongside the second generator. This means the outer tuple always has exactly one element containing whatever the first generator produced (0, 1, or N pairs nested inside), so unpacking `glob, path` from it fails unless that nested element happens to contain exactly 2 items. Verified directly: classify(task('a','orchestrator/daemon.py'), task('b','orchestrator/daemon.py')) raises 'ValueError: not enough values to unpack (expected 2, got 0)', and every other combination I tried (same_file, glob_covers, dependency, test_adjacent, disjoint, same_dir) also raises. The function is non-functional for every input, contradicting the packet's claim of a green gate for test_same_file_is_hard, test_glob_covering_literal_is_hard, test_dependency_transitive_is_hard, test_test_adjacency_is_soft, and test_disjoint_scopes_are_none.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/interference.py",
+        "line": 125,
+        "issue": "Same malformed pattern repeated for the dir_contains loop: `for prefix, entries in ((*((entry, second_scope) for entry in dirs_a),), *((entry, first_scope) for entry in dirs_b)):` has the identical bug (first generator wrapped as a single tuple element instead of unpacked with `*`). Verified directly: classify(task('a','tests/'), task('b','tests/test_bus.py')) raises ValueError instead of returning the required soft/dir_contains result, so test_directory_prefix_is_soft cannot pass either.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "b6f089eeb412",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789946197.0924952,
+      "reviewed_sha": "083a0844444c818c1920e0bf6a64c0d587fca9e8"
+    },
+    {
+      "ts": 1789946199.702323,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0513",
+      "claimed_at": 1789946199.702023
+    },
+    {
+      "ts": 1789946199.703351,
+      "account": "B"
+    },
+    {
+      "ts": 1789946200.0096278,
+      "pid": 41782,
+      "account": "B"
+    },
+    {
+      "ts": 1789946350.592853,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/interference.py",
+            "line": 118,
+            "issue": "The loop `for glob, path in ((*((glob, path) for glob in globs_a for path in literals_b),), *((glob, path) for glob in globs_b for path in literals_a)):` is malformed: the first generator is wrapped as `(*gen,)` and placed as a single non-starred element of the outer tuple, instead of being unpacked with `*` alongside the second generator. This means the outer tuple always has exactly one element containing whatever the first generator produced (0, 1, or N pairs nested inside), so unpacking `glob, path` from it fails unless that nested element happens to contain exactly 2 items. Verified directly: classify(task('a','orchestrator/daemon.py'), task('b','orchestrator/daemon.py')) raises 'ValueError: not enough values to unpack (expected 2, got 0)', and every other combination I tried (same_file, glob_covers, dependency, test_adjacent, disjoint, same_dir) also raises. The function is non-functional for every input, contradicting the packet's claim of a green gate for test_same_file_is_hard, test_glob_covering_literal_is_hard, test_dependency_transitive_is_hard, test_test_adjacency_is_soft, and test_disjoint_scopes_are_none.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/interference.py",
+            "line": 125,
+            "issue": "Same malformed pattern repeated for the dir_contains loop: `for prefix, entries in ((*((entry, second_scope) for entry in dirs_a),), *((entry, first_scope) for entry in dirs_b)):` has the identical bug (first generator wrapped as a single tuple element instead of unpacked with `*`). Verified directly: classify(task('a','tests/'), task('b','tests/test_bus.py')) raises ValueError instead of returning the required soft/dir_contains result, so test_directory_prefix_is_soft cannot pass either.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "b6f089eeb412",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789946350.594208,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789946350.618196,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 2,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": null,
+        "packet_version": "b6f089eeb412",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 2,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": null,
+      "packet_version": "b6f089eeb412",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": null,
+  "claimed_at": 1789946199.702023,
+  "account": "B",
+  "pid": 41782,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 2,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": null,
+    "packet_version": "b6f089eeb412",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 2,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "b6f089eeb412",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

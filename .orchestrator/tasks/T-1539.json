@@ -1,0 +1,667 @@
+{
+  "id": "T-1539",
+  "created_at": 1790927437.744374,
+  "parent": "T-1403",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout (trace): B4b v4 facts: spawn.run_worker data flow (worktree, parent, scope, return value, resume and tool-escalation paths), worker_control lock and registry, contracts.process and fit_result key handling",
+  "spec": "Read-only scout for goal T-1403 wave 2, plan label B4b. Spec review of B4b v3 (T-1534) rejected it because the spec did not name where run_worker gets its inputs or what it returns. Answer the questions below from the code on branch goal/T-1403 (`git show goal/T-1403:orchestrator/spawn.py` etc., or the checkout if it is on that branch; say which). Cite every fact as path:symbol with line number. Provenance repo. No designs beyond what a question asks; edit nothing.\n\nQ1 run_worker data flow. For orchestrator/spawn.py run_worker (role execute): in source order, list the local names available before run_claude is called and where each comes from: the task dict `t` (bus.get before or after claim?), the worktree path (ensure_worktree return value, t['worktree'], bus.claim argument), the goal/parent branch (_base_branch or similar, what it takes), the scope list (safe_scope or similar), tier, epoch, the executor label t['executor'], and `pool`/cfg. State explicitly whether t.get('worktree') is populated on a fresh launch at the point before run_claude, and what the correct expression for the worktree path is at that point. Quote the run_claude call line(s).\n\nQ2 Paths through run_worker. Describe (a) the resume path (resume_task / resume session set): what it skips (ensure_worktree? claim? registry start?) and how the result is handled afterwards; (b) the tool-escalation branch that calls run_claude a second time: what triggers it, whether `r` is replaced, and whether anything between the calls commits or touches git; (c) the failed path: the exact dict run_claude returns on non-JSON output (keys and values, where text[-500:] goes), the worker_registry.finish call it makes (arguments), and the write run_worker then does (function, status, reason, resume_hint keys); (d) the done path: fit_result then contracts.process order and the exact calls with arguments, then the write (function and payload keys); (e) what run_worker returns at its end (`return r`?) and every consumer of that return value (grep callers of run_worker and the wrapper around spawn.py:1700-1800 that returns it; what do they do with status).\n\nQ3 worker_control. Give signatures and line cites for: write_if_current, is_current, the steer_epoch read, cancel (what it does to the registry and epoch), the registry writer functions (worker_registry.start/finish/update or whatever they are called, which statuses they accept, and which events finish('held', ...) emits), and how a registry entry is read (function). State whether bus.locked() is reentrant (RLock? nested bus.post_result/bus.update inside a locked block re-enter it?) with the cited bus.py code. State how the task hold 'cancelled' is written at finish (function and hold_reason text).\n\nQ4 contracts.process and fit_result. Exact signatures (contracts.process(task_id, role, result, cfg=..., session=...)?), what each returns, and whether either drops keys it does not know (does process rebuild the dict from a whitelist or mutate/copy the input?). Specifically: would 'commit', 'derived_from', 'executed_by', 'review' survive a round trip through fit_result then contracts.process? Also what decision_log row contracts.process writes (name/keys) and whether writing it without a following post_result breaks anything (readers).\n\nQ5 bus.log_run and bus.post_result. Signatures; which keyword args log_run accepts (outcome, executor, derived_from?); what post_result does with MAX_RESULT_CHARS; whether post_result sets status and clears hold_reason.\n\nQ6 Tests. In tests/test_spawn.py and tests/test_worker_control.py: how existing execute tests build the task and patch run_claude / ensure_worktree / the registry (fixture names, patch targets), so a spec can name the same seams.\n\nPost via bus_post_result: summary (<= 1500 tokens), findings list of {q, fact, path, symbol, line, confidence}, provenance 'repo'. Any confidence < 0.7 must say what is uncertain.",
+  "inputs": [],
+  "acceptance": [
+    "Result posted via bus_post_result with status done, provenance repo, every Q1-Q6 answered with path:symbol:line citations from branch goal/T-1403",
+    "Q1 states whether t.get('worktree') is populated before run_claude on a fresh launch and gives the correct expression for the worktree path at that point",
+    "Q2(e) names what run_worker returns and every consumer of that value",
+    "Q4 states whether commit, derived_from, executed_by and review survive fit_result then contracts.process",
+    "Q3 states whether bus.locked() is reentrant with the cited code"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/worker_control.py",
+    "orchestrator/worker_registry.py",
+    "orchestrator/contracts.py",
+    "orchestrator/bus.py",
+    "orchestrator/gitutil.py",
+    "tests/test_spawn.py",
+    "tests/test_worker_control.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 40,
+    "timeout_s": 1500,
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B4b-scout"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1539",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Q1: run_worker takes t=dict(bus.get(task_id)) before the claim and never refreshes it. bus.claim(task_id, f'claude:{acct.id}', str(ensure_worktree(task_id))) discards its return value. No scope, parent-branch or worktree locals exist before run_claude. The base branch comes from base_for(bus.get(task_id)) inside ensure_worktree. Locals before the call: pool, t, role, epoch (t['_launch_epoch']), acct, model=pool.cfg['models'][t['tier']], prompt, allowlist, disclosure_mode, budget, timeout. pool.cfg is the cfg, and t['executor'] is set to f'claude:{tier}' for execute.",
+        "evidence": [
+          "orchestrator/spawn.py:1513-1611",
+          "orchestrator/spawn.py:1603",
+          "orchestrator/spawn.py:275-330"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q1: t.get('worktree') is None before run_claude on a fresh launch. create_task sets worktree None and claim writes only the stored task. The correct expression is Path(ensure_worktree(task_id)), which is idempotent and equals ROOT/'wt'/task_id, or bind wt at line 1603. run_claude falls back the same way at 1299. Call lines: 1611 `first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)` and 1633 `r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS[\"scout\"]), budget_left, timeout_left)`.",
+        "evidence": [
+          "orchestrator/bus.py:137",
+          "orchestrator/bus.py:208",
+          "orchestrator/spawn.py:1299",
+          "orchestrator/spawn.py:1611",
+          "orchestrator/spawn.py:1633"
+        ],
+        "confidence": 0.93,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q2a: the resume path sets prompt=resume_prompt, t['_resume_session'], and model and tools from worker_registry.get. It skips packet/render, pool.reserve, bus.claim and ensure_worktree. run_claude still upserts the registry as 'starting' and passes --resume. The result goes through the same status branches. Entry is resume_worker, called from worker_control.steer.",
+        "evidence": [
+          "orchestrator/spawn.py:1539-1541",
+          "orchestrator/spawn.py:1323",
+          "orchestrator/spawn.py:1755",
+          "orchestrator/worker_control.py:283"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q2b: escalation needs disclosure_mode=='active', a _hidden_tool_request tool_id, and no pipeline.tool_escalation_used. If budget or timeout is under 10%, it writes held and sets r={'status':'held',...}. Otherwise it sets tool_escalation_used, writes status running and result None, then replaces r with a second run_claude. The first result is kept only for _combined_usage. Nothing touches git between the two calls.",
+        "evidence": [
+          "orchestrator/spawn.py:1614-1635"
+        ],
+        "confidence": 0.92,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q2c: on non-JSON output run_claude calls worker_registry.finish(id,'failed','non_json',epoch=epoch) and returns {'status':'failed','reason':f'non-JSON output (rc={p.returncode}): {text[-500:]}'}, with text=stdout+stderr and only those two keys. run_worker's else branch then calls write_if_current(task_id, epoch, bus.update, task_id, status='failed', reason=r['reason']). resume_hint={'partial_output': result[:2000]} is added only when r['output']['result'] is a str, so not for non-JSON.",
+        "evidence": [
+          "orchestrator/spawn.py:1381-1383",
+          "orchestrator/spawn.py:1711-1716"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q2d: for execute, run_worker calls posted=fit_result({'summary': r['output'].get('result','')[:3000], 'executed_by': f\"claude:{t['tier']}\", 'review': ...}), then posted=contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session), then write_if_current(task_id, epoch, bus.post_result, task_id, posted, 'done'). repair_session=resume_output if session_id else None. It sets no commit or derived_from.",
+        "evidence": [
+          "orchestrator/spawn.py:1655-1660"
+        ],
+        "confidence": 0.96,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q2e: run_worker ends with `return r` after finally release_if_current. r is the last run_claude dict ({'status': done|failed|held|superseded,'output'?,'reason'?}) or None if it raised. Early returns are dicts (refused, held, budget, superseded). Consumers: daemon.py:1011,1085,1305,1671,1690 and mcp.py:61 via threads, value discarded; executor.py:643-665 run_fallback thread, discarded; spawn.resume_worker (1755-1759) returns it to worker_control.py:283 (steer). No caller branches on status; status is persisted inside run_worker.",
+        "evidence": [
+          "orchestrator/spawn.py:1723",
+          "orchestrator/daemon.py:1011",
+          "orchestrator/executor.py:643",
+          "orchestrator/worker_control.py:283"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q3: write_if_current(task_id, epoch, method, *args, **fields) holds bus.locked(), calls method only if is_current, else returns None. is_current(task_id, epoch) checks epoch >= pipeline.steer_epoch (default 1), read at line 204 and written by steer at 272. launch_epoch is at 193 and release_if_current(task_id, epoch, pool, usage=None) at 207. cancel(task_id, reason, *, source, grace_s, sleep, alive, signal_fn) emits registry event 'cancel_requested' (status cancelling), terminates the pid, then under lock does bus.update(status='held', hold_reason='cancelled', pid=None, result=bounded partial), a pool release, and worker_registry.finish(id,'cancelled'). It does not change the epoch.",
+        "evidence": [
+          "orchestrator/worker_control.py:137-171",
+          "orchestrator/worker_control.py:193-218",
+          "orchestrator/worker_control.py:272"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "bus_post_result errored twice (no message returned), possibly from the 6000-char cap, so this JSON is returned directly instead of posted."
+    ],
+    "suggested_next": [
+      "Spec should name wt=ensure_worktree(task_id), base via base_for(bus.get(task_id)), scope from t['scope'], and the test seams spawn.run_claude, spawn.ensure_worktree and P.Pool.pick."
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 10058,
+      "trimmed": {
+        "findings": 6
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790927455.1249971,
+      "packet_meta": {
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13264,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790927455.136489,
+      "packet_meta": {
+        "chars": 12525,
+        "est_tokens": 3131,
+        "presented_tokens": 3131,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "5b86908d45311fad57409a6b17502ca7bfbfebeaeda6a8477d4df472378cc700"
+          },
+          "question": {
+            "chars": 3934,
+            "est_tokens": 983,
+            "sha256": "e1a798f1e5204fe536c53a21c78c978f9ccfa35489fd42b285f1231c7124dd1d"
+          },
+          "expected output": {
+            "chars": 567,
+            "est_tokens": 141,
+            "sha256": "5fcf0b1096c176f5d920aef8f9c4b49b3de79ecc00e2d30bf33bb4f9a33ebbf3"
+          },
+          "scope tree": {
+            "chars": 1725,
+            "est_tokens": 431,
+            "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+          },
+          "memory titles": {
+            "chars": 6094,
+            "est_tokens": 1523,
+            "sha256": "292f3bfd90286eb04011da16764fc152b4df73e246be1038d0735feb15326445"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "08fdde378ca0",
+        "version": "08fdde378ca0",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1539 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13264,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3186,
+        "tool_tokens_minimal": 2186,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "planner/memory",
+          "scout/trace-callers"
+        ],
+        "skill_tokens_selected_l0": 35,
+        "skill_tokens_selected_l2": 481,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790927455.7066739,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1539",
+      "claimed_at": 1790927455.706509
+    },
+    {
+      "ts": 1790927455.708032,
+      "account": "A"
+    },
+    {
+      "ts": 1790927461.550518,
+      "pid": 40438,
+      "account": "A"
+    },
+    {
+      "ts": 1790927588.073659,
+      "packet_meta": {
+        "chars": 12525,
+        "est_tokens": 3131,
+        "presented_tokens": 3131,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "5b86908d45311fad57409a6b17502ca7bfbfebeaeda6a8477d4df472378cc700"
+          },
+          "question": {
+            "chars": 3934,
+            "est_tokens": 983,
+            "sha256": "e1a798f1e5204fe536c53a21c78c978f9ccfa35489fd42b285f1231c7124dd1d"
+          },
+          "expected output": {
+            "chars": 567,
+            "est_tokens": 141,
+            "sha256": "5fcf0b1096c176f5d920aef8f9c4b49b3de79ecc00e2d30bf33bb4f9a33ebbf3"
+          },
+          "scope tree": {
+            "chars": 1725,
+            "est_tokens": 431,
+            "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+          },
+          "memory titles": {
+            "chars": 6094,
+            "est_tokens": 1523,
+            "sha256": "292f3bfd90286eb04011da16764fc152b4df73e246be1038d0735feb15326445"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "08fdde378ca0",
+        "version": "08fdde378ca0",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1539 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13264,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3186,
+        "tool_tokens_minimal": 2186,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "planner/memory",
+          "scout/trace-callers"
+        ],
+        "skill_tokens_selected_l0": 35,
+        "skill_tokens_selected_l2": 481,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "153cff64-cd52-4003-986e-2cc90aee5620"
+      }
+    },
+    {
+      "ts": 1790927588.0964181,
+      "packet_meta": {
+        "chars": 12525,
+        "est_tokens": 3131,
+        "presented_tokens": 3131,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "5b86908d45311fad57409a6b17502ca7bfbfebeaeda6a8477d4df472378cc700"
+          },
+          "question": {
+            "chars": 3934,
+            "est_tokens": 983,
+            "sha256": "e1a798f1e5204fe536c53a21c78c978f9ccfa35489fd42b285f1231c7124dd1d"
+          },
+          "expected output": {
+            "chars": 567,
+            "est_tokens": 141,
+            "sha256": "5fcf0b1096c176f5d920aef8f9c4b49b3de79ecc00e2d30bf33bb4f9a33ebbf3"
+          },
+          "scope tree": {
+            "chars": 1725,
+            "est_tokens": 431,
+            "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+          },
+          "memory titles": {
+            "chars": 6094,
+            "est_tokens": 1523,
+            "sha256": "292f3bfd90286eb04011da16764fc152b4df73e246be1038d0735feb15326445"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "08fdde378ca0",
+        "version": "08fdde378ca0",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1539 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13264,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3186,
+        "tool_tokens_minimal": 2186,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "planner/memory",
+          "scout/trace-callers"
+        ],
+        "skill_tokens_selected_l0": 35,
+        "skill_tokens_selected_l2": 481,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "153cff64-cd52-4003-986e-2cc90aee5620",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790927588.733778,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Q1: run_worker takes t=dict(bus.get(task_id)) before the claim and never refreshes it. bus.claim(task_id, f'claude:{acct.id}', str(ensure_worktree(task_id))) discards its return value. No scope, parent-branch or worktree locals exist before run_claude. The base branch comes from base_for(bus.get(task_id)) inside ensure_worktree. Locals before the call: pool, t, role, epoch (t['_launch_epoch']), acct, model=pool.cfg['models'][t['tier']], prompt, allowlist, disclosure_mode, budget, timeout. pool.cfg is the cfg, and t['executor'] is set to f'claude:{tier}' for execute.",
+            "evidence": [
+              "orchestrator/spawn.py:1513-1611",
+              "orchestrator/spawn.py:1603",
+              "orchestrator/spawn.py:275-330"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q1: t.get('worktree') is None before run_claude on a fresh launch. create_task sets worktree None and claim writes only the stored task. The correct expression is Path(ensure_worktree(task_id)), which is idempotent and equals ROOT/'wt'/task_id, or bind wt at line 1603. run_claude falls back the same way at 1299. Call lines: 1611 `first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)` and 1633 `r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS[\"scout\"]), budget_left, timeout_left)`.",
+            "evidence": [
+              "orchestrator/bus.py:137",
+              "orchestrator/bus.py:208",
+              "orchestrator/spawn.py:1299",
+              "orchestrator/spawn.py:1611",
+              "orchestrator/spawn.py:1633"
+            ],
+            "confidence": 0.93,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q2a: the resume path sets prompt=resume_prompt, t['_resume_session'], and model and tools from worker_registry.get. It skips packet/render, pool.reserve, bus.claim and ensure_worktree. run_claude still upserts the registry as 'starting' and passes --resume. The result goes through the same status branches. Entry is resume_worker, called from worker_control.steer.",
+            "evidence": [
+              "orchestrator/spawn.py:1539-1541",
+              "orchestrator/spawn.py:1323",
+              "orchestrator/spawn.py:1755",
+              "orchestrator/worker_control.py:283"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q2b: escalation needs disclosure_mode=='active', a _hidden_tool_request tool_id, and no pipeline.tool_escalation_used. If budget or timeout is under 10%, it writes held and sets r={'status':'held',...}. Otherwise it sets tool_escalation_used, writes status running and result None, then replaces r with a second run_claude. The first result is kept only for _combined_usage. Nothing touches git between the two calls.",
+            "evidence": [
+              "orchestrator/spawn.py:1614-1635"
+            ],
+            "confidence": 0.92,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q2c: on non-JSON output run_claude calls worker_registry.finish(id,'failed','non_json',epoch=epoch) and returns {'status':'failed','reason':f'non-JSON output (rc={p.returncode}): {text[-500:]}'}, with text=stdout+stderr and only those two keys. run_worker's else branch then calls write_if_current(task_id, epoch, bus.update, task_id, status='failed', reason=r['reason']). resume_hint={'partial_output': result[:2000]} is added only when r['output']['result'] is a str, so not for non-JSON.",
+            "evidence": [
+              "orchestrator/spawn.py:1381-1383",
+              "orchestrator/spawn.py:1711-1716"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q2d: for execute, run_worker calls posted=fit_result({'summary': r['output'].get('result','')[:3000], 'executed_by': f\"claude:{t['tier']}\", 'review': ...}), then posted=contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session), then write_if_current(task_id, epoch, bus.post_result, task_id, posted, 'done'). repair_session=resume_output if session_id else None. It sets no commit or derived_from.",
+            "evidence": [
+              "orchestrator/spawn.py:1655-1660"
+            ],
+            "confidence": 0.96,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q2e: run_worker ends with `return r` after finally release_if_current. r is the last run_claude dict ({'status': done|failed|held|superseded,'output'?,'reason'?}) or None if it raised. Early returns are dicts (refused, held, budget, superseded). Consumers: daemon.py:1011,1085,1305,1671,1690 and mcp.py:61 via threads, value discarded; executor.py:643-665 run_fallback thread, discarded; spawn.resume_worker (1755-1759) returns it to worker_control.py:283 (steer). No caller branches on status; status is persisted inside run_worker.",
+            "evidence": [
+              "orchestrator/spawn.py:1723",
+              "orchestrator/daemon.py:1011",
+              "orchestrator/executor.py:643",
+              "orchestrator/worker_control.py:283"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q3: write_if_current(task_id, epoch, method, *args, **fields) holds bus.locked(), calls method only if is_current, else returns None. is_current(task_id, epoch) checks epoch >= pipeline.steer_epoch (default 1), read at line 204 and written by steer at 272. launch_epoch is at 193 and release_if_current(task_id, epoch, pool, usage=None) at 207. cancel(task_id, reason, *, source, grace_s, sleep, alive, signal_fn) emits registry event 'cancel_requested' (status cancelling), terminates the pid, then under lock does bus.update(status='held', hold_reason='cancelled', pid=None, result=bounded partial), a pool release, and worker_registry.finish(id,'cancelled'). It does not change the epoch.",
+            "evidence": [
+              "orchestrator/worker_control.py:137-171",
+              "orchestrator/worker_control.py:193-218",
+              "orchestrator/worker_control.py:272"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "bus_post_result errored twice (no message returned), possibly from the 6000-char cap, so this JSON is returned directly instead of posted."
+        ],
+        "suggested_next": [
+          "Spec should name wt=ensure_worktree(task_id), base via base_for(bus.get(task_id)), scope from t['scope'], and the test seams spawn.run_claude, spawn.ensure_worktree and P.Pool.pick."
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 10058,
+          "trimmed": {
+            "findings": 6
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "packet_meta": {
+    "chars": 12525,
+    "est_tokens": 3131,
+    "presented_tokens": 3131,
+    "sections": {
+      "_preamble": {
+        "chars": 82,
+        "est_tokens": 20,
+        "sha256": "5b86908d45311fad57409a6b17502ca7bfbfebeaeda6a8477d4df472378cc700"
+      },
+      "question": {
+        "chars": 3934,
+        "est_tokens": 983,
+        "sha256": "e1a798f1e5204fe536c53a21c78c978f9ccfa35489fd42b285f1231c7124dd1d"
+      },
+      "expected output": {
+        "chars": 567,
+        "est_tokens": 141,
+        "sha256": "5fcf0b1096c176f5d920aef8f9c4b49b3de79ecc00e2d30bf33bb4f9a33ebbf3"
+      },
+      "scope tree": {
+        "chars": 1725,
+        "est_tokens": 431,
+        "sha256": "66e0509d79d430627f06f82b72d867a50e7739c9aead23b21464d6ad6371d8c3"
+      },
+      "memory titles": {
+        "chars": 6094,
+        "est_tokens": 1523,
+        "sha256": "292f3bfd90286eb04011da16764fc152b4df73e246be1038d0735feb15326445"
+      },
+      "result contract": {
+        "chars": 123,
+        "est_tokens": 30,
+        "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+      }
+    },
+    "hash": "08fdde378ca0",
+    "version": "08fdde378ca0",
+    "candidate_known": false,
+    "base": "247723642f7a",
+    "sources": "task@T-1539 tree@HEAD memory@notes",
+    "prefix_sha": "a24bf5bb2eee",
+    "prefix_chars": 648,
+    "suffix_chars": 13264,
+    "dynamic_sections": [
+      "question",
+      "expected output",
+      "scope tree",
+      "memory titles",
+      "result contract",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 347,
+    "instruction_tokens_modular": 347,
+    "role": "scout",
+    "tool_tokens_disclosed": 3186,
+    "tool_tokens_minimal": 2186,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "planner/memory",
+      "scout/trace-callers"
+    ],
+    "skill_tokens_selected_l0": 35,
+    "skill_tokens_selected_l2": 481,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "153cff64-cd52-4003-986e-2cc90aee5620",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790927455.706509,
+  "account": "A",
+  "pid": 40438,
+  "pipeline": {
+    "skills_used": []
+  }
+}

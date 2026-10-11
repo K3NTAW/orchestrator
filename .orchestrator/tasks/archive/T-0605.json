@@ -1,0 +1,177 @@
+{
+  "id": "T-0605",
+  "created_at": 1789972637.072268,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R6: orchestrator/scout_evidence.py \u2014 scout objectives, reusable-evidence check before launching a scout, structured finding validation and scout telemetry (AP P7, P8)",
+  "spec": "Why: scouts are spawned by mcp.spawn_scout -> spawn.run_worker with a packet (spawn.py:513-534) that recalls memory titles but nothing checks whether memory, earlier bus scout results or the code graph already answer the question; objectives exist only as free text; results follow the prompt schema {findings:[{claim, evidence, confidence, provenance}], open_questions, ...} with no relevance or unresolved-uncertainty fields and no overlap measurement (AP P7/P8; brief P4). Today two audit scouts cost 2 USD and one failed on budget re-reading files.\nWhat: new pure module orchestrator/scout_evidence.py (MCP wiring and prompt edits are separate tasks).\n- OBJECTIVES = (\"implementation-map\", \"dependency-map\", \"architecture\", \"test-surface\", \"failure-history\", \"security-context\", \"migration-impact\", \"API-consumers\"); normalize_objective(text) -> objective or None (case/dash tolerant).\n- reuse_check(question, *, objective=None, root=STATE, max_age_days=14, min_hits=2, head_sha=None, git=None) -> {\"sufficient\", \"hits\": [{id, title, date, layer, age_days, fresh, reason}], \"reason\", \"objective\"}. Evidence sources via the memory recall module loaded like spawn.memory_recall (layers notes, bus, graph): notes and graph hits are fresh when age_days <= max_age_days; a bus hit (earlier scout result) is fresh only when its task result exists AND (packet_meta.base is unknown OR no path in its scope moved between packet_meta.base and head_sha, using gitutil.moved_paths with the injectable git callable); stale hits never count toward sufficiency, so stale evidence cannot suppress scouting. sufficient = fresh hits >= min_hits.\n- normalize_findings(result) -> list of {\"finding\", \"source\", \"confidence\", \"relevance\", \"unresolved\", \"needs_challenge\"} from a scout result dict in either the prompt schema (claim/evidence/confidence/provenance/open_questions) or the new one; needs_challenge = confidence < 0.7; drops entries without a source; returns [] for malformed input.\n- overlap(findings_a, findings_b) -> {\"jaccard_sources\", \"duplicate_count\"} on normalized source paths (path without line numbers).\n- orthogonal(objectives) -> {\"ok\": bool, \"duplicates\": [...]} for a planned scout set.\n- record_decision(*, question, objective, considered, launched, skipped_reason, hits, task_id=None) -> row appended with bus.log_run(role=\"scout_decision\", ...) including considered, launched, skipped_reason, objective, n_hits; record_use(task_id, used_by) -> bus.log_run(role=\"scout_use\", ...). Tokens come from the scout's own run row.",
+  "inputs": [
+    "T-0574"
+  ],
+  "acceptance": [
+    "tests/test_scout_evidence.py::test_fresh_duplicate_evidence_marks_scout_unnecessary \u2014 two fresh note hits answering the question yield sufficient True and reason names the hits",
+    "tests/test_scout_evidence.py::test_orthogonal_objectives_allowed_and_duplicates_flagged \u2014 orthogonal(['implementation-map','test-surface']) ok True; a repeated objective is listed in duplicates",
+    "tests/test_scout_evidence.py::test_normalize_findings_produces_structured_entries_and_flags_low_confidence \u2014 a prompt-schema result yields finding, source, confidence, relevance, unresolved and needs_challenge True for confidence 0.5",
+    "tests/test_scout_evidence.py::test_stale_bus_evidence_does_not_suppress_scouting \u2014 a bus scout hit whose scope moved since its packet base is fresh False and sufficient stays False with min_hits 1",
+    "tests/test_scout_evidence.py::test_record_decision_logs_considered_and_skipped \u2014 record_decision writes a runs row with role scout_decision carrying considered, launched False, skipped_reason and objective"
+  ],
+  "scope": [
+    "orchestrator/scout_evidence.py",
+    "tests/test_scout_evidence.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0605",
+  "codex_thread": null,
+  "result": {
+    "summary": "Both files implement the packet's five acceptance tests correctly and the gate is already green. Two minor issues found, neither breaks an acceptance criterion or is unsafe (they only make the reuse check more conservative, i.e. more likely to re-scout, never less).",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/scout_evidence.py",
+        "line": 94,
+        "issue": "Spec defines bus-hit freshness solely as 'task result exists AND (base unknown OR no scope path moved)' -- no age criterion for the bus layer. The implementation ANDs the calendar age_days<=max_age_days check into bus freshness too (`fresh = fresh and current`), so a bus hit whose code hasn't moved but is older than max_age_days (default 14d) is wrongly marked stale and can never satisfy sufficiency. This is safe-direction (only causes extra scouting, never suppresses needed scouting) and isn't covered by any acceptance test, but it diverges from the written spec and undercuts the stated token-savings goal for long-lived reusable bus evidence.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/scout_evidence.py",
+        "line": 95,
+        "issue": "`reason = bus_reason if current else bus_reason` is a no-op ternary -- both branches are identical, so `current` is dead in this expression. Harmless (the assigned value is correct either way) but reads like a leftover from an incomplete refactor; likely intended to differ by branch.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "4e49c5be696d",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789972637.073466,
+      "reviewed_sha": "5e0b07d225f8dba8f0c5fff906e14e8a827d8faf"
+    },
+    {
+      "ts": 1789972639.9818408,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0605",
+      "claimed_at": 1789972639.981502
+    },
+    {
+      "ts": 1789972639.98295,
+      "account": "B"
+    },
+    {
+      "ts": 1789972640.479041,
+      "pid": 85847,
+      "account": "B"
+    },
+    {
+      "ts": 1789972783.0861409,
+      "status": "done",
+      "result": {
+        "summary": "Both files implement the packet's five acceptance tests correctly and the gate is already green. Two minor issues found, neither breaks an acceptance criterion or is unsafe (they only make the reuse check more conservative, i.e. more likely to re-scout, never less).",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/scout_evidence.py",
+            "line": 94,
+            "issue": "Spec defines bus-hit freshness solely as 'task result exists AND (base unknown OR no scope path moved)' -- no age criterion for the bus layer. The implementation ANDs the calendar age_days<=max_age_days check into bus freshness too (`fresh = fresh and current`), so a bus hit whose code hasn't moved but is older than max_age_days (default 14d) is wrongly marked stale and can never satisfy sufficiency. This is safe-direction (only causes extra scouting, never suppresses needed scouting) and isn't covered by any acceptance test, but it diverges from the written spec and undercuts the stated token-savings goal for long-lived reusable bus evidence.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/scout_evidence.py",
+            "line": 95,
+            "issue": "`reason = bus_reason if current else bus_reason` is a no-op ternary -- both branches are identical, so `current` is dead in this expression. Harmless (the assigned value is correct either way) but reads like a leftover from an incomplete refactor; likely intended to differ by branch.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "4e49c5be696d",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789972783.0871701,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789972783.119936,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 2,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "5e0b07d225f8dba8f0c5fff906e14e8a827d8faf",
+        "packet_version": "4e49c5be696d",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 2,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "5e0b07d225f8dba8f0c5fff906e14e8a827d8faf",
+      "packet_version": "4e49c5be696d",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "5e0b07d225f8dba8f0c5fff906e14e8a827d8faf",
+  "claimed_at": 1789972639.981502,
+  "account": "B",
+  "pid": 85847,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 2,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "5e0b07d225f8dba8f0c5fff906e14e8a827d8faf",
+    "packet_version": "4e49c5be696d",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 2,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "4e49c5be696d",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

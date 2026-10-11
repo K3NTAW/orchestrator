@@ -1,0 +1,124 @@
+{
+  "id": "T-0033",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "Review B4a (T-0023) with security checklist: Scrapling fetch, RSC chunk parser, bench.json, cli bench, new dependency",
+  "spec": "Adversarial review of the commit(s) on task/T-0023 (your worktree is based on that branch; verify `ls orchestrator/bench.py tests/fixtures` first). Apply skills/review/adversarial-review/references/security-checklist.md because this adds a network fetch and a third-party dependency. Focus: (1) no network access at import time or during tests (grep for Fetcher.get call sites; the fixture path must be used by tests); (2) parse_chunks: regex/JSON-unescape robustness on hostile input (catastrophic backtracking, huge chunks, nested quotes); never raises on a malformed chunk; bounded memory on a 1.4 MB page; (3) fetch(): the 20 h minimum interval is enforced from the file's fetched_at, --force bypasses it, and a fetch failure leaves the previous bench.json intact; (4) bench.json content is treated as data: nothing from the page is ever executed, eval'd, or used as a path or command; unmatched names are truncated; (5) the dependency: pyproject pins a version range, no [fetchers] browser extra, uv.lock consistent; check what scrapling itself pulls in and flag anything surprising; (6) User-Agent identifies the orchestrator if the API allows headers; (7) tests assert behaviour. Run `uv run python -m unittest tests/test_orchestrator.py` and report the result line. Return ONLY {\"verdict\":\"approve|request_changes\",\"comments\":[...]} under 3,000 chars.",
+  "inputs": [
+    "T-0023"
+  ],
+  "acceptance": [
+    "verdict with line-anchored comments",
+    "security checklist applied and any finding cited by checklist item",
+    "test result line reported",
+    "result under 3,000 chars"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "orchestrator/cli.py",
+    "tests/test_orchestrator.py",
+    "tests/fixtures/**",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0033",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/bench.py",
+        "line": 160,
+        "issue": "Fetcher.get() never disables impersonate/stealthy_headers, so every fetch defaults to impersonate=\"chrome\" + stealthy_headers=True (curl_cffi TLS/JA3 fingerprint spoofing, synthetic browser headers, fake Google referer) \u2014 the opposite of the file banner comment (lines 1-3) promising an identified, non-browser request. Contradicts the stated ToS-compliance rationale; is de-facto bot-detection evasion. [checklist #7 deps not used per stated justification]",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/bench.py",
+        "line": 197,
+        "issue": "http_status is a hardcoded literal 200, never read from Response.status. A blocked/rate-limited/CAPTCHA response (403/429/503) would still be recorded as a successful 200 fetch with empty/unmatched models, hiding fetch failures from provenance. [checklist #8 errors must fail closed, not silently report success]",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/bench.py",
+        "line": 132,
+        "issue": "match() requires exact (case-insensitive) equality between hint and name/slug, but the live site appends effort-variant suffixes (e.g. \"GPT-6 Astra (max)\"); DEFAULT_HINTS bare names will not exact-match, so real fetches will likely land almost everything in unmatched_names instead of models. (Branch later fixes this in e29a97e, confirming the gap is real.)",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_orchestrator.py",
+        "line": 0,
+        "issue": "Test result: uv run python -m unittest tests.test_orchestrator -v -> Ran 59 tests, OK (all pass).",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789662394.1062021,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0033",
+      "claimed_at": 1789662394.106061
+    },
+    {
+      "ts": 1789662394.144613,
+      "pid": 46235,
+      "account": "B"
+    },
+    {
+      "ts": 1789662639.158249,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/bench.py",
+            "line": 160,
+            "issue": "Fetcher.get() never disables impersonate/stealthy_headers, so every fetch defaults to impersonate=\"chrome\" + stealthy_headers=True (curl_cffi TLS/JA3 fingerprint spoofing, synthetic browser headers, fake Google referer) \u2014 the opposite of the file banner comment (lines 1-3) promising an identified, non-browser request. Contradicts the stated ToS-compliance rationale; is de-facto bot-detection evasion. [checklist #7 deps not used per stated justification]",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/bench.py",
+            "line": 197,
+            "issue": "http_status is a hardcoded literal 200, never read from Response.status. A blocked/rate-limited/CAPTCHA response (403/429/503) would still be recorded as a successful 200 fetch with empty/unmatched models, hiding fetch failures from provenance. [checklist #8 errors must fail closed, not silently report success]",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/bench.py",
+            "line": 132,
+            "issue": "match() requires exact (case-insensitive) equality between hint and name/slug, but the live site appends effort-variant suffixes (e.g. \"GPT-6 Astra (max)\"); DEFAULT_HINTS bare names will not exact-match, so real fetches will likely land almost everything in unmatched_names instead of models. (Branch later fixes this in e29a97e, confirming the gap is real.)",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_orchestrator.py",
+            "line": 0,
+            "issue": "Test result: uv run python -m unittest tests.test_orchestrator -v -> Ran 59 tests, OK (all pass).",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789662394.106061,
+  "pid": 46235,
+  "account": "B"
+}

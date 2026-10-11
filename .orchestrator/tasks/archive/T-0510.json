@@ -1,0 +1,63 @@
+{
+  "id": "T-0510",
+  "created_at": 1789945702.241322,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S4b: stale-work detection before review \u2014 record when the goal branch moved across a task's surface after its base, optional rebase and re-gate behind [scheduler].stale_rebase, never discarding work",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P12 (cheap deterministic checks; rebase/revalidate before expensive review when stale risk is high; never silently discard work; record stale events) and P14 (record predicted vs actual for scheduler learning). Base goal/T-0503 with S3 merged (daemon has schedlog, [scheduler] cfg loader, waves). Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nFacts: daemon.gate (daemon.py gate()) runs tests-green on a done execute task's worktree and, on green, merge_reviewed/_merge_reviewed_one decides direct merge or _open_reviews; changed_paths(task) (daemon.py:21, gitutil) lists the task's diff paths against its base; merge.merge (merge.py:25-60) rebases onto the goal branch only at merge time, after reviews, and marks conflicts failed with reason rebase_conflict; _resolve_base/_merged_target give the goal branch goal/<parent>.\n1. gitutil.moved_paths(base_ref, target_ref, git=...) -> sorted list of paths changed between the merge-base of the two refs and target_ref (git merge-base, then git diff --name-only); empty on error with the error surfaced to the caller as a second value or exception documented in the docstring.\n2. daemon.stale_check(task) -> {\"base\", \"goal_head\", \"moved_count\", \"stale_paths\", \"risk\"}: goal branch = the task's merge target; moved = moved_paths(task branch, goal branch); surface = literal scope paths plus changed_paths(task); stale_paths = moved entries equal to a surface literal or fnmatching a surface glob; risk none when empty, high when any stale path is also in changed_paths(task) (both sides changed the same file), else low. Called once per task right after its gate turns green and before reviews are opened or a direct merge is attempted; stamps pipeline.stale_check = {...checked_at} and appends runs/sched/stale.jsonl {\"ts\",\"task\",\"goal_id\",\"base\",\"goal_head\",\"moved_count\",\"stale_paths\",\"risk\",\"action\"} with action \"recorded\". A git failure records risk \"unknown\" and never blocks the pipeline.\n3. [scheduler].stale_rebase = false (add to the table in pool.toml with a comment). When true and risk is high: run git rebase <goal branch> inside the task worktree; on conflict abort the rebase, hold the task with hold_reason \"stale_rebase_conflict\" and resume_hint {\"conflicts\": [...]} (the Planner or a fix round resolves it; commits are never discarded), action \"rebase_conflict\"; on success clear the gate stamps so the next tick re-gates the rebased head (tests-green again) before reviews, action \"rebased\", and record pipeline.stale_check.rebased_to = new head. merge.merge's own rebase stays as the final safety.\n4. README Pipeline paragraph: two sentences on stale checks and the stale_rebase switch.\n5. Tests tests/test_gitutil.py (new, using the existing git sandbox helpers from tests/test_merge.py or tests/_harness.py): test_moved_paths_lists_files_changed_on_target_since_merge_base; tests/test_daemon.py: test_stale_check_none_when_goal_unmoved, test_stale_check_low_when_scope_overlaps_moved_paths, test_stale_check_high_when_changed_file_moved, test_stale_check_records_row_and_stamp_before_reviews, test_stale_rebase_conflict_holds_never_discards, test_stale_rebase_success_regates_before_reviews. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "after a green gate and before reviews or a direct merge, every execute task gets pipeline.stale_check and one runs/sched/stale.jsonl row with risk none, low, high or unknown computed from the goal branch's moved paths against the task's scope and changed paths; a git failure yields unknown and never blocks",
+    "with [scheduler].stale_rebase = false (default) the pipeline behaviour is unchanged apart from the record; with true a high-risk task is rebased in its worktree, re-gated before reviews on success, or held with hold_reason stale_rebase_conflict and a conflicts resume_hint on conflict; no commit or branch is ever deleted",
+    "gitutil.moved_paths returns the paths changed on the target since the merge-base with the task branch",
+    "tests test_moved_paths_lists_files_changed_on_target_since_merge_base, test_stale_check_none_when_goal_unmoved, test_stale_check_low_when_scope_overlaps_moved_paths, test_stale_check_high_when_changed_file_moved, test_stale_check_records_row_and_stamp_before_reviews, test_stale_rebase_conflict_holds_never_discards, test_stale_rebase_success_regates_before_reviews pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gitutil.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_daemon.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [
+    "T-0509"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/merge.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/spawn.py",
+      "tests/test_merge.py",
+      "tests/_harness.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "gitutil.moved_paths(base_ref, target_ref) -> [paths]; daemon.stale_check(task) -> {base, goal_head, moved_count, stale_paths, risk}; stale.jsonl row {ts, task, goal_id, base, goal_head, moved_count, stale_paths, risk, action recorded|rebased|rebase_conflict}; pipeline.stale_check mirrors it; [scheduler].stale_rebase default false; hold_reason stale_rebase_conflict"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by S4b v2: depends_on is immutable and its dependency T-0509 was superseded",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1789947357.520555,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by S4b v2: depends_on is immutable and its dependency T-0509 was superseded",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ]
+}

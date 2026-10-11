@@ -1,0 +1,125 @@
+{
+  "id": "T-0174",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "C-O7a fix round 1: day and window counters gated independently, pick never tracebacks and prints an expanded config_dir, missing-dir log once per process, hold message on stderr, planner usage state in its own file, end-to-end pick test (from review T-0170)",
+  "spec": "Fix round for T-0167 (branch task/T-0167 at 2cf1d45). Work in this task's worktree, cut from task/T-0167. Review T-0170 (opus) requested changes; items come from it. Scope: orchestrator/pool.py, orchestrator/cli.py, tests/test_pool.py, tests/test_cli.py, README.md.\n\n1 HIGH pool.py tally_planner (\u2248line 223): gate the two counters independently. For each assistant line: if its date matches today \u2192 add to planner_day_tokens; if its timestamp is inside the current window \u2192 add to planner_window_tokens; advance the offset in either case. A line inside the day but outside the window must count toward the day. Test: transcript line stamped 3 h ago today with window_started = now \u2192 planner_day_tokens includes it, planner_window_tokens does not.\n\n2 MED cli.py pick (\u2248line 69): wrap the tally call like daemon.tick does: any exception prints one stderr line \"pick: planner tally failed: <err>\" and continues to pool.pick with the stored numbers; never a traceback. pool.py: guard f.stat()/open for a file that vanished between glob and read (skip it), and non-string or missing timestamps (skip the line). Tests for a deleted-between-glob-and-read file (patch Path.stat to raise FileNotFoundError) and a numeric timestamp.\n\n3 MED cli.py pick (\u2248line 74): print os.path.expanduser(config_dir). Test asserts no leading '~' in stdout.\n\n4 MED pool.py (\u2248line 190): the \"planner transcripts not found\" line is emitted at most once per account per process (a module-level set of already-warned dirs). Test: two tally calls \u2192 one line. README: adjust the sentence.\n\n5 LOW cli.py pick: the hold message goes to stderr; stdout stays empty on exit 3. Update test_cli accordingly.\n\n6 LOW pool.py state: keep planner offsets and counters out of the raced pool_state.json blob: store them in `.orchestrator/planner_usage.json` written only by tally_planner under an fcntl flock on that file (read-modify-write inside the lock), and read by Account.utilization/status. pool.save() no longer touches planner_* fields. Test: a Pool loaded before a tally and saved after it does not clobber the planner file.\n\n7 LOW tests/test_cli.py: one end-to-end test that runs the real `pick planner` code path against a temp config_dir with a real .jsonl (no tally mock) and asserts exit 0, an expanded config_dir on stdout and the planner_day_tokens in the pool afterwards.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0167",
+    "T-0170"
+  ],
+  "acceptance": [
+    "Day and window counters are gated independently; a same-day out-of-window line counts toward the day (test)",
+    "pick never tracebacks: tally errors print one stderr line and pick proceeds; vanished files and bad timestamps are skipped (tests)",
+    "pick prints an expanded config_dir; hold message on stderr with empty stdout and exit 3 (tests)",
+    "Missing transcripts dir warns once per account per process (test); README sentence matches",
+    "Planner offsets and counters live in .orchestrator/planner_usage.json under a flock and survive a stale pool.save() (test)",
+    "End-to-end pick test against a real .jsonl passes; uv run python -m unittest discover -q tests green; no new dependency; only the five scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/cli.py",
+    "tests/test_pool.py",
+    "tests/test_cli.py",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0167"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2700,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_pool.py",
+    "fix_round_for": "T-0167",
+    "worktree_base": "task/T-0167",
+    "spec_review": "waived: fix round whose spec is the T-0170 comment list"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0174",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean on `task/T-0174` (`8c65a97`).\n\n## Summary\n\nFixed all 7 items from the T-0170 opus review of T-0167:\n\n1. **Independent day/window gating** (`pool.py` `tally_planner`): each assistant line now checks `in_day` and `in_window` separately, adding to `planner_day_tokens`/`planner_window_tokens` independently; the byte offset always advances.\n2. **`pick` never tracebacks**: `cli.py` wraps `tally_planner()` like `daemon.tick` does \u2014 one stderr line `pick: planner tally failed: <err>`, then proceeds to `pool.pick`. `pool.py` guards `f.stat()`/`f.open()` against a vanished file (skip it) and skips lines with missing/non-string timestamps.\n3. **`pick` prints expanded config_dir** via `os.path.expanduser`.\n4. **\"planner transcripts not found\" warns once per account per process** via a module-level `_WARNED_MISSING_DIRS` set; README sentence updated.\n5. **Hold message on stderr**, stdout empty on exit 3.\n6. **Planner offsets/counters moved to `.orchestrator/planner_usage.json`**, written only by `tally_planner` under an `fcntl` flock (read-modify-write); `pool.save()`/`pool_state.json` no longer carry `planner_*` fields.\n7. **New end-to-end test** (`test_pick_planner_end_to_end_real_transcript`) drives the real `pick planner` path against a real `.jsonl` under a faked `HOME`, no tally mock.\n\n**Files changed**: `orchestrator/pool.py`, `orchestrator/cli.py`, `tests/test_pool.py`, `tests/test_cli.py`, `README.md` \u2014 exactly the scoped set. No new dependencies (`fcntl` is stdlib).\n\n**Test output**: `uv run python -m unittest discover -q tests` \u2192 207 tests, all green. `.claude/hooks/tests-green.sh` gate \u2192 exit 0, no failures.\n\nOne thing outside scope worth flagging separately: `.gitignore` doesn't yet cover `.orchestrator/planner_usage.json` the way it covers `pool_state.json` \u2014 a follow-up task could add that line.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789753122.375316,
+      "spec_review_verdict": "approve",
+      "spec_review_note": "waived: fix round, spec is the T-0170 comment list",
+      "pipeline": {
+        "spec_review_at": 1789753122.3751192,
+        "gated_at": 1789753122.37512,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789753127.587119,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789753127.590369,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0174",
+      "claimed_at": 1789753127.590145
+    },
+    {
+      "ts": 1789753127.598905,
+      "pid": 49783,
+      "account": "A"
+    },
+    {
+      "ts": 1789753613.2673001,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean on `task/T-0174` (`8c65a97`).\n\n## Summary\n\nFixed all 7 items from the T-0170 opus review of T-0167:\n\n1. **Independent day/window gating** (`pool.py` `tally_planner`): each assistant line now checks `in_day` and `in_window` separately, adding to `planner_day_tokens`/`planner_window_tokens` independently; the byte offset always advances.\n2. **`pick` never tracebacks**: `cli.py` wraps `tally_planner()` like `daemon.tick` does \u2014 one stderr line `pick: planner tally failed: <err>`, then proceeds to `pool.pick`. `pool.py` guards `f.stat()`/`f.open()` against a vanished file (skip it) and skips lines with missing/non-string timestamps.\n3. **`pick` prints expanded config_dir** via `os.path.expanduser`.\n4. **\"planner transcripts not found\" warns once per account per process** via a module-level `_WARNED_MISSING_DIRS` set; README sentence updated.\n5. **Hold message on stderr**, stdout empty on exit 3.\n6. **Planner offsets/counters moved to `.orchestrator/planner_usage.json`**, written only by `tally_planner` under an `fcntl` flock (read-modify-write); `pool.save()`/`pool_state.json` no longer carry `planner_*` fields.\n7. **New end-to-end test** (`test_pick_planner_end_to_end_real_transcript`) drives the real `pick planner` path against a real `.jsonl` under a faked `HOME`, no tally mock.\n\n**Files changed**: `orchestrator/pool.py`, `orchestrator/cli.py`, `tests/test_pool.py`, `tests/test_cli.py`, `README.md` \u2014 exactly the scoped set. No new dependencies (`fcntl` is stdlib).\n\n**Test output**: `uv run python -m unittest discover -q tests` \u2192 207 tests, all green. `.claude/hooks/tests-green.sh` gate \u2192 exit 0, no failures.\n\nOne thing outside scope worth flagging separately: `.gitignore` doesn't yet cover `.orchestrator/planner_usage.json` the way it covers `pool_state.json` \u2014 a follow-up task could add that line.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789753941.924062,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789753973.8070521,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "f5d2a16503410fbb0f7a4d0d9b01a937a2a6312e"
+    },
+    {
+      "ts": 1789753994.795737,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "f5d2a16503410fbb0f7a4d0d9b01a937a2a6312e"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_note": "waived: fix round, spec is the T-0170 comment list",
+  "pipeline": {
+    "spec_review_at": 1789753122.3751192,
+    "gated_at": 1789753122.37512,
+    "gated_by": "planner-pre-stamp: gate and review by hand"
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789753127.590145,
+  "pid": 49783,
+  "account": "A",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0073",
+  "sha": "f5d2a16503410fbb0f7a4d0d9b01a937a2a6312e"
+}

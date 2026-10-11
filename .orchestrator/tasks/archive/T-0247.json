@@ -1,0 +1,98 @@
+{
+  "id": "T-0247",
+  "parent": "T-0240",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: F2: block rule that works without a confidence value; votes averaging; confidence semantics documented",
+  "spec": "Every noul answer observed on 2026-09-19 (smoke calls, T-0237 and Planner) came back without a confidence value, so jev_gate's block rule (needs confidence at least 0.6) can never fire and gate_mode=block is inert. Change after F1 (T-0242):\n1. orchestrator/jev.py: noul()/ask() keep confidence None when the API omits it; add optional votes (pool.toml [jev].votes, default 1): when greater than 1, ask the same questions votes times in one request (question ids suffixed _1.._n) and average the probabilities, the way jev-compactor's votes option does; record votes in the usage log.\n2. orchestrator/jev_gate.py block rule: when confidence is None, decide on probability extremes alone with stricter thresholds: block when P(redundant) at least 0.92 or P(needed) at most 0.08; when confidence is present keep 0.85 / 0.15 with confidence at least 0.6. Thresholds live in pool.toml [jev] (block_redundant_p, block_needed_p, block_redundant_p_noconf, block_needed_p_noconf) with these defaults. Log which rule fired (rule: conf | noconf | none).\n3. README Jev paragraph: one sentence on confidence being optional in the API response and how the two rules differ; a note that block mode should be enabled only after a week of log-mode rows.\nTests: tests/test_jev.py::test_votes_averaged; tests/test_jev_gate.py::test_block_without_confidence_uses_strict_thresholds, ::test_block_with_confidence_uses_default_thresholds, ::test_rule_logged.",
+  "inputs": [
+    "T-0243"
+  ],
+  "acceptance": [
+    "tests/test_jev.py::test_votes_averaged passes",
+    "tests/test_jev_gate.py::test_block_without_confidence_uses_strict_thresholds, ::test_block_with_confidence_uses_default_thresholds, ::test_rule_logged pass",
+    "pool.toml [jev] documents votes and the four block thresholds with their defaults; README mentions optional confidence",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev.py",
+    "orchestrator/jev_gate.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_jev.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0247",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/jev.py",
+        "line": 218,
+        "issue": "In the votes>1 path, _log_usage(...,True,votes) and _add_day_tokens(input_tokens) run before the averaging try/except. If the response is missing a per-vote key (e.g. \"needed_2\") or a row has an unexpected shape, the KeyError/TypeError is caught and ask() returns None, but the run has already been logged as ok=True and its tokens already charged against the daily budget. Caller behavior is still correct (fail-open), just the telemetry/budget accounting is inconsistent with the eventual failure.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789836616.9552279,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0247",
+      "claimed_at": 1789836616.954853
+    },
+    {
+      "ts": 1789836616.957279,
+      "account": "B"
+    },
+    {
+      "ts": 1789836616.994499,
+      "pid": 87815,
+      "account": "B"
+    },
+    {
+      "ts": 1789836781.675412,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/jev.py",
+            "line": 218,
+            "issue": "In the votes>1 path, _log_usage(...,True,votes) and _add_day_tokens(input_tokens) run before the averaging try/except. If the response is missing a per-vote key (e.g. \"needed_2\") or a row has an unexpected shape, the KeyError/TypeError is caught and ask() returns None, but the run has already been logged as ok=True and its tokens already charged against the daily budget. Caller behavior is still correct (fail-open), just the telemetry/budget accounting is inconsistent with the eventual failure.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789836781.677639,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789836616.954853,
+  "account": "B",
+  "pid": 87815,
+  "review_verdict": "approve"
+}

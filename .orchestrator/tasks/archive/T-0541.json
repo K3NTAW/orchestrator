@@ -1,0 +1,349 @@
+{
+  "id": "T-0541",
+  "created_at": 1789949666.437025,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "S3 v4: orchestrator/critical_path.py \u2014 deterministic critical-path ranking of ready tasks (recursive downstream chain, blocked descendants, cold-start durations) wired as the daemon's wave order (spec review T-0540 folded in)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P4 (prioritize tasks that determine goal completion time; design and test a ranking function, do not implement the sketch blindly) and P5 (cold start simple and deterministic, no false precision). Base goal/T-0503 with S2 v4 (T-0534) merged: daemon._wave_order(candidate_ids, tasks) identity hook; waves.jsonl row has an empty \"priority\"; the tasks dict covers candidates, running and their transitive depends_on ancestry. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: tasks are dicts with id, parent, depends_on, status, merged_into, complexity, constraints; bus.dependents(tid) (bus.py:153-155) returns every task, any status, whose depends_on names tid; scorecard._band (scorecard.py:56) maps complexity to bands 1-3, 4-6, 7-10. A dependent is \"unresolved\" unless it is merged (merged_into set) or failed; queued, held (budget retries) and running dependents all count.\n1. New orchestrator/critical_path.py, pure: est_duration_s(task, durations=None) = durations[task id] if present, else durations[band] if present, else COLD_START_S = {\"1-3\": 600, \"4-6\": 1200, \"7-10\": 2400} by complexity band. critical_path_s(t) = est_duration_s(t) + max(critical_path_s(child) for child in unresolved direct dependents of t within tasks, default 0), memoised, with a visiting set so a back edge is ignored and never recursed (no hang). explain(task_id, tasks, durations=None) -> {\"downstream_depth\": longest chain of unresolved transitive dependents (edges), \"blocked_descendants\": number of distinct unresolved transitive dependents, \"est_duration_s\", \"critical_path_s\", \"priority\": critical_path_s}. rank(ready_ids, tasks, durations=None) -> ids sorted by priority desc, then blocked_descendants desc, then id asc; deterministic; ids not in tasks keep their relative order at the end.\n2. daemon: _wave_order(candidate_ids, tasks) returns critical_path.rank(candidate_ids, tasks); the waves.jsonl row's \"priority\" becomes {id: explain(...)} for every candidate. Extend the tasks dict built in dispatch with the transitive dependents of every candidate via bus.dependents, keeping execute tasks that are unresolved (not merged, not failed) whatever their status; state this in a comment. In shadow mode the order is only logged (baseline_order stays first-come); in active mode the wave is dispatched in this order.\n3. README Pipeline paragraph: one sentence on the ranking and its cold-start durations.\n4. Tests: tests/test_critical_path.py::test_rank_prefers_longer_downstream_chain, ::test_rank_tie_breaks_on_blocked_descendants_then_id, ::test_explain_cold_start_durations_by_band, ::test_rank_ignores_merged_and_failed_descendants, ::test_rank_handles_cycles, ::test_durations_override_cold_start, ::test_critical_path_sums_along_the_whole_chain (A -> B -> C with durations 1, 10, 100: critical_path_s(A) = 111, not 11); tests/test_daemon.py::test_wave_row_carries_priority_order (two ready candidates, one with a budget-held dependent: the wave order puts it first and the row's priority explains both). Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_critical_path.py::test_rank_prefers_longer_downstream_chain, tests/test_critical_path.py::test_rank_tie_breaks_on_blocked_descendants_then_id, tests/test_critical_path.py::test_rank_ignores_merged_and_failed_descendants, tests/test_critical_path.py::test_rank_handles_cycles and tests/test_critical_path.py::test_critical_path_sums_along_the_whole_chain pass: rank orders a task that unblocks a longer or heavier chain first, breaks ties by blocked descendants then id, ignores merged and failed descendants, terminates on cycles, and critical_path_s accumulates along the whole chain",
+    "tests/test_critical_path.py::test_explain_cold_start_durations_by_band and tests/test_critical_path.py::test_durations_override_cold_start pass: explain reports downstream_depth, blocked_descendants, est_duration_s (600/1200/2400 s by band unless durations override) and critical_path_s",
+    "tests/test_daemon.py::test_wave_row_carries_priority_order passes: the waves.jsonl row carries priority explanations for all candidates, held dependents count, the wave order follows rank, and shadow mode still dispatches first-come",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains eight tests"
+  ],
+  "scope": [
+    "orchestrator/critical_path.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_critical_path.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0534"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/interference.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/bus.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "critical_path.rank(ready_ids, tasks, durations=None) -> ordered ids; critical_path.explain(task_id, tasks, durations=None) -> {downstream_depth, blocked_descendants, est_duration_s, critical_path_s, priority}; critical_path_s recursive sum; COLD_START_S by band; durations dict keyed by task id or band string",
+    "spec_review_round": 2,
+    "supersedes": "T-0538"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0541",
+  "codex_thread": "01a0c153-de80-7682-a4bc-6d39cd1bb9b9",
+  "result": {
+    "summary": "Implemented deterministic critical-path ranking, daemon wave integration, priority explanations, cold-start estimates, documentation, and eight tests.\n\n- Full post-fix unittest suite: **807 tests passed**\n- Hook\u2019s second/final permitted run was red before the assertion correction; not rerun due the two-run limit.\n- Commit: `a3cef6b581ac035c746a809efd37172f45676da6`\n- Worktree: clean\n- Files changed: `README.md`, `orchestrator/critical_path.py`, `orchestrator/daemon.py`, `tests/test_critical_path.py`, `tests/test_daemon.py`\n\nFailures-only output from the final permitted hook run:\n\n```text\nFAIL: test_dispatch_wave_includes_budget_retry_candidates (test_daemon.Daemon.test_dispatch_wave_includes_budget_retry_candidates)\nAssertionError: Lists differ: ['T-0001', 'T-0002'] != ['T-0002', 'T-0001']\nFAILED (failures=1)\n```\n\nSkill used: `implement-spec`.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c153-de80-7682-a4bc-6d39cd1bb9b9",
+    "usage": {
+      "input_tokens": 1336671,
+      "cached_input_tokens": 1281536,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10294,
+      "reasoning_output_tokens": 3414,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789949670.386274,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234
+      }
+    },
+    {
+      "ts": 1789949670.3912058,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105
+      }
+    },
+    {
+      "ts": 1789949863.224559,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Extending `tasks` with transitive dependents via `bus.dependents(tid)` calls `bus.read()` (a full JSON read of every task) once per node visited. If implemented as a naive per-candidate BFS without a shared visited-set/cache across candidates, overlapping downstream chains get re-scanned repeatedly every dispatch tick. Existing dispatch already does full `bus.read()` scans (lines 665, 673), so this isn't a new complexity class, but the spec should still say to build the reverse-adjacency once and reuse it across all candidates.",
+          "severity": "low",
+          "line": 679
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "`_wave_tasks`'s ancestor walk guards against revisits with a `seen` set (bus.py:637-640), but the spec doesn't require the same guard for the new dependents walk. Since critical_path.py is explicitly required to defend against depends_on cycles (a back edge \"is ignored and never recursed\"), the same cyclic data can reach daemon.py's traversal first and loop or duplicate reads if it isn't deduped the same way.",
+          "severity": "low",
+          "line": 679
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "test_dispatch_shadow_logs_wave_and_keeps_first_come currently asserts wave[\"priority\"] == {} in shadow mode (line 222). Once _wave_order calls critical_path.rank unconditionally, priority will be populated in shadow mode too (wave_row is written for both shadow and active). This pre-existing assertion needs updating alongside the new tests, but it isn't named in the acceptance list, so it's easy to overlook and mistake for a regression.",
+          "severity": "low",
+          "line": 222
+        }
+      ]
+    },
+    {
+      "ts": 1789949886.911686,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639
+      }
+    },
+    {
+      "ts": 1789949888.146624,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639,
+        "dispatched_at_done": 1789949888.146506
+      }
+    },
+    {
+      "ts": 1789949894.002901,
+      "packet_meta": {
+        "chars": 2695,
+        "est_tokens": 673,
+        "hash": "07897e67ff8c",
+        "version": "07897e67ff8c",
+        "base": "8fd67c8dd0ad",
+        "sources": "pool.toml@58c877fd1717 gotchas@da048d327668 memory@notes",
+        "policy_version": "58c877fd1717",
+        "gotchas": "da048d327668"
+      }
+    },
+    {
+      "ts": 1789949894.004297,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0541",
+      "claimed_at": 1789949894.0041459
+    },
+    {
+      "ts": 1789949894.0054688,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789950381.626519,
+      "codex_thread": "01a0c153-de80-7682-a4bc-6d39cd1bb9b9",
+      "codex_thread_head": "a3cef6b581ac035c746a809efd37172f45676da6"
+    },
+    {
+      "ts": 1789950381.631426,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639,
+        "dispatched_at_done": 1789949888.146506,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "ca7df2f9e126b48e4e12a7055c99ce4a94d3d491"
+        }
+      }
+    },
+    {
+      "ts": 1789950381.6338072,
+      "status": "done",
+      "result": {
+        "summary": "Implemented deterministic critical-path ranking, daemon wave integration, priority explanations, cold-start estimates, documentation, and eight tests.\n\n- Full post-fix unittest suite: **807 tests passed**\n- Hook\u2019s second/final permitted run was red before the assertion correction; not rerun due the two-run limit.\n- Commit: `a3cef6b581ac035c746a809efd37172f45676da6`\n- Worktree: clean\n- Files changed: `README.md`, `orchestrator/critical_path.py`, `orchestrator/daemon.py`, `tests/test_critical_path.py`, `tests/test_daemon.py`\n\nFailures-only output from the final permitted hook run:\n\n```text\nFAIL: test_dispatch_wave_includes_budget_retry_candidates (test_daemon.Daemon.test_dispatch_wave_includes_budget_retry_candidates)\nAssertionError: Lists differ: ['T-0001', 'T-0002'] != ['T-0002', 'T-0001']\nFAILED (failures=1)\n```\n\nSkill used: `implement-spec`.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c153-de80-7682-a4bc-6d39cd1bb9b9",
+        "usage": {
+          "input_tokens": 1336671,
+          "cached_input_tokens": 1281536,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10294,
+          "reasoning_output_tokens": 3414,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789950384.0949628,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639,
+        "dispatched_at_done": 1789949888.146506,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "ca7df2f9e126b48e4e12a7055c99ce4a94d3d491"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789950469.839766,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639,
+        "dispatched_at_done": 1789949888.146506,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "ca7df2f9e126b48e4e12a7055c99ce4a94d3d491"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789950469.8396218,
+        "gated_at_lease": 1789951369.8396218,
+        "first_green_at": 1789950469.838938,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789950470.0194461,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639,
+        "dispatched_at_done": 1789949888.146506,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "ca7df2f9e126b48e4e12a7055c99ce4a94d3d491"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789950469.8396218,
+        "gated_at_lease": 1789951369.8396218,
+        "first_green_at": 1789950469.838938,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "a3cef6b581ac035c746a809efd37172f45676da6"
+      }
+    },
+    {
+      "ts": 1789950470.024839,
+      "pipeline": {
+        "spec_review_at": 1789949670.386234,
+        "spec_review_at_lease": 1789950570.386234,
+        "spec_review_at_done": 1789949670.391105,
+        "dispatched_at": 1789949886.911639,
+        "dispatched_at_lease": 1789950786.911639,
+        "dispatched_at_done": 1789949888.146506,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "ca7df2f9e126b48e4e12a7055c99ce4a94d3d491"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789950469.8396218,
+        "gated_at_lease": 1789951369.8396218,
+        "first_green_at": 1789950469.838938,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "a3cef6b581ac035c746a809efd37172f45676da6",
+        "gated_at_done": 1789950470.024707
+      }
+    },
+    {
+      "ts": 1789950645.3700008,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789950750.095188,
+      "status": "done",
+      "merged_into": "goal/T-0503",
+      "sha": "a3cef6b581ac035c746a809efd37172f45676da6"
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789949670.386234,
+    "spec_review_at_lease": 1789950570.386234,
+    "spec_review_at_done": 1789949670.391105,
+    "dispatched_at": 1789949886.911639,
+    "dispatched_at_lease": 1789950786.911639,
+    "dispatched_at_done": 1789949888.146506,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "ca7df2f9e126b48e4e12a7055c99ce4a94d3d491"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789950469.8396218,
+    "gated_at_lease": 1789951369.8396218,
+    "first_green_at": 1789950469.838938,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "reviewed_sha": "a3cef6b581ac035c746a809efd37172f45676da6",
+    "gated_at_done": 1789950470.024707
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Extending `tasks` with transitive dependents via `bus.dependents(tid)` calls `bus.read()` (a full JSON read of every task) once per node visited. If implemented as a naive per-candidate BFS without a shared visited-set/cache across candidates, overlapping downstream chains get re-scanned repeatedly every dispatch tick. Existing dispatch already does full `bus.read()` scans (lines 665, 673), so this isn't a new complexity class, but the spec should still say to build the reverse-adjacency once and reuse it across all candidates.",
+      "severity": "low",
+      "line": 679
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "`_wave_tasks`'s ancestor walk guards against revisits with a `seen` set (bus.py:637-640), but the spec doesn't require the same guard for the new dependents walk. Since critical_path.py is explicitly required to defend against depends_on cycles (a back edge \"is ignored and never recursed\"), the same cyclic data can reach daemon.py's traversal first and loop or duplicate reads if it isn't deduped the same way.",
+      "severity": "low",
+      "line": 679
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "test_dispatch_shadow_logs_wave_and_keeps_first_come currently asserts wave[\"priority\"] == {} in shadow mode (line 222). Once _wave_order calls critical_path.rank unconditionally, priority will be populated in shadow mode too (wave_row is written for both shadow and active). This pre-existing assertion needs updating alongside the new tests, but it isn't named in the acceptance list, so it's easy to overlook and mistake for a regression.",
+      "severity": "low",
+      "line": 222
+    }
+  ],
+  "packet_meta": {
+    "chars": 2695,
+    "est_tokens": 673,
+    "hash": "07897e67ff8c",
+    "version": "07897e67ff8c",
+    "base": "8fd67c8dd0ad",
+    "sources": "pool.toml@58c877fd1717 gotchas@da048d327668 memory@notes",
+    "policy_version": "58c877fd1717",
+    "gotchas": "da048d327668"
+  },
+  "claimed_at": 1789949894.0041459,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "a3cef6b581ac035c746a809efd37172f45676da6",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0503",
+  "sha": "a3cef6b581ac035c746a809efd37172f45676da6"
+}

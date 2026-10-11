@@ -1,0 +1,235 @@
+{
+  "id": "T-1100",
+  "created_at": 1790164691.043583,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S2g contracts: per-role machine-validated worker output contracts and a bounded recovery ladder (deterministic repair, schema-repair resume, rerun) in shadow (P17, P18)",
+  "spec": "Create orchestrator/contracts.py. SCHEMAS per role: scout {findings: [{claim, location, confidence}], unresolved: [str], summary}, execute {summary, files_changed: [str], commits: [str], tests_run: [str], test_result: pass|fail|not_run, unresolved: [str]}, review and spec_review {verdict: approve|request_changes, findings: [{severity: high|medium|low, location, text}], required_changes: [str], risks: [str]}, challenge {claim, evidence: [str], agreement: agree|disagree|partial, confidence}, plus confidence and provenance on all (bus.post_result defaults). validate(role, result) -> {\"ok\": bool, \"errors\": [str], \"repaired\": dict|None}: deterministic repair first (key aliases such as files/changed_files, string-to-list coercions, verdict synonyms approve/approved/LGTM, confidence strings to float, drop unknown keys into extra); ok when the repaired result satisfies the schema. Recovery ladder in spawn.py at the point where extract_json runs on the worker output: 1 validate; 2 if not ok and [contracts].mode is active: one bounded schema-repair request resumed on the same session or thread (claude --resume session_id or codex resume) asking for only the JSON object for this role's schema, budget [contracts].repair_budget_usd (default 0.5) and one attempt; log a runs row role output_repair with tokens; 3 if still not ok, fall through to today's behaviour (review roles fail with no parseable verdict, others keep the raw result). [contracts].mode = \"shadow\" (dated comment): validate and record a decision_log row kind output_contract (add to KINDS) with role, ok, errors, repaired_keys, selected = accept|repair|rerun (shadow: what active would do), but never resume or change the stored result. Docs: docs/hermes-hardening/13-output-contracts.md with the schemas and the shadow validation rate measured over the real task results on this repository (bus tasks with results, per role: ok, repairable, invalid).\nSpec review T-1091 folded in: (1) Validation runs at every result-posting point, not only where extract_json runs: spawn.run_worker's non-execute branch, spawn's Claude-fallback execute branch, and executor.post_tool_result for Codex execute results (scope adds orchestrator/executor.py); each validates the dict it is about to post against the role schema, applies deterministic repair, records the decision_log row, and in active mode may use the bounded repair request where a session or thread exists. (2) The mode is a promotion feature: add contracts to promotion.FEATURES (scope adds orchestrator/promotion.py and tests/test_promotion.py) with criteria (30 shadow rows, repair success rate, no rise in failed results) and read it through promotion.mode(\"contracts\"), never pool.cfg directly. (3) Interface contract, fixed here and mirrored into plan.md: contracts.SCHEMAS: dict role -> schema (required keys with types, optional keys, enums); contracts.validate(role, result) -> {ok: bool, errors: [str], repaired: dict | None}; contracts.repair(role, result) -> dict (deterministic, idempotent); contracts.recover(role, result, *, session=None, thread=None, budget_usd) -> {result, repaired_by: none|deterministic|model, tokens} used only in active mode.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_contracts.py::test_schemas_accept_valid_results_for_every_role",
+    "tests/test_contracts.py::test_deterministic_repair_aliases_and_coercions",
+    "tests/test_contracts.py::test_invalid_result_lists_errors",
+    "tests/test_spawn.py::test_output_contract_shadow_logs_row_and_keeps_legacy_behaviour",
+    "tests/test_spawn.py::test_output_contract_active_repair_resume_once_within_budget (patched resume returns valid JSON; runs row output_repair written)",
+    "tests/test_executor.py::test_post_tool_result_validates_execute_contract_in_shadow (row recorded, posted dict unchanged)",
+    "tests/test_promotion.py::test_contracts_feature_registered",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/contracts.py",
+    "orchestrator/spawn.py",
+    "orchestrator/decision_log.py",
+    ".orchestrator/pool.toml",
+    "tests/test_contracts.py",
+    "tests/test_spawn.py",
+    "docs/hermes-hardening/13-output-contracts.md",
+    "orchestrator/executor.py",
+    "orchestrator/promotion.py",
+    "tests/test_executor.py",
+    "tests/test_promotion.py"
+  ],
+  "depends_on": [
+    "T-1048"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790164812.856853,
+      "pipeline": {
+        "first_ready_at": 1790164812.8567822
+      }
+    },
+    {
+      "ts": 1790164813.0229251,
+      "pipeline": {
+        "first_ready_at": 1790164812.8567822,
+        "spec_review_at": 1790164813.02276,
+        "spec_review_at_lease": 1790165713.02276
+      }
+    },
+    {
+      "ts": 1790164813.0313861,
+      "pipeline": {
+        "first_ready_at": 1790164812.8567822,
+        "spec_review_at": 1790164813.02276,
+        "spec_review_at_lease": 1790165713.02276,
+        "spec_review_at_done": 1790164813.031067
+      }
+    },
+    {
+      "ts": 1790165088.849826,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/prompts/review.md",
+          "issue": "contracts.SCHEMAS.review = {verdict, findings:[{severity,location,text}], required_changes, risks} does not match what workers are actually told to emit here: {verdict, comments:[{path,line,issue,severity}]}. There is no findings/required_changes/risks field in the real prompt, and comments' shape (path+line, issue) differs from findings' (location, text). Deterministic repair (key aliases, list coercions) cannot bridge a comments->findings restructuring. Every real review result will validate as invalid/repairable, which misrepresents the shadow measurement as 'drift' when it is really a schema-vs-prompt mismatch.",
+          "severity": "high",
+          "line": 5
+        },
+        {
+          "path": ".orchestrator/prompts/spec-review.md",
+          "issue": "Same schema is reused for spec_review, but this prompt (used to generate this very review) asks for {verdict, risks:[{path,issue,severity,line}], suggested_spec_changes}. 'risks' here is a list of objects; the spec's schema defines risks as [str]. required_changes/findings do not exist in this prompt at all.",
+          "severity": "high",
+          "line": 5
+        },
+        {
+          "path": ".orchestrator/prompts/challenge.md",
+          "issue": "Spec's challenge schema is {claim, evidence:[str], agreement: agree|disagree|partial, confidence}. The actual prompt asks for {verdict: confirmed|refuted|uncertain, evidence:[path:line], note}. There is no 'agreement' enum or 'claim' output field, and confirmed/refuted/uncertain is not a synonym set for agree/disagree/partial that deterministic repair's verdict-synonym table (approve/approved/LGTM) would plausibly cover.",
+          "severity": "medium",
+          "line": 4
+        },
+        {
+          "path": ".orchestrator/prompts/scout.md",
+          "issue": "Spec's scout schema is {findings:[{claim,location,confidence}], unresolved, summary}. Actual prompt asks for {findings:[{claim,evidence:[path:line],confidence,provenance}], open_questions, suggested_next, blocked} with no 'summary' or 'unresolved' key and per-finding 'provenance' (needed because scouts cite mixed repo/web/ticket sources) that the spec pushes to a single top-level provenance default instead, losing per-claim provenance.",
+          "severity": "medium",
+          "line": 8
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Spec's execute schema requires files_changed:[str], commits:[str], tests_run:[str], test_result. The only two places execute results are actually posted are this function (posted = {summary, commit (singular string, not a list), executed_by, provenance, usage, thread, rounds}) and spawn.py's Claude-fallback branch (summary, executed_by, review). Neither ever populates files_changed, commits, tests_run or test_result, so role=execute will validate as invalid for effectively 100% of historical and future results, not because of worker drift but because the schema names fields nothing in the codebase produces.",
+          "severity": "high",
+          "line": 303
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Companion evidence for the executor.py finding: the Claude-fallback execute post here has an even smaller, differently-shaped result than the proposed execute schema.",
+          "severity": "high",
+          "line": 1321
+        },
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "record() has no defaults for candidates, hard_constraints, deterministic or reason. The spec only names role, ok, errors, repaired_keys, selected for the new output_contract row and leaves these required fields unspecified, so the executor has to invent semantics (e.g. what counts as a 'candidate' for a validation outcome) that a reviewer has no basis to check for consistency with existing kinds.",
+          "severity": "low",
+          "line": 107
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "collect() is a hand-dispatched if/elif per feature name with a bare {\"n\":0} fallback for anything unhandled; scope/acceptance only add a FEATURES entry and test_contracts_feature_registered, never a collect() branch for 'contracts'. The spec's prose criteria (30 shadow rows, repair success rate, no rise in failed results) therefore has no evidence path wired and promotion.report() will show n=0 for this feature indefinitely unless a later task adds a collect() branch that reads decision_log kind=output_contract rows.",
+          "severity": "low",
+          "line": 176
+        }
+      ]
+    },
+    {
+      "ts": 1790165130.953872,
+      "pipeline": {
+        "first_ready_at": 1790164812.8567822,
+        "spec_review_at": 1790164813.02276,
+        "spec_review_at_lease": 1790165713.02276,
+        "spec_review_at_done": 1790164813.031067,
+        "spec_review_held_at": 1790165130.95379
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790165133.0155609,
+      "pipeline": {
+        "first_ready_at": 1790164812.8567822,
+        "spec_review_at": 1790164813.02276,
+        "spec_review_at_lease": 1790165713.02276,
+        "spec_review_at_done": 1790164813.031067,
+        "spec_review_held_at": 1790165130.95379,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790165133.110637,
+      "pipeline": {
+        "first_ready_at": 1790164812.8567822,
+        "spec_review_at": 1790164813.02276,
+        "spec_review_at_lease": 1790165713.02276,
+        "spec_review_at_done": 1790164813.031067,
+        "spec_review_held_at": 1790165130.95379,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790165130.953872": true
+        }
+      }
+    },
+    {
+      "ts": 1790165151.227647,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 18:55: spec review T-1112 folded into T-1124"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790164812.8567822,
+    "spec_review_at": 1790164813.02276,
+    "spec_review_at_lease": 1790165713.02276,
+    "spec_review_at_done": 1790164813.031067,
+    "spec_review_held_at": 1790165130.95379,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790165130.953872": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/prompts/review.md",
+      "issue": "contracts.SCHEMAS.review = {verdict, findings:[{severity,location,text}], required_changes, risks} does not match what workers are actually told to emit here: {verdict, comments:[{path,line,issue,severity}]}. There is no findings/required_changes/risks field in the real prompt, and comments' shape (path+line, issue) differs from findings' (location, text). Deterministic repair (key aliases, list coercions) cannot bridge a comments->findings restructuring. Every real review result will validate as invalid/repairable, which misrepresents the shadow measurement as 'drift' when it is really a schema-vs-prompt mismatch.",
+      "severity": "high",
+      "line": 5
+    },
+    {
+      "path": ".orchestrator/prompts/spec-review.md",
+      "issue": "Same schema is reused for spec_review, but this prompt (used to generate this very review) asks for {verdict, risks:[{path,issue,severity,line}], suggested_spec_changes}. 'risks' here is a list of objects; the spec's schema defines risks as [str]. required_changes/findings do not exist in this prompt at all.",
+      "severity": "high",
+      "line": 5
+    },
+    {
+      "path": ".orchestrator/prompts/challenge.md",
+      "issue": "Spec's challenge schema is {claim, evidence:[str], agreement: agree|disagree|partial, confidence}. The actual prompt asks for {verdict: confirmed|refuted|uncertain, evidence:[path:line], note}. There is no 'agreement' enum or 'claim' output field, and confirmed/refuted/uncertain is not a synonym set for agree/disagree/partial that deterministic repair's verdict-synonym table (approve/approved/LGTM) would plausibly cover.",
+      "severity": "medium",
+      "line": 4
+    },
+    {
+      "path": ".orchestrator/prompts/scout.md",
+      "issue": "Spec's scout schema is {findings:[{claim,location,confidence}], unresolved, summary}. Actual prompt asks for {findings:[{claim,evidence:[path:line],confidence,provenance}], open_questions, suggested_next, blocked} with no 'summary' or 'unresolved' key and per-finding 'provenance' (needed because scouts cite mixed repo/web/ticket sources) that the spec pushes to a single top-level provenance default instead, losing per-claim provenance.",
+      "severity": "medium",
+      "line": 8
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Spec's execute schema requires files_changed:[str], commits:[str], tests_run:[str], test_result. The only two places execute results are actually posted are this function (posted = {summary, commit (singular string, not a list), executed_by, provenance, usage, thread, rounds}) and spawn.py's Claude-fallback branch (summary, executed_by, review). Neither ever populates files_changed, commits, tests_run or test_result, so role=execute will validate as invalid for effectively 100% of historical and future results, not because of worker drift but because the schema names fields nothing in the codebase produces.",
+      "severity": "high",
+      "line": 303
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Companion evidence for the executor.py finding: the Claude-fallback execute post here has an even smaller, differently-shaped result than the proposed execute schema.",
+      "severity": "high",
+      "line": 1321
+    },
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "record() has no defaults for candidates, hard_constraints, deterministic or reason. The spec only names role, ok, errors, repaired_keys, selected for the new output_contract row and leaves these required fields unspecified, so the executor has to invent semantics (e.g. what counts as a 'candidate' for a validation outcome) that a reviewer has no basis to check for consistency with existing kinds.",
+      "severity": "low",
+      "line": 107
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "collect() is a hand-dispatched if/elif per feature name with a bare {\"n\":0} fallback for anything unhandled; scope/acceptance only add a FEATURES entry and test_contracts_feature_registered, never a collect() branch for 'contracts'. The spec's prose criteria (30 shadow rows, repair success rate, no rise in failed results) therefore has no evidence path wired and promotion.report() will show n=0 for this feature indefinitely unless a later task adds a collect() branch that reads decision_log kind=output_contract rows.",
+      "severity": "low",
+      "line": 176
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 18:55: spec review T-1112 folded into T-1124"
+}

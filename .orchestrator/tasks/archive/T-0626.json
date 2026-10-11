@@ -1,0 +1,165 @@
+{
+  "id": "T-0626",
+  "created_at": 1789976339.232806,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R14c: orchestrator/jev_points.py \u2014 experimental Jev decision points (scout necessity, context escalation, review escalation, planner relaunch), shadow by default, escalate-only in active, fail-open (Phase I P7)",
+  "spec": "Why: Phase I P7 names four experimental Jev decision points introduced independently: scout necessity, context escalation, review escalation (never overriding the mandatory security review) and Planner relaunch. Today planner_runs.jev_triage (orchestrator/planner_runs.py:432-460) records one generic shadow choice for scouts_done/held/closable decision kinds and decision.py has no Jev use; nothing covers the four named points (audit T-0573).\nWhat: new pure module orchestrator/jev_points.py using jev.ask (fail-open, returns None on any failure) and decision_log.record(kind=\"routing\" is wrong here: use kind \"scout\" for scout necessity, \"review_plan\" for review escalation, \"strategy\" for context escalation and planner relaunch, with extra={\"point\": name}).\n- POINTS = (\"scout_necessity\", \"context_escalation\", \"review_escalation\", \"planner_relaunch\"); each has its own mode under [jev.points] <point> = off|shadow|active (default shadow; unknown -> shadow) and a typed question set (noul probabilities) with a bounded, redacted state: task title, spec[:600] via jev.redact, acceptance count, scope list, complexity, task_class, memory titles, deterministic evidence supplied by the caller (e.g. scout_evidence.reuse_check result, packet size, review plan). Never file contents.\n- ask(point, task, evidence, *, cfg=None, ask_fn=jev.ask) -> {\"point\", \"mode\", \"signals\", \"confidence\", \"suggestion\", \"applied\": bool, \"error\"}: suggestion per point: scout_necessity -> \"launch\"|\"skip\"; context_escalation -> \"expand\"|\"keep\"; review_escalation -> \"add_review\"|\"keep\"; planner_relaunch -> \"relaunch\"|\"wait\". off -> no call, suggestion None. shadow -> call and record, applied False. active -> applied True only for escalating suggestions (launch a scout that deterministic reuse says is unnecessary is NOT escalation and stays a suggestion; expand context, add a review, relaunch are escalations); de-escalations (skip scout, keep smaller context, fewer reviews) are never applied; review_escalation can never reduce reviews or replace the security review (documented and tested); any failure -> suggestion None, error set, applied False.\n- Every call records a decision_log row with candidates (the two options), hard_constraints ([\"security_review_deterministic\", \"required_reviews_floor\"] for review_escalation), deterministic evidence, jev signals, selected, reason, confidence, mode.\n- summary(root=STATE) -> per point {n, agreement with deterministic evidence where comparable, mean_confidence} from decision rows, for later evaluation.",
+  "inputs": [
+    "T-0586"
+  ],
+  "acceptance": [
+    "tests/test_jev_points.py::test_default_shadow_records_suggestion_without_applying \u2014 empty config: scout_necessity calls ask once, returns suggestion skip with applied False and writes a decision row with extra.point",
+    "tests/test_jev_points.py::test_off_mode_makes_no_call \u2014 mode off for a point: ask_fn not called, suggestion None",
+    "tests/test_jev_points.py::test_active_applies_only_escalations \u2014 active review_escalation with add_review applies True; active scout_necessity with skip applies False; active context_escalation with keep applies False",
+    "tests/test_jev_points.py::test_review_escalation_never_reduces_or_replaces_security_review \u2014 a suggestion of fewer reviews is coerced to keep, hard_constraints list security_review_deterministic, and the deterministic review count in the returned evidence is unchanged",
+    "tests/test_jev_points.py::test_fail_open_and_privacy \u2014 ask_fn returning None yields error set, suggestion None, applied False; the state passed to ask_fn is redacted and contains no file contents"
+  ],
+  "scope": [
+    "orchestrator/jev_points.py",
+    "tests/test_jev_points.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0626",
+  "codex_thread": null,
+  "result": {
+    "summary": "Implementation matches the spec closely: POINTS/OPTIONS/KINDS align with decision_log's valid kinds, ask()/summary() signatures match jev.ask and decision_log.record/read_all, redaction of title/spec plus exclusion of content-ish evidence keys satisfies the privacy requirement (verified jev.redact strips TOKEN=... and long hex/base64 runs), and review_escalation structurally can never reduce or replace the security review since its OPTIONS only offer add_review/keep. All 5 named acceptance tests are present and pass (ran via unittest). One design gap noted below is worth a follow-up test but doesn't violate a stated acceptance criterion or the hard security constraint, so not blocking.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/jev_points.py",
+        "line": 125,
+        "issue": "_scout_escalates defaults to True (treats a scout as necessary) whenever the caller's evidence contains none of scout_needed/needs_scout/necessary/reuse_check. Combined with _applied's `suggestion == \"launch\" and _scout_escalates(evidence)` (line 144), an active-mode scout_necessity point will auto-apply \"launch\" whenever evidence is simply absent, not only when evidence affirmatively supports launching. That silently overrides the orchestrator's stated default of zero scouts unless a named uncertainty justifies one. No acceptance test exercises applied=True for scout_necessity at all (test_active_applies_only_escalations only covers the skip case), so this path is unverified.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "ac9f7f7d15dd",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789976339.23369,
+      "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+    },
+    {
+      "ts": 1789976342.258917,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0626",
+      "claimed_at": 1789976342.258553
+    },
+    {
+      "ts": 1789976342.260159,
+      "account": "B"
+    },
+    {
+      "ts": 1789976342.727565,
+      "pid": 90702,
+      "account": "B"
+    },
+    {
+      "ts": 1789976547.2881851,
+      "status": "done",
+      "result": {
+        "summary": "Implementation matches the spec closely: POINTS/OPTIONS/KINDS align with decision_log's valid kinds, ask()/summary() signatures match jev.ask and decision_log.record/read_all, redaction of title/spec plus exclusion of content-ish evidence keys satisfies the privacy requirement (verified jev.redact strips TOKEN=... and long hex/base64 runs), and review_escalation structurally can never reduce or replace the security review since its OPTIONS only offer add_review/keep. All 5 named acceptance tests are present and pass (ran via unittest). One design gap noted below is worth a follow-up test but doesn't violate a stated acceptance criterion or the hard security constraint, so not blocking.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/jev_points.py",
+            "line": 125,
+            "issue": "_scout_escalates defaults to True (treats a scout as necessary) whenever the caller's evidence contains none of scout_needed/needs_scout/necessary/reuse_check. Combined with _applied's `suggestion == \"launch\" and _scout_escalates(evidence)` (line 144), an active-mode scout_necessity point will auto-apply \"launch\" whenever evidence is simply absent, not only when evidence affirmatively supports launching. That silently overrides the orchestrator's stated default of zero scouts unless a named uncertainty justifies one. No acceptance test exercises applied=True for scout_necessity at all (test_active_applies_only_escalations only covers the skip case), so this path is unverified.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "ac9f7f7d15dd",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789976547.289813,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789976547.324733,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+        "packet_version": "ac9f7f7d15dd",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+      "packet_version": "ac9f7f7d15dd",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+  "claimed_at": 1789976342.258553,
+  "account": "B",
+  "pid": 90702,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+    "packet_version": "ac9f7f7d15dd",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "ac9f7f7d15dd",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

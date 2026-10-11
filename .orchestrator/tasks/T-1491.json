@@ -1,0 +1,265 @@
+{
+  "id": "T-1491",
+  "created_at": 1790892462.6659179,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "B4b: execute result derived from git state WITHOUT auto-commit: non-JSON-only derivation, single-lock post_if_current, any dirt holds execute_incomplete, kill switch pinned",
+  "spec": "Goal T-1403, wave 2, SPLIT after three spec-review rounds (T-1435, T-1453, T-1468). The commit-now resume of T-1435 stays DROPPED (no non_json case has a session).\n\nContract (plan.md): gitutil.execute_outcome(worktree, parent, scope, *, since=None) -> {ahead, head,\ndirty_in_scope, dirty_out_of_scope} | None; hold prefix 'execute_incomplete' (B5 maps it to failure kind\n'incomplete').\n\nEvidence (U2, 2026-10-01): status_reason non_json is set in spawn.run_worker when json.loads of the\n`claude -p --output-format json` stdout fails; every recorded case is 'non-JSON output (rc=143): ' with empty\noutput (SIGTERM). luna T-0526: the worker posted done itself through bus_post_result with a prose summary and\nreconcile marked the process dead. So the signal is the git state of the worktree, and a result the worker\nalready posted must win.\n\nFacts (goal/T-1403; spawn.py/gitutil.py/worker_control.py unchanged since main 355583c):\n- spawn.run_worker sets t['executor'] = 'claude:<tier>' for execute before run_claude; the done path posts\n  {'summary', 'executed_by': f\"claude:{tier}\", 'review'} with no commit; the failed path posts status failed,\n  reason, resume_hint.partial_output. Every write goes through worker_control.write_if_current (bus lock +\n  is_current(epoch)). run_claude returns only after the child process has exited (waits on the Popen); the\n  reaper path (worker_control) can mark the epoch stale while the child is still alive.\n- gitutil._git_in(worktree, *args) has no timeout; _resolve_base(worktree, parent); callers reconcile_dead and\n  changed_paths must keep their behaviour.\n- daemon._dirty_scope_paths parses `git status --porcelain -z --untracked-files=all` (rename pairs, ignores\n  .orchestrator/ and .venv); scopes.matches(path, entries) implements the same matching. Do not import daemon\n  from gitutil.\n\nChange (depends on B4a for gitutil.execute_outcome/head_sha; the auto-commit of leftovers is PARKED as B4c, a human decision):\n1. spawn.py module seams `execute_outcome = gitutil.execute_outcome`, `head_sha = gitutil.head_sha` referenced as module\n   attributes. derive = pool.cfg.get('spawn', {}).get('derive_execute_result', True); False -> today's behaviour exactly.\n2. run_worker, role execute only: pre_head = head_sha(worktree) before run_claude. Derivation runs ONLY when r['status'] ==\n   'failed' AND r reason starts with 'non-JSON output' AND derive is True. Held, superseded and every other failed reason keep\n   today's write; the done path keeps today's post and never calls execute_outcome or head_sha. pre_head None on a git\n   worktree -> today's failed write (never fall back to the base for 'ahead'). Cancel/steer: read worker_control / the worker\n   registry; if the worker is marked cancelled or steered for this epoch, skip derivation (today's write) even when rc is 143.\n   o = execute_outcome(worktree, parent, scope, since=pre_head); None -> today's failed write.\n3. Decision (no git mutation anywhere in this task): (i) not worker_control.is_current(task_id, epoch) -> return superseded,\n   write nothing. (ii) o['ahead'] == 0 -> hold 'execute_incomplete: no commits' with resume_hint {'partial_output': text[:2000]\n   when any, 'dirty_in_scope', 'dirty_out_of_scope', 'head'}. (iii) any dirty path, in or out of scope -> hold\n   'execute_incomplete: uncommitted changes' with the same resume_hint shape (B4c may later auto-commit the in-scope case).\n   (iv) ahead > 0 and clean -> worker_control.post_if_current(task_id, epoch, predicate, result): ONE bus.locked() entry that\n   re-reads the task, returns False without writing when not is_current, when status is 'done', or when\n   (result or {}).get('commit') is set, else calls bus.post_result inline and returns True. The result is {'summary': model\n   text when any else 'derived from git state after <reason>', 'commit': head, 'executed_by': t['executor'],\n   'derived_from': 'git_state', 'review': same text as the done path}. contracts.process runs AFTER the lock, outside it,\n   exactly like the done path (repair_session None). Hold writes in (ii)/(iii) go through write_if_current.\n   bus.log_run(task, role='execute', outcome='derived_done' | 'execute_incomplete', executor=t['executor'],\n   derived_from='git_state') exactly once per derived decision.\nTests that assert the old behaviour (SPEC RULE): tests/test_spawn.py::test_failed_without_reason_key_sets_default_and_resume_hint\npasses unchanged (plain directory -> execute_outcome None). Add a setUp patch in every test_spawn TestCase that runs an\nexecute run_worker (enumerate with `grep -n ensure_worktree tests/test_spawn.py`) setting spawn.execute_outcome -> None and\nspawn.head_sha -> None by default; the derivation tests override it and build on tests/_harness.py scratch_repo.\nOut of scope: gitutil.py (B4a), daemon.py (B5 maps execute_incomplete to failure kind 'incomplete'), executor.py,\nfailures.py, pool.toml. Rollback: `git revert` of the merge, or [spawn].derive_execute_result = false (pinned by (f)).\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_result_derived_from_git_state: passes: run_worker for an execute task whose run_claude returns failed 'non-JSON output (rc=143): ' (a) posts status done with result.commit = the worktree HEAD, executed_by = t['executor'], derived_from 'git_state', and bus.log_run called exactly once with outcome 'derived_done', when the run added a commit and the tree is clean; (b) with any uncommitted path, in scope or out of scope, holds 'execute_incomplete: uncommitted changes' with resume_hint.dirty_in_scope/dirty_out_of_scope and no git command mutates the worktree (git status unchanged); (c) with a pre-existing commit but none since run start holds 'execute_incomplete: no commits'; (d) when the task is already status done on the bus, or result.commit is set, post_if_current writes nothing; (e) with pool.cfg['spawn']['derive_execute_result'] False, a failed reason other than 'non-JSON output', head_sha returning None on a git worktree, or the worker marked cancelled for this epoch, the task is marked failed exactly as before; (f) a run_claude 'done' result never calls execute_outcome or head_sha",
+    "tests/test_worker_control.py::test_post_if_current_single_lock_entry: passes: worker_control.post_if_current(task_id, epoch, predicate, result) enters bus.locked exactly once (patched counter), re-reads the task inside the lock, returns False and writes nothing when is_current is False, when status is done, or when result.commit is set, and otherwise calls bus.post_result inline and returns True",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/worker_control.py",
+    "tests/test_spawn.py",
+    "tests/test_worker_control.py"
+  ],
+  "depends_on": [
+    "T-1490"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "full",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B4b",
+    "respec_for": "T-1468"
+  },
+  "status": "done",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790894657.013312,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267
+      }
+    },
+    {
+      "ts": 1790894657.245257,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009
+      }
+    },
+    {
+      "ts": 1790894657.2537029,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539
+      }
+    },
+    {
+      "ts": 1790894701.328922,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Cancel detection is left vague ('read worker_control / the worker registry'). worker_control.cancel() SIGTERMs the child, so rc=143 non-JSON is exactly what a cancel produces. cancel() does not bump steer_epoch, so is_current stays True. Today's failed write already races it and can overwrite the cancel hold. Between cancel_requested ('cancelling') and finish ('cancelled') the registry is not yet 'cancelled', and the task is not yet held with hold_reason 'cancelled'. A check on registry status 'cancelled' alone would miss that window and derive a done or hold over the cancel.",
+          "severity": "high",
+          "line": 1710
+        },
+        {
+          "path": "orchestrator/worker_control.py",
+          "issue": "The post_if_current predicate is ambiguous. '(result or {}).get(\"commit\") is set' reads as the new result, which always carries commit=head, so it would never post. It has to mean the existing task result. The spec also guards only status 'done'. A worker that already posted held or failed, or a task that moved to review or cancelled, would still be overwritten with done. The guard should require status 'running'.",
+          "severity": "high",
+          "line": 215
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Ordering contradiction. The spec says contracts.process runs AFTER the lock, but the done path runs it BEFORE the write, on the candidate result, and then posts the processed result. If process runs after post_if_current, its output is never persisted. If it runs before, it runs on a candidate that the predicate may then discard. State one order explicitly: process the candidate first, then post_if_current with the processed result.",
+          "severity": "med",
+          "line": 1659
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "head_sha(worktree) before run_claude and execute_outcome after are unguarded external git calls. An exception from head_sha would fail every execute run, even with derive on. An exception from execute_outcome falls into the generic 'post_failed' handler and loses the non-JSON reason and partial_output. Wrap both and treat an exception like None (today's failed write). Call head_sha only when derive is True, so False really is 'today's behaviour exactly'.",
+          "severity": "med",
+          "line": 1513
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Held 'execute_incomplete: ...' and derived done are new states. Until B5 (daemon) maps the prefix, the daemon may treat these holds as generic holds or loop on them. The spec lists B5 as out of scope but does not say B5 must land first or in the same wave. Add an ordering note or a derive default of False until B5 is merged.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "issue": "Acceptance (e) 'worker marked cancelled for this epoch' does not name how the test marks it, and the steered case is not covered. 'ahead' is also not covered when pre_head equals head after a pre-existing commit (c is covered). Specify the exact cancel and steer signals, and add a test for the 'cancelling' window and for steered.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Derived done needs to say whether the 'review' text, 'executed_by' (t['executor'] versus the done path's f\"claude:{tier}\") and 'derived_from' pass through fit_result and contracts.process unchanged, and whether those functions strip unknown keys such as derived_from or commit. If they strip them, acceptance (a) fails.",
+          "severity": "low",
+          "line": 1657
+        }
+      ]
+    },
+    {
+      "ts": 1790894732.020884,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539,
+        "spec_review_held_at": 1790894732.0208268
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790894735.993515,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539,
+        "spec_review_held_at": 1790894732.0208268,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790894737.348885,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539,
+        "spec_review_held_at": 1790894732.0208268,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790894732.020884": true
+        }
+      }
+    },
+    {
+      "ts": 1790941883.412241,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539,
+        "spec_review_held_at": 1790894732.0208268,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790894732.020884": true
+        },
+        "first_green_at": 1790941883.409649,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790949351.9045708,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539,
+        "spec_review_held_at": 1790894732.0208268,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790894732.020884": true
+        },
+        "first_green_at": 1790941883.409649,
+        "lineage_fix_rounds": 2
+      }
+    },
+    {
+      "ts": 1790949627.385236,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1563 06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790894657.013267,
+        "spec_review_at": 1790894657.2452009,
+        "spec_review_at_lease": 1790895557.2452009,
+        "spec_review_at_done": 1790894657.253539,
+        "spec_review_held_at": 1790894732.0208268,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790894732.020884": true
+        },
+        "first_green_at": 1790941883.409649,
+        "lineage_fix_rounds": 2,
+        "accepted_at": 1790949627.381205
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790894657.013267,
+    "spec_review_at": 1790894657.2452009,
+    "spec_review_at_lease": 1790895557.2452009,
+    "spec_review_at_done": 1790894657.253539,
+    "spec_review_held_at": 1790894732.0208268,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790894732.020884": true
+    },
+    "first_green_at": 1790941883.409649,
+    "lineage_fix_rounds": 2,
+    "accepted_at": 1790949627.381205
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Cancel detection is left vague ('read worker_control / the worker registry'). worker_control.cancel() SIGTERMs the child, so rc=143 non-JSON is exactly what a cancel produces. cancel() does not bump steer_epoch, so is_current stays True. Today's failed write already races it and can overwrite the cancel hold. Between cancel_requested ('cancelling') and finish ('cancelled') the registry is not yet 'cancelled', and the task is not yet held with hold_reason 'cancelled'. A check on registry status 'cancelled' alone would miss that window and derive a done or hold over the cancel.",
+      "severity": "high",
+      "line": 1710
+    },
+    {
+      "path": "orchestrator/worker_control.py",
+      "issue": "The post_if_current predicate is ambiguous. '(result or {}).get(\"commit\") is set' reads as the new result, which always carries commit=head, so it would never post. It has to mean the existing task result. The spec also guards only status 'done'. A worker that already posted held or failed, or a task that moved to review or cancelled, would still be overwritten with done. The guard should require status 'running'.",
+      "severity": "high",
+      "line": 215
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Ordering contradiction. The spec says contracts.process runs AFTER the lock, but the done path runs it BEFORE the write, on the candidate result, and then posts the processed result. If process runs after post_if_current, its output is never persisted. If it runs before, it runs on a candidate that the predicate may then discard. State one order explicitly: process the candidate first, then post_if_current with the processed result.",
+      "severity": "med",
+      "line": 1659
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "head_sha(worktree) before run_claude and execute_outcome after are unguarded external git calls. An exception from head_sha would fail every execute run, even with derive on. An exception from execute_outcome falls into the generic 'post_failed' handler and loses the non-JSON reason and partial_output. Wrap both and treat an exception like None (today's failed write). Call head_sha only when derive is True, so False really is 'today's behaviour exactly'.",
+      "severity": "med",
+      "line": 1513
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Held 'execute_incomplete: ...' and derived done are new states. Until B5 (daemon) maps the prefix, the daemon may treat these holds as generic holds or loop on them. The spec lists B5 as out of scope but does not say B5 must land first or in the same wave. Add an ordering note or a derive default of False until B5 is merged.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "issue": "Acceptance (e) 'worker marked cancelled for this epoch' does not name how the test marks it, and the steered case is not covered. 'ahead' is also not covered when pre_head equals head after a pre-existing commit (c is covered). Specify the exact cancel and steer signals, and add a test for the 'cancelling' window and for steered.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Derived done needs to say whether the 'review' text, 'executed_by' (t['executor'] versus the done path's f\"claude:{tier}\") and 'derived_from' pass through fit_result and contracts.process unchanged, and whether those functions strip unknown keys such as derived_from or commit. If they strip them, acceptance (a) fails.",
+      "severity": "low",
+      "line": 1657
+    }
+  ],
+  "hold_reason": null,
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1563 06fc558119dfb14642579d678e5a89aa7d5bf0f3"
+}

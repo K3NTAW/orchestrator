@@ -1,0 +1,182 @@
+{
+  "id": "T-0766",
+  "created_at": 1790080007.071507,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: P1: context economy telemetry \u2014 per-section token attribution of every packet at build time, candidate vs presented, cross-role amplification, and a context view in the scorecard (no behaviour change)",
+  "spec": "One behaviour: every model invocation's packet is measured per section (deterministic chars // 4 plus a sha256 per section) and logged, so the scorecard can show how many tokens each section costs per role and how often the same section text is re-sent across a task's lineage. Nothing sent to any model changes.\n\nFacts (verified 2026-09-22, main e8c4687): packets are assembled as named sections rendered \"## <name>\\n<body>\": execute in spawn.py _packet_body (sections list at spawn.py:287-323, joined at :317), review in review_packet (spawn.py:435-488 via _section, diff bounded by a budget), spec_review_packet (:494-512) and scout_packet (:513-570) the same way; packet_run_meta (spawn.py:360-371) already parses the \"packet v<hash> base <sha> sources ...\" header and records chars, est_tokens, hash, version; packet_meta (:355) is stored on the task as packet_meta and copied into the run record; bus.log_run (bus.py:278-335) appends one JSON line per run to .orchestrator/runs/<date>.jsonl with role, tier, account, executor, task, tokens (input_tokens, output_tokens, cache_read_input_tokens), usd, duration, packet fields; scorecard.by_task/by_goal (scorecard.py:397-480) aggregate runs per task and goal using _tokens_of (:375) and attribution.lineage (attribution.py:96); the review prompt and execute prompt templates live in .orchestrator/prompts and are rendered by spawn.render (:101). Caps: execute packet 4800 chars (spawn.py:195-366), review diff \u22648000 chars, spec_review uncapped. Known duplication (leave it in place for this task; P4 removes it after the baseline): spec/acceptance/scope appear twice in the execute prompt (packet spawn.py:298-305 plus execute.md's literal lines).\n\nDo:\n1. spawn.py: `section_meta(text) -> dict` splits a rendered packet (or any prompt text) on lines starting with \"## \" into {section_name: {\"chars\", \"est_tokens\" (chars // 4), \"sha256\"}} plus \"_preamble\" for text before the first heading; packet_run_meta gains \"sections\": section_meta(text) and \"presented_tokens\" (sum), and the packet builders record \"candidate_tokens\": the est_tokens of every section BEFORE caps and budgets (the execute body before the 4800-char cap, the review diff before bounded_diff) so reduction_ratio = presented / candidate is available; when a builder cannot know the pre-cap size, candidate equals presented and the meta says \"candidate_known\": false. Also measure the prompt template around the packet: for each role, \"instruction_tokens\" = est_tokens of the rendered prompt minus the packet (render() output length minus packet length), recorded once per run.\n2. bus.log_run: accept and persist `context` = {\"sections\": {...}, \"presented_tokens\", \"candidate_tokens\", \"instruction_tokens\", \"packet_version\"} on every run row that has a packet (execute, fix rounds, review, spec_review, scout, challenge, planner-decision when available). Old rows without it stay valid.\n3. attribution/scorecard: a new module orchestrator/context_scorecard.py with build(root) -> rows per role: runs, avg presented_tokens, avg candidate_tokens, reduction_ratio, avg instruction_tokens, avg per-section tokens (top sections), plus per lineage root (attribution.lineage): amplification = sum of section tokens over all runs of the lineage / sum of tokens of unique (section sha256) across the lineage, and a repeated-sections list (which section names recur unchanged across roles); a `--context` view in `orchestrator scorecard` (cli.py) printing both tables. Rows without context are excluded and counted as \"unmeasured\".\n4. Docs: docs/context-economy/01-telemetry.md explaining the fields, the chars // 4 convention, candidate vs presented, and amplification; .orchestrator/memory/architecture.md is NOT touched by this task (the Planner records it).\n5. Tests: tests/test_spawn.py::test_section_meta_splits_named_sections (three sections plus preamble, chars and sha256 stable), tests/test_spawn.py::test_packet_run_meta_reports_sections_and_presented_tokens, tests/test_spawn.py::test_review_packet_records_candidate_tokens_before_diff_budget (a long diff: candidate > presented), tests/test_bus.py::test_log_run_persists_context, tests/test_context_scorecard.py::test_amplification_counts_repeated_sections_once (three runs of one lineage sharing an identical spec section: amplification 3.0 for that section, 1.0 for unique ones), tests/test_context_scorecard.py::test_rows_per_role_and_unmeasured_count. All tests unittest.TestCase with the shared tests/_harness ORCH_ROOT.\nGate: .claude/hooks/tests-green.sh exits 0. No change to what any prompt contains.",
+  "inputs": [
+    "T-0764"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_section_meta_splits_named_sections passes",
+    "tests/test_spawn.py::test_packet_run_meta_reports_sections_and_presented_tokens passes",
+    "tests/test_spawn.py::test_review_packet_records_candidate_tokens_before_diff_budget passes",
+    "tests/test_bus.py::test_log_run_persists_context passes",
+    "tests/test_context_scorecard.py::test_amplification_counts_repeated_sections_once passes",
+    "tests/test_context_scorecard.py::test_rows_per_role_and_unmeasured_count passes",
+    "orchestrator scorecard --context prints per-role and per-lineage tables; docs/context-economy/01-telemetry.md exists; rendered prompts are byte-identical to before (no behaviour change)"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "orchestrator/executor.py",
+    "docs/context-economy/01-telemetry.md",
+    "tests/test_spawn.py",
+    "tests/test_bus.py",
+    "tests/test_context_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0766",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/context_scorecard.py",
+        "issue": "Item 3 defines amplification as one scalar per lineage root ('sum of section tokens over all runs of the lineage / sum of tokens of unique (section sha256) across the lineage'), but the acceptance test test_amplification_counts_repeated_sections_once wants a per-section breakdown ('amplification 3.0 for that section, 1.0 for unique ones'). Those are different data shapes (single ratio vs. a value per section name); an executor cannot satisfy both without the spec picking one.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "instruction_tokens ('rendered prompt minus packet') requires two separate strings, but packet_run_meta(text) takes only one. Two real call sites feed it something other than a bare packet: _run() line 116 'task.get(\"packet_meta\") or packet_run_meta(args[-1])' and start() line 334 'packet_meta if packet_meta is not None else packet_run_meta(prompt)' both fall back to the FULL rendered prompt (packet + trailing template text like 'Spec:', 'Acceptance:', 'Tests:'), and this fallback is not an edge case: orchestrator/mcp.py's codex() and codex_reply() tools -- the tools this repo's own CLAAUDE.md tells the Planner to call directly -- invoke executor.start(task_id, prompt) and executor.reply(task_id, delta) with no packet_meta at all. Once section_meta splits on '## ' headings, the trailing non-packet instruction text (no heading of its own) gets silently appended into the packet's last section body, corrupting that section's chars/est_tokens/sha256 and inflating presented_tokens for the primary Codex execute path. reply()'s resume branch is worse: args[-1] is just the repair delta (not a packet at all), so packet_run_meta(args[-1]) parses garbage when task.get('packet_meta') is falsy. None of the listed acceptance tests exercise executor.py or mcp.py, so a wrong implementation here ships silently.",
+        "severity": "high",
+        "line": 116
+      },
+      {
+        "path": "orchestrator/context_scorecard.py",
+        "issue": "attribution.lineage (attribution.py:96-108) only chains a task id through its own fix_round_for predecessors -- it does not link a spec_review task, its execute task, and that execute's review task, which are three separate task ids with three separate lineage roots. The facts paragraph names the motivating duplication as spec/acceptance/scope text resent across spec_review, execute, and review (the P4 target) -- exactly the case attribution.lineage-based grouping will NOT capture, since those live under different lineage roots. Grouping by task['parent'] (goal id) would capture it; grouping by attribution.lineage as specified will not.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Pick one shape for amplification: either a single per-lineage scalar (and rewrite the acceptance test's stated expectation to match) or an explicit per-section-name map within a lineage (and rewrite item 3's prose to match the test).",
+      "Specify exactly how instruction_tokens gets computed and where: either give packet_run_meta an optional second parameter (rendered prompt) so it can subtract packet length itself, or compute instruction_tokens at the call site in spawn.run_worker (where render() output and the packet string are both already in scope) and merge it into packet_meta there -- then audit executor.py's _run()/start() and mcp.py's codex()/codex_reply() so none of them re-derive packet_meta by calling packet_run_meta on non-packet text (the full prompt or a bare delta).",
+      "Add at least one test that exercises the executor.py/mcp.py fallback path (packet_meta not pre-supplied) so a corrupted section split there is caught, since that is the path the Planner's own codex()/codex_reply() tools use.",
+      "Clarify whether amplification/repeated-sections should be grouped by attribution.lineage (fix-round chains only) or by goal id (captures cross-role duplication), given the task's own stated motivation is the latter."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790080010.1892931,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0766",
+      "claimed_at": 1790080010.187347
+    },
+    {
+      "ts": 1790080010.250328,
+      "account": "B"
+    },
+    {
+      "ts": 1790080011.2693372,
+      "pid": 11498,
+      "account": "B"
+    },
+    {
+      "ts": 1790080215.4670458,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/context_scorecard.py",
+            "issue": "Item 3 defines amplification as one scalar per lineage root ('sum of section tokens over all runs of the lineage / sum of tokens of unique (section sha256) across the lineage'), but the acceptance test test_amplification_counts_repeated_sections_once wants a per-section breakdown ('amplification 3.0 for that section, 1.0 for unique ones'). Those are different data shapes (single ratio vs. a value per section name); an executor cannot satisfy both without the spec picking one.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "instruction_tokens ('rendered prompt minus packet') requires two separate strings, but packet_run_meta(text) takes only one. Two real call sites feed it something other than a bare packet: _run() line 116 'task.get(\"packet_meta\") or packet_run_meta(args[-1])' and start() line 334 'packet_meta if packet_meta is not None else packet_run_meta(prompt)' both fall back to the FULL rendered prompt (packet + trailing template text like 'Spec:', 'Acceptance:', 'Tests:'), and this fallback is not an edge case: orchestrator/mcp.py's codex() and codex_reply() tools -- the tools this repo's own CLAAUDE.md tells the Planner to call directly -- invoke executor.start(task_id, prompt) and executor.reply(task_id, delta) with no packet_meta at all. Once section_meta splits on '## ' headings, the trailing non-packet instruction text (no heading of its own) gets silently appended into the packet's last section body, corrupting that section's chars/est_tokens/sha256 and inflating presented_tokens for the primary Codex execute path. reply()'s resume branch is worse: args[-1] is just the repair delta (not a packet at all), so packet_run_meta(args[-1]) parses garbage when task.get('packet_meta') is falsy. None of the listed acceptance tests exercise executor.py or mcp.py, so a wrong implementation here ships silently.",
+            "severity": "high",
+            "line": 116
+          },
+          {
+            "path": "orchestrator/context_scorecard.py",
+            "issue": "attribution.lineage (attribution.py:96-108) only chains a task id through its own fix_round_for predecessors -- it does not link a spec_review task, its execute task, and that execute's review task, which are three separate task ids with three separate lineage roots. The facts paragraph names the motivating duplication as spec/acceptance/scope text resent across spec_review, execute, and review (the P4 target) -- exactly the case attribution.lineage-based grouping will NOT capture, since those live under different lineage roots. Grouping by task['parent'] (goal id) would capture it; grouping by attribution.lineage as specified will not.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Pick one shape for amplification: either a single per-lineage scalar (and rewrite the acceptance test's stated expectation to match) or an explicit per-section-name map within a lineage (and rewrite item 3's prose to match the test).",
+          "Specify exactly how instruction_tokens gets computed and where: either give packet_run_meta an optional second parameter (rendered prompt) so it can subtract packet length itself, or compute instruction_tokens at the call site in spawn.run_worker (where render() output and the packet string are both already in scope) and merge it into packet_meta there -- then audit executor.py's _run()/start() and mcp.py's codex()/codex_reply() so none of them re-derive packet_meta by calling packet_run_meta on non-packet text (the full prompt or a bare delta).",
+          "Add at least one test that exercises the executor.py/mcp.py fallback path (packet_meta not pre-supplied) so a corrupted section split there is caught, since that is the path the Planner's own codex()/codex_reply() tools use.",
+          "Clarify whether amplification/repeated-sections should be grouped by attribution.lineage (fix-round chains only) or by goal id (captures cross-role duplication), given the task's own stated motivation is the latter."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790080215.468786,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/context_scorecard.py",
+          "issue": "Item 3 defines amplification as one scalar per lineage root ('sum of section tokens over all runs of the lineage / sum of tokens of unique (section sha256) across the lineage'), but the acceptance test test_amplification_counts_repeated_sections_once wants a per-section breakdown ('amplification 3.0 for that section, 1.0 for unique ones'). Those are different data shapes (single ratio vs. a value per section name); an executor cannot satisfy both without the spec picking one.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "instruction_tokens ('rendered prompt minus packet') requires two separate strings, but packet_run_meta(text) takes only one. Two real call sites feed it something other than a bare packet: _run() line 116 'task.get(\"packet_meta\") or packet_run_meta(args[-1])' and start() line 334 'packet_meta if packet_meta is not None else packet_run_meta(prompt)' both fall back to the FULL rendered prompt (packet + trailing template text like 'Spec:', 'Acceptance:', 'Tests:'), and this fallback is not an edge case: orchestrator/mcp.py's codex() and codex_reply() tools -- the tools this repo's own CLAAUDE.md tells the Planner to call directly -- invoke executor.start(task_id, prompt) and executor.reply(task_id, delta) with no packet_meta at all. Once section_meta splits on '## ' headings, the trailing non-packet instruction text (no heading of its own) gets silently appended into the packet's last section body, corrupting that section's chars/est_tokens/sha256 and inflating presented_tokens for the primary Codex execute path. reply()'s resume branch is worse: args[-1] is just the repair delta (not a packet at all), so packet_run_meta(args[-1]) parses garbage when task.get('packet_meta') is falsy. None of the listed acceptance tests exercise executor.py or mcp.py, so a wrong implementation here ships silently.",
+          "severity": "high",
+          "line": 116
+        },
+        {
+          "path": "orchestrator/context_scorecard.py",
+          "issue": "attribution.lineage (attribution.py:96-108) only chains a task id through its own fix_round_for predecessors -- it does not link a spec_review task, its execute task, and that execute's review task, which are three separate task ids with three separate lineage roots. The facts paragraph names the motivating duplication as spec/acceptance/scope text resent across spec_review, execute, and review (the P4 target) -- exactly the case attribution.lineage-based grouping will NOT capture, since those live under different lineage roots. Grouping by task['parent'] (goal id) would capture it; grouping by attribution.lineage as specified will not.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790080010.187347,
+  "account": "B",
+  "pid": 11498,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/context_scorecard.py",
+      "issue": "Item 3 defines amplification as one scalar per lineage root ('sum of section tokens over all runs of the lineage / sum of tokens of unique (section sha256) across the lineage'), but the acceptance test test_amplification_counts_repeated_sections_once wants a per-section breakdown ('amplification 3.0 for that section, 1.0 for unique ones'). Those are different data shapes (single ratio vs. a value per section name); an executor cannot satisfy both without the spec picking one.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "instruction_tokens ('rendered prompt minus packet') requires two separate strings, but packet_run_meta(text) takes only one. Two real call sites feed it something other than a bare packet: _run() line 116 'task.get(\"packet_meta\") or packet_run_meta(args[-1])' and start() line 334 'packet_meta if packet_meta is not None else packet_run_meta(prompt)' both fall back to the FULL rendered prompt (packet + trailing template text like 'Spec:', 'Acceptance:', 'Tests:'), and this fallback is not an edge case: orchestrator/mcp.py's codex() and codex_reply() tools -- the tools this repo's own CLAAUDE.md tells the Planner to call directly -- invoke executor.start(task_id, prompt) and executor.reply(task_id, delta) with no packet_meta at all. Once section_meta splits on '## ' headings, the trailing non-packet instruction text (no heading of its own) gets silently appended into the packet's last section body, corrupting that section's chars/est_tokens/sha256 and inflating presented_tokens for the primary Codex execute path. reply()'s resume branch is worse: args[-1] is just the repair delta (not a packet at all), so packet_run_meta(args[-1]) parses garbage when task.get('packet_meta') is falsy. None of the listed acceptance tests exercise executor.py or mcp.py, so a wrong implementation here ships silently.",
+      "severity": "high",
+      "line": 116
+    },
+    {
+      "path": "orchestrator/context_scorecard.py",
+      "issue": "attribution.lineage (attribution.py:96-108) only chains a task id through its own fix_round_for predecessors -- it does not link a spec_review task, its execute task, and that execute's review task, which are three separate task ids with three separate lineage roots. The facts paragraph names the motivating duplication as spec/acceptance/scope text resent across spec_review, execute, and review (the P4 target) -- exactly the case attribution.lineage-based grouping will NOT capture, since those live under different lineage roots. Grouping by task['parent'] (goal id) would capture it; grouping by attribution.lineage as specified will not.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

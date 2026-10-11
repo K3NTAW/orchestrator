@@ -1,0 +1,93 @@
+{
+  "id": "T-0131",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "C-O8: merge.py keeps the main checkout in sync when the fast-forwarded target branch is checked out there",
+  "spec": "Why: orchestrator.merge advances refs/heads/<target> with `git update-ref` from a worktree. When the main checkout (ROOT) has that branch checked out, its index and working tree stay at the old commit, so the next Planner commit from ROOT that stages a tracked source path commits stale content as a silent revert (decisions.md 2026-09-18: 3130d61 reverted daemon.py, spawn.py and two test files; restored by 4aaaa03).\n\nChange orchestrator/merge.py merge(): after tests-green and before the fast-forward, detect whether the main worktree has the target checked out: `git -C ROOT symbolic-ref -q HEAD` == `refs/heads/<target>`. If so, fast-forward with `git -C ROOT merge --ff-only <sha>` (this updates HEAD, index and working tree together and refuses only when local modifications overlap the incoming change). If that command fails, fall back to today's `update-ref` and add `\"checkout_stale\": true` plus the git stderr (capped 500 chars) to the returned dict, and print one stderr line \"[merge] main checkout is stale: sync ROOT to <target> when it is clean\" (merge.py must not import daemon). If the target is not checked out in ROOT, behaviour is unchanged (update-ref with the old sha as the expected value). Return dict gains `\"checkout_synced\": true|false` in every merged case.\n\nTests in tests/test_merge.py (harness fixtures; look at how existing merge tests build the repo): (1) target checked out in the root repo and clean \u2192 after merge, `git -C root rev-parse HEAD` == sha and `git -C root status --porcelain` is empty, checkout_synced true; (2) target checked out with a conflicting local modification to a file the merge touches \u2192 merge still returns status merged, the branch ref points at sha, the local modification is preserved, checkout_stale true and checkout_synced false; (3) target not checked out (root on another branch) \u2192 ref moved, root HEAD unchanged, checkout_synced false and no checkout_stale key. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [],
+  "acceptance": [
+    "merge() fast-forwards the main checkout with git merge --ff-only when the target branch is checked out there and reports checkout_synced true; test 1",
+    "With overlapping local modifications merge() still moves the ref via update-ref, preserves the local change, and reports checkout_stale true with a stderr line; test 2",
+    "When the target is not checked out in ROOT behaviour is unchanged; test 3",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the two scoped files change"
+  ],
+  "scope": [
+    "orchestrator/merge.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_merge.py"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0131",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0131` (58a6ec4).\n\n**Summary:** `merge()` now checks whether ROOT has the target branch checked out (`git -C ROOT symbolic-ref -q HEAD`). If so, it runs `git -C ROOT merge --ff-only <sha>` so ROOT's HEAD/index/worktree move together instead of going stale behind a bare `update-ref`. On failure (overlapping local changes) it falls back to the old `update-ref`, keeps the local modification intact, adds `checkout_stale: true` + capped stderr, and prints one `[merge] main checkout is stale: ...` line to stderr. Every merged result now carries `checkout_synced: true|false`; when the target isn't checked out in ROOT, behavior and return shape (minus the new `checkout_synced` key... actually it's added too, just `false`) is otherwise unchanged, and `checkout_stale` is absent.\n\n**Files changed:**\n- `orchestrator/merge.py`\n- `tests/test_merge.py` (3 new tests: ff-sync when clean, stale fallback with preserved local edit, unchanged behavior when not checked out)\n\n**Test output (failures only):** none \u2014 `uv run python -m unittest discover -q tests` \u2192 119 tests, OK (verified twice for stability against the shared TMP fixture across test files).",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789736560.246287,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789736561.2268429,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0131",
+      "claimed_at": 1789736561.226357
+    },
+    {
+      "ts": 1789736561.234847,
+      "pid": 7626,
+      "account": "A"
+    },
+    {
+      "ts": 1789736885.722432,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0131` (58a6ec4).\n\n**Summary:** `merge()` now checks whether ROOT has the target branch checked out (`git -C ROOT symbolic-ref -q HEAD`). If so, it runs `git -C ROOT merge --ff-only <sha>` so ROOT's HEAD/index/worktree move together instead of going stale behind a bare `update-ref`. On failure (overlapping local changes) it falls back to the old `update-ref`, keeps the local modification intact, adds `checkout_stale: true` + capped stderr, and prints one `[merge] main checkout is stale: ...` line to stderr. Every merged result now carries `checkout_synced: true|false`; when the target isn't checked out in ROOT, behavior and return shape (minus the new `checkout_synced` key... actually it's added too, just `false`) is otherwise unchanged, and `checkout_stale` is absent.\n\n**Files changed:**\n- `orchestrator/merge.py`\n- `tests/test_merge.py` (3 new tests: ff-sync when clean, stale fallback with preserved local edit, unchanged behavior when not checked out)\n\n**Test output (failures only):** none \u2014 `uv run python -m unittest discover -q tests` \u2192 119 tests, OK (verified twice for stability against the shared TMP fixture across test files).",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789736912.61006,
+      "pipeline": {
+        "gated_at": 1789736912.6099598
+      }
+    },
+    {
+      "ts": 1789736929.9136388,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "58a6ec4a0de3cc2450d31ae41296e9c7bdd34ff6"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789736561.226357,
+  "pid": 7626,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789736912.6099598
+  },
+  "merged_into": "goal/T-0073",
+  "sha": "58a6ec4a0de3cc2450d31ae41296e9c7bdd34ff6"
+}

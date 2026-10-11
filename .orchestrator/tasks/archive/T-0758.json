@@ -1,0 +1,154 @@
+{
+  "id": "T-0758",
+  "created_at": 1790006962.254381,
+  "parent": "T-0755",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: T1: spawn.render validates placeholders against the template with single-pass substitution; dispatch, fresh-fix dispatch and run_worker hold on render errors with hold_reason render_error",
+  "spec": "What: make prompt rendering robust to values that quote the double-brace placeholder syntax, and make every render failure a visible hold instead of a silent death.\nWhy: spawn.render (orchestrator/spawn.py:101-113) substitutes each keyword sequentially with str.replace and then raises ValueError unfilled_placeholder for ANY double-brace token left in the rendered text. A spec, acceptance line or diff that merely quotes a placeholder therefore raises; and a value that contains another key's token is substituted twice. The exception escapes daemon.dispatch in the tick thread (orchestrator/daemon.py:852-856, render runs before spawn_async and before complete(dispatched_at)) so the task is re-stamped every lease with no event; in daemon._dispatch_fresh_fix (daemon.py:554-563) and spawn.run_worker (spawn.py:757-779, render happens after pool.pick but before bus.claim) the worker thread dies silently and the task stays queued.\n1. spawn.render: collect the set of placeholder names in the RAW template (same regex as today, before any substitution). missing = template tokens not in kw -> raise ValueError with the same message form unfilled_placeholder: <name> (first missing name). Then substitute in ONE pass with re.sub and a callback that looks each token up in kw (str values verbatim, other values json.dumps indent=0 as today). Tokens inside substituted values are never touched. Keep the existing packet-required check and scout defaults unchanged. Extra keyword arguments not present in the template stay silently ignored (today's behaviour).\n2. daemon.dispatch execute path (daemon.py:852-856): wrap spawn.packet + spawn.render in try/except Exception; on error call a new helper daemon.hold_render_error(task_id, exc) and continue with the next candidate (never let the tick raise). The helper: under bus.locked(), set status held, hold_reason \"render_error: \" + str(exc)[:200], pipeline.render_error = str(exc)[:300], pop pipeline.dispatched_at; then notify.notify(f\"{task_id}: render_error: {exc}\"). Same wrapping in _dispatch_fresh_fix (daemon.py:554-563). Existing hold_failed stays as is.\n3. spawn.run_worker (spawn.py:757-779): wrap the role render branch in try/except Exception -> same hold (status held, hold_reason \"render_error: ...\", pipeline.render_error, notify) via a small local helper in spawn.py (spawn must not import daemon), return {\"status\": \"held\", \"reason\": \"render_error\"} before pool.reserve/bus.claim.\n4. daemon.auto_fix_round (daemon.py:141-): skip any held task whose hold_reason starts with \"render_error\" (a spec defect the Planner repairs; never a fix round).\nKeep tests/test_spawn.py::test_render_flags_unfilled_placeholder (missing packet still raises \"unfilled_placeholder: packet\") and tests/test_daemon.py::test_dispatch_prompt_contains_packet_not_placeholder green. Do not write any literal double-brace token into task specs or titles in tests; build such strings in test code. No new dependencies.",
+  "inputs": [
+    "T-0756"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_render_validates_against_template_not_output \u2014 render('execute', packet='p', spec=<a string that quotes the acceptance placeholder in double braces>, acceptance=['a'], scope=['x.py']) succeeds and the output contains that quoted token verbatim exactly once; render('execute', spec='s', acceptance=['a'], scope=['x.py']) still raises ValueError matching 'unfilled_placeholder: packet'",
+    "tests/test_spawn.py::test_render_single_pass_never_resubstitutes \u2014 with spec set to a string containing the scope placeholder token and scope=['z.py'], the rendered text contains the literal spec token and the substituted scope exactly where the template places them, and json.dumps of scope appears exactly once",
+    "tests/test_daemon.py::test_dispatch_holds_execute_task_on_render_error \u2014 a queued execute task with spawn.render patched to raise ValueError('unfilled_placeholder: spec') ends status held, hold_reason startswith 'render_error: unfilled_placeholder', pipeline.render_error set, no pipeline.dispatched_at, one notify line containing the task id, and daemon.dispatch(pool) returns without raising while a second normal queued execute task in the same tick is still dispatched",
+    "tests/test_daemon.py::test_fresh_fix_dispatch_holds_on_render_error \u2014 daemon._dispatch_fresh_fix(task_id, 'compat_changed:x') with spawn.render raising leaves the task held with hold_reason startswith 'render_error' and does not call _dispatch_worker",
+    "tests/test_spawn.py::test_run_worker_holds_on_render_error \u2014 spawn.run_worker for a queued review task whose render raises returns {'status': 'held', ...}, the task is held with hold_reason startswith 'render_error', assigned_to is None (never claimed) and notify was called",
+    "tests/test_daemon.py::test_auto_fix_round_skips_render_error_hold \u2014 a held execute task with hold_reason 'render_error: unfilled_placeholder: spec' gets no fix-round child after daemon.auto_fix_round(pool)"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0758",
+  "codex_thread": null,
+  "result": {
+    "summary": "Reviewed the committed diff (77fb206) against the packet's spec and all six acceptance tests. render() now collects placeholder names from the raw template before any substitution, raises ValueError with the same message form on a missing key, and does a genuine single-pass re.sub substitution so quoted or repeated tokens in substituted values are never re-scanned or double-substituted \u2014 verified this matches test_render_validates_against_template_not_output and test_render_single_pass_never_resubstitutes exactly. Packet-required check and scout defaults are untouched. daemon.dispatch's execute path and _dispatch_fresh_fix both wrap spawn.packet+spawn.render in try/except calling daemon.hold_render_error and continue/return without raising, matching test_dispatch_holds_execute_task_on_render_error and test_fresh_fix_dispatch_holds_on_render_error (confirmed daemon.notify is the module-level notifications._deliver callable the test patches). spawn.run_worker wraps the role-render branch and returns {'status':'held','reason':'render_error'} before pool.reserve/bus.claim, using a local spawn.hold_render_error (spawn does not import daemon, as required) that calls notify.notify \u2014 verified orchestrator/notify.py exports notify(msg). auto_fix_round skips held execute tasks whose hold_reason starts with 'render_error'. The two must-stay-green tests (test_render_flags_unfilled_placeholder, test_dispatch_prompt_contains_packet_not_placeholder) are unaffected by the behavior change. No correctness, security, or scope issues found.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "68715683e2f1",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790006962.255348,
+      "reviewed_sha": "77fb2061f6b77a12f19f33d10381ea069c4f5a04"
+    },
+    {
+      "ts": 1790006965.7931252,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0758",
+      "claimed_at": 1790006965.7927659
+    },
+    {
+      "ts": 1790006965.794032,
+      "account": "B"
+    },
+    {
+      "ts": 1790006966.245759,
+      "pid": 84003,
+      "account": "B"
+    },
+    {
+      "ts": 1790007055.7198699,
+      "status": "done",
+      "result": {
+        "summary": "Reviewed the committed diff (77fb206) against the packet's spec and all six acceptance tests. render() now collects placeholder names from the raw template before any substitution, raises ValueError with the same message form on a missing key, and does a genuine single-pass re.sub substitution so quoted or repeated tokens in substituted values are never re-scanned or double-substituted \u2014 verified this matches test_render_validates_against_template_not_output and test_render_single_pass_never_resubstitutes exactly. Packet-required check and scout defaults are untouched. daemon.dispatch's execute path and _dispatch_fresh_fix both wrap spawn.packet+spawn.render in try/except calling daemon.hold_render_error and continue/return without raising, matching test_dispatch_holds_execute_task_on_render_error and test_fresh_fix_dispatch_holds_on_render_error (confirmed daemon.notify is the module-level notifications._deliver callable the test patches). spawn.run_worker wraps the role-render branch and returns {'status':'held','reason':'render_error'} before pool.reserve/bus.claim, using a local spawn.hold_render_error (spawn does not import daemon, as required) that calls notify.notify \u2014 verified orchestrator/notify.py exports notify(msg). auto_fix_round skips held execute tasks whose hold_reason starts with 'render_error'. The two must-stay-green tests (test_render_flags_unfilled_placeholder, test_dispatch_prompt_contains_packet_not_placeholder) are unaffected by the behavior change. No correctness, security, or scope issues found.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "68715683e2f1",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790007055.720958,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790007055.7622652,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "77fb2061f6b77a12f19f33d10381ea069c4f5a04",
+        "packet_version": "68715683e2f1",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "77fb2061f6b77a12f19f33d10381ea069c4f5a04",
+      "packet_version": "68715683e2f1",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "77fb2061f6b77a12f19f33d10381ea069c4f5a04",
+  "claimed_at": 1790006965.7927659,
+  "account": "B",
+  "pid": 84003,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "77fb2061f6b77a12f19f33d10381ea069c4f5a04",
+    "packet_version": "68715683e2f1",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "68715683e2f1",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

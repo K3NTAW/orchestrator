@@ -1,0 +1,120 @@
+{
+  "id": "T-0153",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O4 fix round 1: auth compare never raises, request/goal size bounds, dependency message, requester scoping documented, lock and branch tests (from security review T-0152)",
+  "spec": "Fix round for T-0147 (branch task/T-0147, commit be42500). Work in this task's worktree, cut from task/T-0147. Security review T-0152 (opus) requested changes; items come from it. Do not widen scope.\n\n1 MED serve.py auth (\u2248line 79): hmac.compare_digest on str raises TypeError for non-ASCII input (headers arrive latin-1 decoded), turning a bad header into a 500. Compare bytes: encode both the presented token and ORCH_SERVICE_TOKEN with .encode(\"utf-8\", \"surrogateescape\") (or latin-1 consistently) and wrap the whole check in try/except Exception \u2192 401. Test: header value b\"Bearer \\xe9\" via a raw request \u2192 401, not 500.\n\n2 LOW serve.py request bounds (\u2248line 93): reject bodies over MAX_BODY_BYTES = 65536 with 413 {\"reason\": \"body too large\"} (read the body once, check len) and goals longer than MAX_GOAL_CHARS = 20000 with 400 {\"reason\": \"goal too long\"}; constants at module top with a one-line comment (the goal ends up in argv of the Planner launch; E2BIG otherwise). Tests for both.\n\n3 LOW serve.py import failure message (\u2248line 17): starlette and uvicorn resolve transitively through the mcp package; the message must say \"starlette/uvicorn missing: they ship with the mcp package this project depends on; reinstall with uv sync\" and must not mention a dependency group. Do not add them to pyproject.toml (no new dependency by task rule).\n\n4 LOW requester scoping: serve.py does not enforce per-requester authorization by design: the bearer identifies one kgpt connection, and kgpt scopes users before forwarding. State this in the serve.py module docstring and as a comment line in .orchestrator/repos.toml.example. No enforcement added.\n\n5 LOW tests/test_serve.py: (a) replace the lock test's \"lock file exists\" assertion with a real serialization proof: patch subprocess.run with a function that, on first call, spawns a second request in a thread and asserts it is still blocked (or records timestamps showing the second clone starts after the first returns); simplest acceptable form: acquire the per-slug lock yourself in the test with fcntl.flock LOCK_EX|LOCK_NB, issue POST /goals, assert the request blocks until you release the lock (use a thread with a timeout) \u2014 either approach proves the flock is held; (b) test the unfiltered GET /goals fan-out across two configured repos (entries from both, each with its slug); (c) test \"repo not configured\" 404 (entry without path); (d) test invalid JSON body \u2192 400.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0147",
+    "T-0152"
+  ],
+  "acceptance": [
+    "A non-ASCII Authorization header yields 401, never 500 (test)",
+    "Bodies over 64 KiB \u2192 413 and goals over 20000 chars \u2192 400 (tests)",
+    "Import failure message names the mcp package and uv sync, no dependency group; pyproject.toml unchanged",
+    "Module docstring and repos.toml.example state that requester scoping is kgpt's job",
+    "Tests prove the per-slug flock is held, cover the multi-repo GET fan-out, the not-configured 404 and the invalid-JSON 400",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the three scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "tests/test_serve.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [
+    "T-0147"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 2100,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_serve.py",
+    "fix_round_for": "T-0147",
+    "worktree_base": "task/T-0147"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0153",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean, working tree clean.\n\n## Summary\n\nFixed all 5 items from the T-0152 security review on `orchestrator/serve.py`, `tests/test_serve.py`, `.orchestrator/repos.toml.example`:\n\n1. **Auth non-ASCII crash** \u2014 `_auth_error` now encodes both the presented token and `ORCH_SERVICE_TOKEN` with `.encode(\"utf-8\", \"surrogateescape\")` before `hmac.compare_digest`, wrapped in `try/except Exception` \u2192 401 instead of 500.\n2. **Body/goal size bounds** \u2014 added `MAX_BODY_BYTES = 65536` and `MAX_GOAL_CHARS = 20000` module constants; `create_goal` now returns 413 `{\"reason\": \"body too large\"}` for oversized bodies and 400 `{\"reason\": \"goal too long\"}` for oversized goals.\n3. **Import failure message** \u2014 now reads \"starlette/uvicorn missing: they ship with the mcp package this project depends on; reinstall with uv sync\" (no dependency-group mention); `pyproject.toml` untouched.\n4. **Requester scoping** \u2014 documented in the `serve.py` module docstring and as a comment in `repos.toml.example`: the bearer authenticates one kgpt connection, kgpt scopes users before forwarding. No enforcement code added.\n5. **Tests** \u2014 added a real flock-held serialization proof (thread blocks on POST /goals until the externally-held lock is released), multi-repo unfiltered GET /goals fan-out, repo-not-configured 404, invalid-JSON 400, oversized-body 413, oversized-goal 400, and non-ASCII bearer 401 cases.\n\n**Files changed:** `orchestrator/serve.py`, `tests/test_serve.py`, `.orchestrator/repos.toml.example` (exactly the three scoped paths; no others touched, no new dependencies).\n\n**Test output:** `uv run python -m unittest discover -q tests` \u2192 `Ran 182 tests in 29.640s \u2014 OK` (no failures). `tests_green.sh` gate exits 0.\n\nCommitted on `task/T-0153` as `38db9bb`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789740687.5265331,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789740687.529491,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0153",
+      "claimed_at": 1789740687.529361
+    },
+    {
+      "ts": 1789740687.5416498,
+      "pid": 65541,
+      "account": "B"
+    },
+    {
+      "ts": 1789740892.612458,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean, working tree clean.\n\n## Summary\n\nFixed all 5 items from the T-0152 security review on `orchestrator/serve.py`, `tests/test_serve.py`, `.orchestrator/repos.toml.example`:\n\n1. **Auth non-ASCII crash** \u2014 `_auth_error` now encodes both the presented token and `ORCH_SERVICE_TOKEN` with `.encode(\"utf-8\", \"surrogateescape\")` before `hmac.compare_digest`, wrapped in `try/except Exception` \u2192 401 instead of 500.\n2. **Body/goal size bounds** \u2014 added `MAX_BODY_BYTES = 65536` and `MAX_GOAL_CHARS = 20000` module constants; `create_goal` now returns 413 `{\"reason\": \"body too large\"}` for oversized bodies and 400 `{\"reason\": \"goal too long\"}` for oversized goals.\n3. **Import failure message** \u2014 now reads \"starlette/uvicorn missing: they ship with the mcp package this project depends on; reinstall with uv sync\" (no dependency-group mention); `pyproject.toml` untouched.\n4. **Requester scoping** \u2014 documented in the `serve.py` module docstring and as a comment in `repos.toml.example`: the bearer authenticates one kgpt connection, kgpt scopes users before forwarding. No enforcement code added.\n5. **Tests** \u2014 added a real flock-held serialization proof (thread blocks on POST /goals until the externally-held lock is released), multi-repo unfiltered GET /goals fan-out, repo-not-configured 404, invalid-JSON 400, oversized-body 413, oversized-goal 400, and non-ASCII bearer 401 cases.\n\n**Files changed:** `orchestrator/serve.py`, `tests/test_serve.py`, `.orchestrator/repos.toml.example` (exactly the three scoped paths; no others touched, no new dependencies).\n\n**Test output:** `uv run python -m unittest discover -q tests` \u2192 `Ran 182 tests in 29.640s \u2014 OK` (no failures). `tests_green.sh` gate exits 0.\n\nCommitted on `task/T-0153` as `38db9bb`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789740908.846089,
+      "pipeline": {
+        "gated_at": 1789740908.845906
+      }
+    },
+    {
+      "ts": 1789741130.0298722,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789741131.104519,
+      "pipeline": {
+        "gated_at": 1789740908.845906,
+        "review_held_at": 1789741131.104429
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789741913.169976,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "hold_reason": null,
+      "merged_via": "T-0158 (rebased fix round)"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789740687.529361,
+  "pid": 65541,
+  "account": "B",
+  "pipeline": {
+    "gated_at": 1789740908.845906,
+    "review_held_at": 1789741131.104429
+  },
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0073",
+  "merged_via": "T-0158 (rebased fix round)"
+}

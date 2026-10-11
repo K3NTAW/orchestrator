@@ -1,0 +1,125 @@
+{
+  "id": "T-0786",
+  "created_at": 1790083683.696245,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "P2 + P3/P4 (library, v2): canonical evidence objects and a deterministic context router (HIDE/SHORT/LONG/FULL) with role profiles, pure functions, no packet wiring",
+  "spec": "This task builds the evidence + context-router library; the rules in sections A and B below are the sole source of truth (the program brief is not on the goal branch; do not look for it). This task builds the library; T-<wiring task> (filed separately, depends on this) hooks it into spawn packets in shadow. No existing behaviour changes.\n\nA. orchestrator/evidence.py (new)\n- `@dataclass(frozen=True) Evidence`: id (str, 12-hex sha256 over f\"{source_type}|{location}|{content_hash}\"), source_type (one of SOURCE_TYPES = (\"source_chunk\", \"test_result\", \"scout_finding\", \"memory_entry\", \"graph_finding\", \"previous_result\", \"review_finding\", \"architecture_note\", \"decision\", \"external_doc\")), location (str: path[:line-range], task id, memory heading), commit (str, goal head sha or \"\"), content_hash (sha256 of the raw content, full hex), content (str, raw, bounded by the caller), summary_short (str \u2264 160 chars: deterministic first meaningful line / signature / heading), summary_long (str \u2264 600 chars: first 600 chars of content with whitespace collapsed; callers may pass a better one), relevance (dict: scope_match bool, title_terms int (count of task-title words \u22654 chars found in content, case-insensitive), path_terms int (scope path stems found), recent_task str|None), provenance (one of \"repo\", \"bus\", \"memory\", \"scout\", \"external\"), observed_at (float epoch), trust (\"trusted\" for provenance repo/memory, \"untrusted\" otherwise).\n- `make(source_type, location, content, *, commit=\"\", provenance, task=None, scope=(), summary_long=None, observed_at=None) -> Evidence` computes id, hashes, summaries and relevance from task title/scope when task is given.\n- `EvidencePool` bound to a goal (NOT `Pool`: orchestrator/pool.py already owns that name): file `.orchestrator/evidence/<goal>.jsonl` under STATE (create dir), `add(ev)` idempotent by id (returns existing), `get(id)`, `by_type(t)`, `fresh(ev, head_sha)` (True when ev.commit == head_sha or source_type not in (\"source_chunk\",\"test_result\")), `stale_ids(head_sha)`. Never store secrets: run jev.redact over content before persisting and note it in the docstring.\n- `cache_key(ev, task_class, role, level)` = sha256 of f\"{ev.content_hash}|{task_class}|{role}|{level}\"[:16] (P7 key shape; no summariser yet).\n\nB. orchestrator/context_router.py (new)\n- LEVELS = (\"HIDE\", \"SHORT\", \"LONG\", \"FULL\"); `@dataclass Routed`: evidence_id, level, reason (short deterministic string, e.g. \"in_scope_file\", \"acceptance\", \"failing_output\", \"unrelated_memory\", \"stale\", \"read_scope\", \"dependency\", \"ambiguous\"), tokens_full, tokens_at_level (chars//4 of the text render() would emit).\n- `route(task, candidates: list[Evidence], *, role, head_sha=None, cfg=None) -> RoutedPacket` with RoutedPacket fields: items (list[Routed]), candidate_tokens, routed_tokens, reduction_ratio (routed/candidate, 1.0 when candidate 0), ambiguous_ids (list), profile (role name), rules_version (\"v1\").\n- Deterministic rules (P4), applied in this order, first match wins: FULL when source_type==\"source_chunk\" and location's path is in task scope (write scope) and role in (\"execute\", \"scout\"); FULL for source_type \"test_result\" whose location matches a failing id in task.constraints/pipeline (fix rounds) or whose content contains \"FAIL\"/\"ERROR\"; FULL for the task's own spec/acceptance (source_type \"architecture_note\" with location \"task:<id>:spec|acceptance\", callers create these); HIDE when relevance.scope_match is False and title_terms == 0 and path_terms == 0 and source_type in (\"memory_entry\", \"decision\", \"previous_result\", \"review_finding\"); HIDE when not fresh(ev, head_sha) and source_type in (\"source_chunk\", \"test_result\"); SHORT for source_chunk not in scope (read scope / imports) in every role; LONG for previous_result, scout_finding, decision, memory_entry that match by scope or title terms; everything else \u2192 LONG with reason \"ambiguous\" and the id appended to ambiguous_ids (P5 hands these to Jev later; never call Jev here).\n- Role profiles (P6): execute as above; review: source_chunk in scope \u2192 LONG (interface summary) not FULL, review_finding/previous_result \u2192 SHORT, test_result \u2192 FULL; security_review: like review plus FULL for any source_chunk whose path matches a [review] security_paths glob from cfg; planner: every source_chunk \u2192 SHORT, decisions/architecture_note \u2192 LONG; scout: FULL only for source_chunk in scope, else SHORT. Unknown role \u2192 execute profile.\n- `render(routed_packet, evidence_pool_or_lookup) -> str`: \"## evidence (routed v1)\" followed by one block per non-HIDE item: SHORT = \"- {location} \u2014 {summary_short}\", LONG = \"- {location}\\n  {summary_long}\", FULL = \"- {location}\\n```\\n{content}\\n```\"; HIDE items are counted in a trailing line \"hidden: N\". Deterministic ordering: FULL, LONG, SHORT, then by location.\n- `decision_row(task, routed_packet, *, mode)` returns a dict that the caller splats directly: `decision_log.record(**row)`; the dict therefore INCLUDES kind=\"context_selection\" and subject=task[\"id\"] plus candidates = [id:level], hard_constraints = the FULL reasons, deterministic = {counts per level, candidate_tokens, routed_tokens, reduction_ratio, ambiguous: n}, selected = \"routed v1\", reason = f\"{role} profile rules v1\", mode = mode; no chain-of-thought text, no content. (Uses decision_log kind context_selection from T-0772.)\n\nC. Tests (unittest, `import _harness` first): tests/test_evidence.py::test_make_ids_are_content_addressed_and_redacted, ::test_pool_add_is_idempotent_and_fresh_by_commit; tests/test_context_router.py::test_execute_profile_full_for_scope_hide_unrelated_memory, ::test_review_profile_long_for_scope_and_full_tests, ::test_render_orders_and_counts_hidden, ::test_reduction_ratio_and_ambiguous_bucket, ::test_decision_row_has_no_content. Fixtures build Evidence via make(); no real repo needed.\nD. docs/context-economy/05-context-router.md (\u226480 lines): the rule table per role, the Evidence schema, what shadow will log (from the wiring task), what is explicitly not done yet (Jev P5, summariser P7, active mode P21).\nConstraints: no new dependencies; never call Jev; never read files outside STATE in this module (callers build Evidence). Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-22 15:45) after spec review T-0784 (request_changes), binding on top of v1:\n- The brief citation is dropped; sections A/B are the source of truth. 05-context-router.md documents the rules as implemented and lists Jev classification, query-time summaries and active mode as \"not in this task\".\n- evidence.EvidencePool replaces the name Pool everywhere (class, docs, tests).\n- decision_row() returns the full keyword set for decision_log.record (kind, subject, candidates, hard_constraints, deterministic, selected, reason, mode, extra); the test test_decision_row_has_no_content asserts decision_log.record(**row) succeeds against the harness root and the stored row contains no Evidence.content text.\n- Acceptance \"no change to any existing module\" becomes mechanically checkable: `git diff --stat goal/T-0760...HEAD` names only files in this task's scope; the Planner runs that check before merge.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_evidence.py::test_make_ids_are_content_addressed_and_redacted passes",
+    "tests/test_evidence.py::test_pool_add_is_idempotent_and_fresh_by_commit passes",
+    "tests/test_context_router.py::test_execute_profile_full_for_scope_hide_unrelated_memory passes",
+    "tests/test_context_router.py::test_review_profile_long_for_scope_and_full_tests passes",
+    "tests/test_context_router.py::test_render_orders_and_counts_hidden passes",
+    "tests/test_context_router.py::test_reduction_ratio_and_ambiguous_bucket passes",
+    "tests/test_context_router.py::test_decision_row_has_no_content passes",
+    "docs/context-economy/05-context-router.md exists; git diff --stat goal/T-0760...HEAD names only files in scope; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/evidence.py",
+    "orchestrator/context_router.py",
+    "tests/test_evidence.py",
+    "tests/test_context_router.py",
+    "docs/context-economy/05-context-router.md"
+  ],
+  "depends_on": [
+    "T-0772"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790083709.690472,
+      "pipeline": {
+        "first_ready_at": 1790083709.690388
+      }
+    },
+    {
+      "ts": 1790083709.7592509,
+      "pipeline": {
+        "first_ready_at": 1790083709.690388,
+        "spec_review_at": 1790083709.759169,
+        "spec_review_at_lease": 1790084609.759169
+      }
+    },
+    {
+      "ts": 1790083709.767936,
+      "pipeline": {
+        "first_ready_at": 1790083709.690388,
+        "spec_review_at": 1790083709.759169,
+        "spec_review_at_lease": 1790084609.759169,
+        "spec_review_at_done": 1790083709.767691
+      }
+    },
+    {
+      "ts": 1790083937.6663208,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "Rule 2 (\"FULL for test_result whose location matches a failing id in task.constraints/pipeline\") points at the wrong task fields. In this codebase failing test ids live at task[\"resume_hint\"][\"failures\"] (raw pytest output, parsed by failures.test_ids / daemon._test_ids), not under task[\"constraints\"] or task[\"pipeline\"] -- constraints only carries fix_round_for (parent task id) and pipeline carries dispatch/gate timestamps. As specced this branch of the rule can never match real task data; only the fallback \"content contains FAIL/ERROR\" clause would ever fire. Acceptance tests build Evidence via make() with fixture task dicts, so this dead branch will pass all five named tests and ship silently broken for the wiring task.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "The FULL-for-scope rule (\"source_chunk ... path is in task scope (write scope)\") only mentions task scope, but three existing modules (jev_sched.py:81, stale.py:52, speculation.py:62) resolve write scope as task.get(\"scope\") or task.get(\"write_scope\"). If route() checks only task[\"scope\"], tasks that populate write_scope instead will be misrouted (in-scope files demoted to SHORT for execute/scout roles instead of FULL). Not caught by the acceptance tests since those construct task dicts directly.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/evidence.py",
+          "issue": "Section A specs EvidencePool.fresh(ev, head_sha) as an instance method, but section B's route() (module-level function in context_router.py, no EvidencePool/goal parameter) must invoke the same freshness check for its HIDE rule. fresh()'s own definition depends only on ev.commit and source_type, not on any goal-bound pool state, so it can be called without an instance -- but the spec doesn't say it must be a staticmethod/module function, so an executor could implement it as a true instance method tied to self, leaving context_router with no way to call it per its given signature.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790083968.928268,
+      "status": "failed",
+      "reason": "superseded 16:00 by T-0789 (spec v3 after spec review T-0788: failing ids from resume_hint via failures.test_ids, scope|write_scope alias, module-level evidence.fresh)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790083709.690388,
+    "spec_review_at": 1790083709.759169,
+    "spec_review_at_lease": 1790084609.759169,
+    "spec_review_at_done": 1790083709.767691
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "Rule 2 (\"FULL for test_result whose location matches a failing id in task.constraints/pipeline\") points at the wrong task fields. In this codebase failing test ids live at task[\"resume_hint\"][\"failures\"] (raw pytest output, parsed by failures.test_ids / daemon._test_ids), not under task[\"constraints\"] or task[\"pipeline\"] -- constraints only carries fix_round_for (parent task id) and pipeline carries dispatch/gate timestamps. As specced this branch of the rule can never match real task data; only the fallback \"content contains FAIL/ERROR\" clause would ever fire. Acceptance tests build Evidence via make() with fixture task dicts, so this dead branch will pass all five named tests and ship silently broken for the wiring task.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "The FULL-for-scope rule (\"source_chunk ... path is in task scope (write scope)\") only mentions task scope, but three existing modules (jev_sched.py:81, stale.py:52, speculation.py:62) resolve write scope as task.get(\"scope\") or task.get(\"write_scope\"). If route() checks only task[\"scope\"], tasks that populate write_scope instead will be misrouted (in-scope files demoted to SHORT for execute/scout roles instead of FULL). Not caught by the acceptance tests since those construct task dicts directly.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/evidence.py",
+      "issue": "Section A specs EvidencePool.fresh(ev, head_sha) as an instance method, but section B's route() (module-level function in context_router.py, no EvidencePool/goal parameter) must invoke the same freshness check for its HIDE rule. fresh()'s own definition depends only on ev.commit and source_type, not on any goal-bound pool state, so it can be called without an instance -- but the spec doesn't say it must be a staticmethod/module function, so an executor could implement it as a true instance method tied to self, leaving context_router with no way to call it per its given signature.",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "reason": "superseded 16:00 by T-0789 (spec v3 after spec review T-0788: failing ids from resume_hint via failures.test_ids, scope|write_scope alias, module-level evidence.fresh)"
+}

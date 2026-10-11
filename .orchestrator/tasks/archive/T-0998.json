@@ -1,0 +1,516 @@
+{
+  "id": "T-0998",
+  "created_at": 1790153739.65799,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S1a memory_store: structured WARM/COLD memory index (SQLite + FTS5) with reversible migration from the Markdown memory files and filtered search (P1-P3)",
+  "spec": "Create orchestrator/memory_store.py. Record dataclass fields: id (stable: sha1 of kind+date+title, first 12 hex), kind (one of decision, gotcha, architecture, model_note, retrospective, strategy, skill_outcome), title, date (ISO yyyy-mm-dd), repo, components (list), files (list of repo-relative paths mentioned), tags (list), provenance (markdown|planner|daemon|worker), outcome, revert_path, superseded_by, source_task, source_goal, tier (hot|warm|cold), body, sha (content hash).\nStore: .orchestrator/memory/index.sqlite with table records (all fields, json-encoded lists) and an FTS5 external-content table records_fts over title, body, tags, components, files; feature-detect FTS5 at open (create a probe virtual table in memory); if unavailable fall back to LIKE search and record a warning in the returned metadata; never crash.\nMigration migrate(root): parse .orchestrator/memory/decisions.md, gotchas.md, architecture.md and model-notes.md. Entries are the existing dated blocks (look at the real files: entries begin with a dash or heading that starts with an ISO date or contain one in the first line; group continuation lines until the next dated entry). Extract: date, title (first sentence, max 160 chars), body, task ids (T-dddd pattern) into source_task and source_goal (goal ids are tasks whose title starts with GOAL:, look them up via bus.get when present), files (paths matching orchestrator/*.py, tests/*.py, .claude/**, .orchestrator/** patterns in the text), components (module basenames of those files), revert_path (text after 'Revert path:' or 'revert path' up to end of sentence, when present), superseded_by (when the text says superseded by T-dddd), tags (kind plus words like security, gate, daemon, jev, skills, memory, cache found in the text). Migration never modifies the Markdown files (they stay as the COLD archive and the provenance); it is idempotent (same ids on rerun) and reversible: rebuild(root) drops and recreates the index from the Markdown files alone. add(record, root) inserts or updates one record by id and appends nothing to Markdown (writers of Markdown stay as they are today). tier defaults: warm for everything migrated; cold when superseded_by is set or the date is older than 30 days and the kind is retrospective or model_note; hot is never assigned by this task (stage 2 does).\nsearch(query, *, kind=None, component=None, file=None, task_class=None, model=None, date_from=None, date_to=None, tag=None, tier=None, limit=20) returns records ordered by FTS rank then date desc; filters are AND; query may be empty (filters only); task_class and model match tags. All queries parameterized.\nCLI in orchestrator/cli.py: `orchestrator memory migrate`, `memory rebuild`, `memory search <query> [--kind ...] [--component ...] [--file ...] [--tag ...] [--since yyyy-mm-dd] [--tier ...] [--limit n] [--json]`, `memory show <id>`. Text output is one line per hit: id, date, kind, title.\nDocs: docs/hermes-hardening/01-memory-store.md (schema, migration rules, reversibility, CLI, measured record counts after migrating this repository's real memory files). The migration must run successfully against this repository's real .orchestrator/memory files (report counts per kind in the result).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-0992"
+  ],
+  "acceptance": [
+    "tests/test_memory_store.py::test_migrate_parses_real_memory_files_idempotently (runs migrate twice on a copy of the repository's memory files; same record ids and counts, Markdown untouched)",
+    "tests/test_memory_store.py::test_search_fts_and_filters (text query plus kind/component/file/tag/date filters AND together; empty query with filters works)",
+    "tests/test_memory_store.py::test_rebuild_is_reversible (add a record, rebuild, the record is gone and the migrated set is back)",
+    "tests/test_memory_store.py::test_fts_fallback_when_unavailable (monkeypatched probe failure falls back to LIKE with a warning in metadata)",
+    "tests/test_cli.py::test_memory_search_cli (memory migrate then memory search --json returns hits)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/memory_store.py",
+    "orchestrator/cli.py",
+    "tests/test_memory_store.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/01-memory-store.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0998",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/memory_store.py",
+        "issue": "Record.source_task and source_goal are singular, but real decisions.md entries routinely list many T-dddd ids in one 'tasks:' field (examples in this repo: 26, 23, 19, 18 ids in a single entry). A singular field forces either data loss (keep one id) or ad-hoc string-packing not covered by the spec, and the acceptance test for idempotent migration won't catch this since it only checks id/count stability, not content completeness.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/memory_store.py",
+        "issue": "source_goal is specified to come from looking up each T-dddd id via bus.get and checking for a 'GOAL:' title prefix. In this repository .orchestrator/tasks/ is currently empty (0 files) \u2014 every historical id from decisions.md (T-0001, T-0002, ... T-0800+) will raise KeyError/miss, so source_goal will end up empty for nearly all real migrated records. Every entry already carries an explicit, reliable 'goal: <id>' label on the same 'type:' line (e.g. 'type: decision \u00b7 goal: T-0043 \u00b7 tasks: ...'), which the spec ignores in favor of a lookup that can't resolve against the archived state actually present.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/install.py",
+        "issue": "The new .orchestrator/memory/index.sqlite is a derived/rebuildable artifact analogous to .orchestrator/bus.sqlite*, which is already gitignored and listed in install.py's ignore set (line 10). The spec's scope list omits install.py and .gitignore, so nothing stops the new index db from being committed or copied into every worktree.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Change source_task/source_goal to lists (or a single joined field) so every T-dddd id in an entry's 'tasks:' field is preserved, not just one.",
+      "Extract source_goal primarily by parsing the entry's own 'goal: <id>' label (already present on every dated block); use bus.get only as a secondary check to detect which ids among 'tasks:' are themselves GOAL: tasks, and treat a bus.get miss as expected (not a warning) since archived task json is routinely pruned.",
+      "Add .orchestrator/memory/index.sqlite to .gitignore and to orchestrator/install.py's ignored-path list, and add both files to the task's scope."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790153744.470919,
+      "packet_meta": {
+        "chars": 5273,
+        "est_tokens": 1318,
+        "presented_tokens": 1318,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "50aa2b0128a993b373190908b0f0533c26aec917911052ee4e6110e80ed11b7b"
+          },
+          "spec": {
+            "chars": 3869,
+            "est_tokens": 967,
+            "sha256": "807240373300a5765880e1bc9149c36f4ce59e97d5799dc4a61fd7fe654969ee"
+          },
+          "acceptance": {
+            "chars": 775,
+            "est_tokens": 193,
+            "sha256": "7fb2744318034c1c2cd0b3bfe5c2cda83f1afa3e9e282d14354293b4f57e30e8"
+          },
+          "scope": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "871bf3d508ec3cb45774e783db9e116ee34432ec6f14e3c47698a7ef9510e6d4"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 353,
+            "est_tokens": 88,
+            "sha256": "9db2974817ad99ccd123528dec6a9e1096bd3d47c7f7d8e9194d7119c4717859"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "8ad503fa9203",
+        "version": "8ad503fa9203",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0992 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790153747.936563,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0998",
+      "claimed_at": 1790153747.9357271
+    },
+    {
+      "ts": 1790153747.939994,
+      "account": "B"
+    },
+    {
+      "ts": 1790153758.935391,
+      "pid": 90503,
+      "account": "B"
+    },
+    {
+      "ts": 1790153849.673803,
+      "packet_meta": {
+        "chars": 5273,
+        "est_tokens": 1318,
+        "presented_tokens": 1318,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "50aa2b0128a993b373190908b0f0533c26aec917911052ee4e6110e80ed11b7b"
+          },
+          "spec": {
+            "chars": 3869,
+            "est_tokens": 967,
+            "sha256": "807240373300a5765880e1bc9149c36f4ce59e97d5799dc4a61fd7fe654969ee"
+          },
+          "acceptance": {
+            "chars": 775,
+            "est_tokens": 193,
+            "sha256": "7fb2744318034c1c2cd0b3bfe5c2cda83f1afa3e9e282d14354293b4f57e30e8"
+          },
+          "scope": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "871bf3d508ec3cb45774e783db9e116ee34432ec6f14e3c47698a7ef9510e6d4"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 353,
+            "est_tokens": 88,
+            "sha256": "9db2974817ad99ccd123528dec6a9e1096bd3d47c7f7d8e9194d7119c4717859"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "8ad503fa9203",
+        "version": "8ad503fa9203",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0992 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "2b64ac1b-1c63-4c75-bdc4-6cff529eafa0"
+      }
+    },
+    {
+      "ts": 1790153849.691324,
+      "packet_meta": {
+        "chars": 5273,
+        "est_tokens": 1318,
+        "presented_tokens": 1318,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "50aa2b0128a993b373190908b0f0533c26aec917911052ee4e6110e80ed11b7b"
+          },
+          "spec": {
+            "chars": 3869,
+            "est_tokens": 967,
+            "sha256": "807240373300a5765880e1bc9149c36f4ce59e97d5799dc4a61fd7fe654969ee"
+          },
+          "acceptance": {
+            "chars": 775,
+            "est_tokens": 193,
+            "sha256": "7fb2744318034c1c2cd0b3bfe5c2cda83f1afa3e9e282d14354293b4f57e30e8"
+          },
+          "scope": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "871bf3d508ec3cb45774e783db9e116ee34432ec6f14e3c47698a7ef9510e6d4"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 353,
+            "est_tokens": 88,
+            "sha256": "9db2974817ad99ccd123528dec6a9e1096bd3d47c7f7d8e9194d7119c4717859"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "8ad503fa9203",
+        "version": "8ad503fa9203",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0992 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "2b64ac1b-1c63-4c75-bdc4-6cff529eafa0",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790153849.696786,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/memory_store.py",
+            "issue": "Record.source_task and source_goal are singular, but real decisions.md entries routinely list many T-dddd ids in one 'tasks:' field (examples in this repo: 26, 23, 19, 18 ids in a single entry). A singular field forces either data loss (keep one id) or ad-hoc string-packing not covered by the spec, and the acceptance test for idempotent migration won't catch this since it only checks id/count stability, not content completeness.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/memory_store.py",
+            "issue": "source_goal is specified to come from looking up each T-dddd id via bus.get and checking for a 'GOAL:' title prefix. In this repository .orchestrator/tasks/ is currently empty (0 files) \u2014 every historical id from decisions.md (T-0001, T-0002, ... T-0800+) will raise KeyError/miss, so source_goal will end up empty for nearly all real migrated records. Every entry already carries an explicit, reliable 'goal: <id>' label on the same 'type:' line (e.g. 'type: decision \u00b7 goal: T-0043 \u00b7 tasks: ...'), which the spec ignores in favor of a lookup that can't resolve against the archived state actually present.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/install.py",
+            "issue": "The new .orchestrator/memory/index.sqlite is a derived/rebuildable artifact analogous to .orchestrator/bus.sqlite*, which is already gitignored and listed in install.py's ignore set (line 10). The spec's scope list omits install.py and .gitignore, so nothing stops the new index db from being committed or copied into every worktree.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Change source_task/source_goal to lists (or a single joined field) so every T-dddd id in an entry's 'tasks:' field is preserved, not just one.",
+          "Extract source_goal primarily by parsing the entry's own 'goal: <id>' label (already present on every dated block); use bus.get only as a secondary check to detect which ids among 'tasks:' are themselves GOAL: tasks, and treat a bus.get miss as expected (not a warning) since archived task json is routinely pruned.",
+          "Add .orchestrator/memory/index.sqlite to .gitignore and to orchestrator/install.py's ignored-path list, and add both files to the task's scope."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790153849.697898,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/memory_store.py",
+          "issue": "Record.source_task and source_goal are singular, but real decisions.md entries routinely list many T-dddd ids in one 'tasks:' field (examples in this repo: 26, 23, 19, 18 ids in a single entry). A singular field forces either data loss (keep one id) or ad-hoc string-packing not covered by the spec, and the acceptance test for idempotent migration won't catch this since it only checks id/count stability, not content completeness.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/memory_store.py",
+          "issue": "source_goal is specified to come from looking up each T-dddd id via bus.get and checking for a 'GOAL:' title prefix. In this repository .orchestrator/tasks/ is currently empty (0 files) \u2014 every historical id from decisions.md (T-0001, T-0002, ... T-0800+) will raise KeyError/miss, so source_goal will end up empty for nearly all real migrated records. Every entry already carries an explicit, reliable 'goal: <id>' label on the same 'type:' line (e.g. 'type: decision \u00b7 goal: T-0043 \u00b7 tasks: ...'), which the spec ignores in favor of a lookup that can't resolve against the archived state actually present.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/install.py",
+          "issue": "The new .orchestrator/memory/index.sqlite is a derived/rebuildable artifact analogous to .orchestrator/bus.sqlite*, which is already gitignored and listed in install.py's ignore set (line 10). The spec's scope list omits install.py and .gitignore, so nothing stops the new index db from being committed or copied into every worktree.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 5273,
+    "est_tokens": 1318,
+    "presented_tokens": 1318,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "50aa2b0128a993b373190908b0f0533c26aec917911052ee4e6110e80ed11b7b"
+      },
+      "spec": {
+        "chars": 3869,
+        "est_tokens": 967,
+        "sha256": "807240373300a5765880e1bc9149c36f4ce59e97d5799dc4a61fd7fe654969ee"
+      },
+      "acceptance": {
+        "chars": 775,
+        "est_tokens": 193,
+        "sha256": "7fb2744318034c1c2cd0b3bfe5c2cda83f1afa3e9e282d14354293b4f57e30e8"
+      },
+      "scope": {
+        "chars": 154,
+        "est_tokens": 38,
+        "sha256": "871bf3d508ec3cb45774e783db9e116ee34432ec6f14e3c47698a7ef9510e6d4"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 353,
+        "est_tokens": 88,
+        "sha256": "9db2974817ad99ccd123528dec6a9e1096bd3d47c7f7d8e9194d7119c4717859"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "8ad503fa9203",
+    "version": "8ad503fa9203",
+    "candidate_known": false,
+    "base": "6b7a41246767",
+    "sources": "task@T-0992 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "2b64ac1b-1c63-4c75-bdc4-6cff529eafa0",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790153747.9357271,
+  "account": "B",
+  "pid": 90503,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/memory_store.py",
+      "issue": "Record.source_task and source_goal are singular, but real decisions.md entries routinely list many T-dddd ids in one 'tasks:' field (examples in this repo: 26, 23, 19, 18 ids in a single entry). A singular field forces either data loss (keep one id) or ad-hoc string-packing not covered by the spec, and the acceptance test for idempotent migration won't catch this since it only checks id/count stability, not content completeness.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/memory_store.py",
+      "issue": "source_goal is specified to come from looking up each T-dddd id via bus.get and checking for a 'GOAL:' title prefix. In this repository .orchestrator/tasks/ is currently empty (0 files) \u2014 every historical id from decisions.md (T-0001, T-0002, ... T-0800+) will raise KeyError/miss, so source_goal will end up empty for nearly all real migrated records. Every entry already carries an explicit, reliable 'goal: <id>' label on the same 'type:' line (e.g. 'type: decision \u00b7 goal: T-0043 \u00b7 tasks: ...'), which the spec ignores in favor of a lookup that can't resolve against the archived state actually present.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/install.py",
+      "issue": "The new .orchestrator/memory/index.sqlite is a derived/rebuildable artifact analogous to .orchestrator/bus.sqlite*, which is already gitignored and listed in install.py's ignore set (line 10). The spec's scope list omits install.py and .gitignore, so nothing stops the new index db from being committed or copied into every worktree.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

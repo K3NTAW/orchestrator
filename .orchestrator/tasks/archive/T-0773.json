@@ -1,0 +1,96 @@
+{
+  "id": "T-0773",
+  "created_at": 1790081215.561898,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "Deterministic context win 1: send spec, acceptance and scope once per execute prompt (packet only), all three render call sites",
+  "spec": "P0 audit finding (docs/context-economy/00-audit.md, plan.md): every execute prompt carries spec, acceptance and scope twice: once inside the packet built by spawn._packet_body (sections objective \"- discovery: {spec}\", acceptance, write_scope; spawn.py ~286-305) and again as literal lines in .orchestrator/prompts/execute.md (\"Spec: {{spec}}\", \"Acceptance: {{acceptance}}\", \"Scope (only these paths): {{scope}}\"). The P1 telemetry (merged before this task; context field on runs, per-section meta) is the before/after measure.\nDo:\n1. .orchestrator/prompts/execute.md: remove the three literal lines. Replace with one line: \"The packet above is the task contract: implement the ## objective, satisfy every line of ## acceptance, and edit only paths listed in ## write_scope.\" Keep every other instruction line verbatim (gate loop, commit, unittest rules, _harness rule, dependencies, tool-call budget).\n2. spawn.render: execute no longer needs spec/acceptance/scope kwargs. Update the three call sites so they pass only packet= (spawn.py:773-774 run_worker, daemon.py:561 _dispatch_fresh_fix, daemon.py:853 dispatch). render()'s unfilled-placeholder check must still pass (no leftover {{spec}} tokens) and extra kwargs must not be silently required; if any call site appends more text after render (spawn.py:774 `+ \\`), keep that text.\n3. Packet guarantee: _packet_body must keep objective (with the full spec), acceptance and write_scope untrimmable even when the packet is over the 4800-char cap (they already are: trimmable = dependencies, evidence, decisions, gotchas, symbols, relevant_tests). Add a regression test that a task with a 9000-char spec and 6 acceptance lines still has every acceptance line and the full spec text and every scope path in the rendered execute prompt exactly once.\n4. Fix-round path: _dispatch_fresh_fix renders execute for the fix task; the fix task's spec is the fix-round spec (failures + acceptance). Verify the packet's objective carries it and nothing is lost; the repair delta path (executor.reply) is unaffected.\n5. Update P1 telemetry expectations if a test in tests/test_spawn.py or tests/test_daemon.py asserts on instruction tokens or on the literal \"Spec:\" line; adjust the expected numbers, never weaken the assertion shape.\n6. Record the measured delta in docs/context-economy/03-dedup-execute-prompt.md (\u226430 lines): chars and est_tokens of the execute prompt for one representative task before and after (use spawn.packet_run_meta or the P1 section meta on a fixture task), and the revert path (git revert the commit).\nTests: tests/test_spawn.py::test_execute_prompt_carries_contract_once (spec, each acceptance line and each scope path appear exactly once in the rendered prompt; no \"Spec:\" literal); tests/test_daemon.py::test_fresh_fix_prompt_renders_without_contract_kwargs (the fresh-fix render path succeeds and the prompt contains the fix spec once). Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_prompt_carries_contract_once passes",
+    "tests/test_daemon.py::test_fresh_fix_prompt_renders_without_contract_kwargs passes",
+    ".orchestrator/prompts/execute.md has no {{spec}}, {{acceptance}} or {{scope}} placeholders and all three render call sites pass only packet=",
+    "docs/context-economy/03-dedup-execute-prompt.md records before/after chars and est_tokens; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    ".orchestrator/prompts/execute.md",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py",
+    "docs/context-economy/03-dedup-execute-prompt.md"
+  ],
+  "depends_on": [
+    "T-0769",
+    "T-0771"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "refactor",
+    "route": "straightforward"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790084465.832148,
+      "pipeline": {
+        "first_ready_at": 1790084465.8320901
+      }
+    },
+    {
+      "ts": 1790084465.8338938,
+      "pipeline": {
+        "first_ready_at": 1790084465.8320901,
+        "dispatched_at": 1790084465.8338282,
+        "dispatched_at_lease": 1790085365.8338282
+      }
+    },
+    {
+      "ts": 1790085388.266189,
+      "pipeline": {
+        "first_ready_at": 1790084465.8320901
+      }
+    },
+    {
+      "ts": 1790085391.306335,
+      "pipeline": {
+        "first_ready_at": 1790084465.8320901,
+        "dispatched_at": 1790085391.3062668,
+        "dispatched_at_lease": 1790086291.3062668
+      }
+    },
+    {
+      "ts": 1790086296.405996,
+      "pipeline": {
+        "first_ready_at": 1790084465.8320901
+      }
+    },
+    {
+      "ts": 1790086327.96875,
+      "pipeline": {
+        "first_ready_at": 1790084465.8320901,
+        "dispatched_at": 1790086327.9686809,
+        "dispatched_at_lease": 1790087227.9686809
+      }
+    },
+    {
+      "ts": 1790086732.031855,
+      "status": "failed",
+      "reason": "superseded 16:35 by T-0799: spec quoted literal double-brace placeholders, spawn.render raised unfilled_placeholder on every dispatch and the main dispatch path left the task queued with no event"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790084465.8320901,
+    "dispatched_at": 1790086327.9686809,
+    "dispatched_at_lease": 1790087227.9686809
+  },
+  "reason": "superseded 16:35 by T-0799: spec quoted literal double-brace placeholders, spawn.render raised unfilled_placeholder on every dispatch and the main dispatch path left the task queued with no event"
+}

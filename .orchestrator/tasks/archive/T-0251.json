@@ -1,0 +1,93 @@
+{
+  "id": "T-0251",
+  "parent": "T-0240",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: F5: codex_reply works again \u2014 `codex exec resume` rejects -C; build the resume argv the CLI accepts and run it with cwd set to the worktree",
+  "spec": "Gotcha 2026-09-19 18:27: orchestrator/executor.py:51 builds every Codex command as [\"codex\", \"exec\", *args, \"--json\", \"-C\", cwd, *access]; for a fix round args = [\"resume\", thread, delta], and the installed Codex CLI answers: error: unexpected argument '-C' found. Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]. So codex_reply (executor.reply) has failed on every fix round since Codex returned; the round counter still incremented (T-0242 rounds 1) and the task stayed running.\nChange executor.py:\n1. Run `codex exec resume --help` once (record the accepted options in the module docstring) and build the resume argv accordingly: the working directory goes to subprocess cwd (the worktree) instead of -C when resume does not accept -C; keep --json only if resume accepts it, otherwise parse the plain final message (last non-empty stdout paragraph) so out[\"message\"] is still filled; keep the sandbox/access flags only where accepted. Fresh `codex exec` argv stays byte-identical.\n2. Split the argv construction into a pure function argv_for(kind, ...) with kind in {\"exec\", \"resume\"} so tests can assert both shapes without spawning codex.\n3. On a CLI usage error (rc 2 with 'unexpected argument' or 'Usage:' in stderr) return status failed with reason prefixed 'codex argv error:' and do not increment rounds.\nTests in tests/test_executor.py: test_resume_argv_has_no_C_flag_and_uses_cwd, test_exec_argv_unchanged, test_usage_error_does_not_count_round (subprocess.run monkeypatched). Final message: paste the `codex exec resume --help` option list you observed.",
+  "inputs": [
+    "T-0249"
+  ],
+  "acceptance": [
+    "tests/test_executor.py::test_resume_argv_has_no_C_flag_and_uses_cwd, ::test_exec_argv_unchanged, ::test_usage_error_does_not_count_round pass",
+    "final message lists the options `codex exec resume --help` printed on this machine and the argv shape chosen",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0251",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 66,
+        "issue": "access=['-s','workspace-write'] is still passed into resume argv when dangerous_full_access is false, but `codex exec resume` rejects -s/--sandbox on this machine (verified: 'error: unexpected argument -s found'), same failure class this diff fixes for -C. The new docstring's own observed-options list for resume omits -s/--sandbox, contradicting this code path. Fix works only because pool.toml currently sets dangerous_full_access=true; flip that and the resume fix loop breaks again, silently (round not consumed, no bus status/log_run update), with no test coverage for this branch.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789837067.1188,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0251",
+      "claimed_at": 1789837067.1184099
+    },
+    {
+      "ts": 1789837067.12048,
+      "account": "B"
+    },
+    {
+      "ts": 1789837067.1596081,
+      "pid": 18944,
+      "account": "B"
+    },
+    {
+      "ts": 1789837223.2240582,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 66,
+            "issue": "access=['-s','workspace-write'] is still passed into resume argv when dangerous_full_access is false, but `codex exec resume` rejects -s/--sandbox on this machine (verified: 'error: unexpected argument -s found'), same failure class this diff fixes for -C. The new docstring's own observed-options list for resume omits -s/--sandbox, contradicting this code path. Fix works only because pool.toml currently sets dangerous_full_access=true; flip that and the resume fix loop breaks again, silently (round not consumed, no bus status/log_run update), with no test coverage for this branch.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789837223.2266119,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789837067.1184099,
+  "account": "B",
+  "pid": 18944,
+  "review_verdict": "request_changes"
+}

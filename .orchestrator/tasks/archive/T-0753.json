@@ -1,0 +1,179 @@
+{
+  "id": "T-0753",
+  "created_at": 1790004959.812135,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: B2 v3: compact delta packets in planner_runs \u2014 decision_packet/grouped_packet delegate to planner_packet.build with changes since the previous decision, structured scout findings, memory titles; escalation packet on re-escalation; packet size into telemetry (P4, P10)",
+  "spec": "Why: planner_runs.decision_packet (planner_runs.py:43-107) and grouped_packet (1063-1090) rebuild a per-point packet with the full spawn packet inventory and 300-char scout summaries, no delta, no memory, no required-output section. planner_packet (merged) provides build(sections, *, goal, previous, changes, scout_findings, memory_hits, cap_chars) -> {text, chars, est_tokens, hash, sections, truncated, delta} and escalation_packet(...); B1 v3 (T-0741, merged) made run_group sections 4-tuples (point, ctx, route, classification) and records launch rows. Spec reviews of T-0743 and T-0747 folded in: rewritten DecisionPacket tests, direct events-table scan, _decision_task for purged held tasks, memory_recall()[\"hits\"], no module-level packet state. The Planner waived a third spec review.\nWhat (planner_runs.py; tests in tests/test_planner_runs_packets.py, tests/test_goals.py, tests/test_planner_runs.py):\n- _packet_sections(sections) -> list of planner_packet section dicts: for each (point, ctx, route, classification): task = _decision_task(point[\"goal_id\"], point[\"kind\"], point[\"payload_key\"]) (existing helper, purged task -> None, never raises); reviews = [{path, line, issue} for every comment in failures.rejecting_reviews(task)] (max 10) when task; failures = the text of (task.resume_hint or task.result).failures when task; depends_on_statuses = [{id, status} for dep in task.depends_on via bus.get, KeyError -> status \"missing\"].\n- _previous_launch(goal_id) -> the planner_runs record of this goal with the latest started_at that has a launch_id, or None.\n- _changes_since(goal_id, cursor) -> list of {\"task\", \"field\", \"from\", \"to\", \"ts\"}: query the sqlite events table directly under bus.locked() \u2014 `select task_id, seq, ts, data from events where seq > ? and task_id in (<the goal id and its children ids>) order by seq` (parameterised, ids from bus.read() filtered by parent == goal_id) \u2014 never through bus.events and its global 200-row page; for each row's data dict, fields status, hold_reason, merged_into only; from = the previous value seen in the scan (None when unknown), to = new; keep the last 20 entries (newest last). cursor = previous[\"cursor_at_launch\"].\n- _scout_findings(goal_id) -> scout_evidence.normalize_findings(scout result) concatenated over the goal's done scout children (max 10, highest confidence first); _memory_hits(goal) -> up to 10 {\"title\": hit title} from scout_evidence.memory_recall(goal title, root=STATE)[\"hits\"] (the same [\"hits\"] extraction spawn.py uses), guarded by try/except Exception -> [].\n- _build_grouped(sections) -> (text, meta): meta is the full planner_packet.build result; build(_packet_sections(sections), goal=bus.get(goal_id), previous={\"state_version\": prev.get(\"state_version\")} if prev else None, changes=_changes_since(goal_id, prev[\"cursor_at_launch\"]) if prev else None, scout_findings=_scout_findings(goal_id), memory_hits=_memory_hits(goal), cap_chars=[planner].decision_packet_chars default 6000). grouped_packet(sections) -> _build_grouped(sections)[0] (public, text only). run_group calls _build_grouped directly, stores meta chars/hash/delta/truncated on the records as packet_chars, packet_hash, packet_delta, packet_truncated and passes packet_chars=meta[\"chars\"] to planner_telemetry.record_launch (replacing len(prompt)); no module-level mutable state. decision_packet(goal_id, kind, payload, repo_path) (legacy single-point path) builds one section via build_ctx + planner_taxonomy.classify and returns build(...)[\"text\"] (len <= cap); the legacy inventory, \"Task title:\"/\"Scout summaries:\"/\"Spawn packet:\" lines and 300-char summaries are removed. Rewrite tests/test_goals.py's DecisionPacket suite (lines ~616-707) to the new format: same scenarios, assertions on the planner_packet section headings (Decision, Goal, Relevant task state, Scout findings, Required output), the fenced untrusted text, and len(text) <= cap; keep the test method names.\n- Escalation (P10): in run_group, when ctx.get(\"reescalation\") is True and a planner_shadow row exists for this goal's previous launch (rows of runs/sched/planner_shadow.jsonl with goal_id, latest started_at), render the prompt from planner_packet.escalation_packet(goal=..., original_sections=..., opus_decision={proposed_action, summary, tasks_proposed, confidence, needs_fable, unresolved} from that row, unresolved=row unresolved, conflicting_evidence=None, scout_findings, memory_hits, reason=\";\".join(hard_reasons), cap_chars) instead of build; store packet_kind \"escalation\" vs \"decision\" on the planner_runs records (the launch row is unchanged).\n- The rendered prompt still goes through spawn.render(\"planner-decision\", packet=text).",
+  "inputs": [
+    "T-0751"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs_packets.py::test_first_decision_packet_has_sections_and_no_inventory \u2014 grouped_packet for a scouts_done goal with two done scouts and memory_recall patched to return the real dict shape {hits: [...]} yields text containing 'first Planner decision for this goal', the Scout findings and Memory sections (with the hit titles), no 'Spawn packet' section, and len(text) <= decision_packet_chars",
+    "tests/test_planner_runs_packets.py::test_delta_packet_reads_events_table_beyond_200_rows \u2014 after a first launch record with cursor_at_launch, 250 unrelated events on another goal followed by a child task changing status and hold_reason still produce a packet whose Changes section lists both fields with from/to and the previous state_version; the record stores packet_delta True and packet_chars equal to the build's chars, and the launch row's packet_chars matches",
+    "tests/test_planner_runs_packets.py::test_held_section_tolerates_purged_task_and_renders_evidence \u2014 a held task with resume_hint failures, a rejecting review with two comments and one missing dependency renders failures (capped), the two comments as path:line issue, and 'missing' for the dependency; a held point whose task file was deleted builds a packet with task state absent instead of raising",
+    "tests/test_planner_runs_packets.py::test_escalation_packet_used_on_reescalation \u2014 with ctx reescalation True and a prior planner_shadow row for the goal, the rendered prompt contains 'Escalation reason:' and 'Opus proposed decision', no 'Changes since previous decision' section, and the record has packet_kind escalation; without a shadow row the ordinary build is used",
+    "tests/test_goals.py::test_decision_packet_new_format \u2014 the rewritten DecisionPacket suite passes against planner_packet output (section headings present, untrusted hold_reason fenced, len(text) <= cap, no Spawn packet inventory) and the whole tests/test_goals.py module is green"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "tests/test_planner_runs_packets.py",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0753",
+  "codex_thread": null,
+  "result": {
+    "summary": "Traced the full diff against the packet spec: _packet_sections, _previous_launch, _changes_since (parameterized SQL under bus.locked(), never bus.events, last-20 trim), _scout_findings/_memory_hits, _build_grouped/grouped_packet, decision_packet legacy path, and the run_group escalation branch all match the acceptance criteria. Verified bus.locked() is reentrant per-thread so the nested lock in _changes_since (called while run_group already holds the lock) is not a deadlock. Verified packet_text/packet_meta are set on every path before use (no UnboundLocalError), _previous_launch is computed before the current record is stamped with launch_id (no self-reference), scout finding confidence is always a float (safe sort), and purged-task handling (_decision_task, _packet_tasks fallback) matches the 'never raise' contract. Only two low-severity cleanliness nits found: a dead _fenced helper and a duplicated _SAFE_KEY check.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 38,
+        "issue": "_fenced helper now has zero callers after the packet rewrite delegates fencing to planner_packet.build \u2014 dead code, should be removed.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 1332,
+        "issue": "_SAFE_KEY validation of goal_id/kind/payload_key is duplicated verbatim (once before packet building, once unchanged before handover.write). Harmless but redundant; collapse to one check.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "8815cf69536a",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790004959.813071,
+      "reviewed_sha": "d05749e0f88bb267d4bfcd48bd5e4d8ad3dfcb38"
+    },
+    {
+      "ts": 1790004962.874578,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0753",
+      "claimed_at": 1790004962.874208
+    },
+    {
+      "ts": 1790004962.875436,
+      "account": "B"
+    },
+    {
+      "ts": 1790004963.342984,
+      "pid": 28177,
+      "account": "B"
+    },
+    {
+      "ts": 1790005230.655332,
+      "status": "done",
+      "result": {
+        "summary": "Traced the full diff against the packet spec: _packet_sections, _previous_launch, _changes_since (parameterized SQL under bus.locked(), never bus.events, last-20 trim), _scout_findings/_memory_hits, _build_grouped/grouped_packet, decision_packet legacy path, and the run_group escalation branch all match the acceptance criteria. Verified bus.locked() is reentrant per-thread so the nested lock in _changes_since (called while run_group already holds the lock) is not a deadlock. Verified packet_text/packet_meta are set on every path before use (no UnboundLocalError), _previous_launch is computed before the current record is stamped with launch_id (no self-reference), scout finding confidence is always a float (safe sort), and purged-task handling (_decision_task, _packet_tasks fallback) matches the 'never raise' contract. Only two low-severity cleanliness nits found: a dead _fenced helper and a duplicated _SAFE_KEY check.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 38,
+            "issue": "_fenced helper now has zero callers after the packet rewrite delegates fencing to planner_packet.build \u2014 dead code, should be removed.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 1332,
+            "issue": "_SAFE_KEY validation of goal_id/kind/payload_key is duplicated verbatim (once before packet building, once unchanged before handover.write). Harmless but redundant; collapse to one check.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "8815cf69536a",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790005230.657098,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790005230.696778,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 2,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "d05749e0f88bb267d4bfcd48bd5e4d8ad3dfcb38",
+        "packet_version": "8815cf69536a",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 2,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "d05749e0f88bb267d4bfcd48bd5e4d8ad3dfcb38",
+      "packet_version": "8815cf69536a",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "d05749e0f88bb267d4bfcd48bd5e4d8ad3dfcb38",
+  "claimed_at": 1790004962.874208,
+  "account": "B",
+  "pid": 28177,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 2,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "d05749e0f88bb267d4bfcd48bd5e4d8ad3dfcb38",
+    "packet_version": "8815cf69536a",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 2,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "8815cf69536a",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

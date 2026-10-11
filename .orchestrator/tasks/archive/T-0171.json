@@ -1,0 +1,217 @@
+{
+  "id": "T-0171",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): C-O5 v2 executor image, compose, runbook, protected paths (T-0165, executed by claude:sonnet)",
+  "spec": "Review the T-0165 delta: `git diff e1ad1aa c1155c4` in worktree wt/T-0165 (Dockerfile, docker-compose.executor.yml, .dockerignore, .gitignore, .orchestrator/protected-paths.txt, docs/executor-host.md, README.md). This image will hold two Claude OAuth tokens, a Codex login and a gh login on the home server, so apply the security checklist. Check: (1) Dockerfile: ubuntu:24.04, ARG UID/GID create or reuse the orch user, pinned UV_VERSION/CLAUDE_VERSION/CODEX_VERSION, downloads over https from the official sources only (uv installer, Claude native installer, openai/codex GitHub release, GitHub CLI apt repo with key), no `curl | sh` of an unpinned URL without a version, no secrets baked in, USER orch before the entrypoint, entrypoint execs a passed command else `orchestrator serve --host 0.0.0.0 --port 8090`; is binding 0.0.0.0 inside the container acceptable given no published ports (yes if compose publishes none: confirm); (2) compose: build args UID/GID from env, exactly the four credential mounts plus ./work, env_file executor.env, healthcheck on /healthz, restart unless-stopped, no ports:; (3) .dockerignore and .gitignore contain executor.env; wt/, .venv/, runs, bus.sqlite*, graphify-out/ excluded; (4) protected-paths.txt: the five credential mount paths in the file's existing format, and confirm guardrails.sh would actually match them (read .claude/hooks/guardrails.sh); (5) runbook: every human step present (UID/GID, creds dirs, setup-token \u00d72, codex device-auth in the container, gh auth, pool.toml oauth_token_env, repos.toml, smoke test, rotation, troubleshooting), secrets only as env names or <paste here>; run the objective grep from the task spec over the diff; (6) did the executor actually run `docker build` and `docker run ... --version` locally? The task result must state the image size and four version lines; if it did not build, say so: that is a request_changes on its own (acceptance criterion 1). Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0165"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Security checklist applied to the image, compose and runbook; download sources and pinning assessed",
+    "Docker build evidence in the task result confirmed or its absence named"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    ".dockerignore",
+    ".gitignore",
+    ".orchestrator/protected-paths.txt",
+    "docs/executor-host.md",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0171",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": ".orchestrator/protected-paths.txt",
+        "line": 36,
+        "issue": "`${ORCH_CREDS}` is inert: guardrails.sh reads the list through `os.path.realpath(os.path.expanduser(line))` \u2014 expanduser only, no expandvars \u2014 so this entry resolves to the literal `<hook cwd>/${ORCH_CREDS}` (verified: python3 realpath of the literal returns `/Users/k3ntaw/code/orchestrator/wt/T-0171/${ORCH_CREDS}`), a path that never exists, and the entry is also cwd-dependent. The real host credential root (e.g. ~/orch-creds) is therefore NOT protected for Edit/Write/Read, and docs/executor-host.md:43 states the opposite. Only the substring check in guardrails.sh section 2 fires, and only on a command containing the literal text `${ORCH_CREDS}`. Write the concrete path (`~/orch-creds`) or teach guardrails.sh to expandvars before this line is trusted.",
+        "severity": "high"
+      },
+      {
+        "path": "docker-compose.executor.yml",
+        "line": 3,
+        "issue": "No `networks:` block. The service joins its own compose-project default bridge, so the kgpt module 'on the home docker network' (the stated design, line 1-2) cannot resolve or reach `orchestrator-executor:8090`, and with no published ports nothing outside that project network can either. Needs an external network declaration joining the home network.",
+        "severity": "high"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 92,
+        "issue": "Step 6 is not actionable as written and does not take effect. serve.py:43 resolves repos.toml to `PACKAGE_REPO/.orchestrator/repos.toml` = `/opt/orchestrator/.orchestrator/repos.toml` \u2014 baked into the image by `COPY . /opt/orchestrator` (Dockerfile:52), with no volume mounting it and no `ORCH_REPOS_TOML` in the executor.env list. Editing 'the repo checked out at the path the executor works from' on the host changes nothing in the running container; every repos.toml/pool.toml change silently requires a rebuild. Same for pool.toml, which goals.py reads under ORCH_ROOT=the freshly cloned target repo, so a hand edit is overwritten by the clone.",
+        "severity": "high"
+      },
+      {
+        "path": "docker-compose.executor.yml",
+        "line": 14,
+        "issue": "`${ORCH_CREDS}` has no default and no `:?` guard. If it is unset (e.g. a systemd unit, a fresh shell, or `docker compose` run by a different user than the one that exported it) compose substitutes an empty string and mounts `/claude-a`, `/codex`, `/gh` from the host filesystem root \u2014 Docker creates those as root-owned empty dirs at `/`, and the executor starts with empty credential stores instead of failing loudly. Use `${ORCH_CREDS:?set ORCH_CREDS to the credential root}`.",
+        "severity": "med"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 70,
+        "issue": "Step ordering bug: step 4 runs `docker compose -f docker-compose.executor.yml run --rm ...`, but `env_file: ./executor.env` (compose line 11) is mandatory and executor.env is not created until step 5. Following the runbook in order aborts with 'env file ... not found'. Either move the executor.env step before the login step or mark the env_file `required: false`.",
+        "severity": "med"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 46,
+        "issue": "The codex asset is hard-coded to `x86_64-unknown-linux-musl` while `FROM ubuntu:24.04` (line 5) is multi-arch and unpinned to a platform. On an arm64 builder the image resolves to arm64 and the installed `codex` is exec-format-error at runtime; the build evidence in the task result came from this arm64 Darwin host, so what was smoke-tested is not necessarily what kenta-server will build. Pin `FROM --platform=linux/amd64` or select the asset from `dpkg --print-architecture` as the gh repo line already does.",
+        "severity": "med"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 40,
+        "issue": "No integrity verification on any of the three third-party installs: uv (`curl | sh`, line 40), Claude Code (`curl https://claude.ai/install.sh | bash`, line 59) and the codex tarball (line 45-48) are fetched over TLS and executed/installed with no checksum or signature check, and the base image is tagged, not digest-pinned. Versions are pinned, which bounds drift, but not tampering or a compromised release asset \u2014 the container holds live OAuth tokens for two Claude accounts, Codex and gh. At minimum verify the codex tarball against the release's published checksum and pin `ubuntu:24.04@sha256:...`.",
+        "severity": "med"
+      },
+      {
+        "path": "docker-compose.executor.yml",
+        "line": 13,
+        "issue": "`./work` is never created or chowned by the runbook (step 7 goes straight to `up -d`). Docker creates a missing bind-mount source as root:root, so the container's `orch` user (uid from the build arg) cannot write /work and every repo clone by serve.py fails. Add the mkdir+chown to step 2 alongside the credential dirs.",
+        "severity": "med"
+      },
+      {
+        "path": ".dockerignore",
+        "line": 1,
+        "issue": "Does not exclude `.git`, `.mcp*.json`, `.orchestrator/pool_state.json`, `.orchestrator/memory` or `.orchestrator/tasks`, so `COPY . /opt/orchestrator` bakes the full git history and all local-only operator state into an image layer that also carries credential mounts (1.66GB per the task result). No committed secret is leaked today (.mcp.json uses `${GH_READ_TOKEN}` indirection), but the build context is the operator's working repo and anything untracked in it lands in the image.",
+        "severity": "med"
+      },
+      {
+        "path": "docker-compose.executor.yml",
+        "line": 19,
+        "issue": "No container hardening for a service that runs unattended agents with permissions bypassed and four read-write credential mounts: no `security_opt: [no-new-privileges:true]`, no `cap_drop: [ALL]`, no memory/pid limits. Cheap to add and directly relevant at this trust level.",
+        "severity": "low"
+      }
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6110,
+      "trimmed": {
+        "comments": 1
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789752743.8586721,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0171",
+      "claimed_at": 1789752743.8581991
+    },
+    {
+      "ts": 1789752743.893037,
+      "pid": 30488,
+      "account": "B"
+    },
+    {
+      "ts": 1789752929.224413,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": ".orchestrator/protected-paths.txt",
+            "line": 36,
+            "issue": "`${ORCH_CREDS}` is inert: guardrails.sh reads the list through `os.path.realpath(os.path.expanduser(line))` \u2014 expanduser only, no expandvars \u2014 so this entry resolves to the literal `<hook cwd>/${ORCH_CREDS}` (verified: python3 realpath of the literal returns `/Users/k3ntaw/code/orchestrator/wt/T-0171/${ORCH_CREDS}`), a path that never exists, and the entry is also cwd-dependent. The real host credential root (e.g. ~/orch-creds) is therefore NOT protected for Edit/Write/Read, and docs/executor-host.md:43 states the opposite. Only the substring check in guardrails.sh section 2 fires, and only on a command containing the literal text `${ORCH_CREDS}`. Write the concrete path (`~/orch-creds`) or teach guardrails.sh to expandvars before this line is trusted.",
+            "severity": "high"
+          },
+          {
+            "path": "docker-compose.executor.yml",
+            "line": 3,
+            "issue": "No `networks:` block. The service joins its own compose-project default bridge, so the kgpt module 'on the home docker network' (the stated design, line 1-2) cannot resolve or reach `orchestrator-executor:8090`, and with no published ports nothing outside that project network can either. Needs an external network declaration joining the home network.",
+            "severity": "high"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 92,
+            "issue": "Step 6 is not actionable as written and does not take effect. serve.py:43 resolves repos.toml to `PACKAGE_REPO/.orchestrator/repos.toml` = `/opt/orchestrator/.orchestrator/repos.toml` \u2014 baked into the image by `COPY . /opt/orchestrator` (Dockerfile:52), with no volume mounting it and no `ORCH_REPOS_TOML` in the executor.env list. Editing 'the repo checked out at the path the executor works from' on the host changes nothing in the running container; every repos.toml/pool.toml change silently requires a rebuild. Same for pool.toml, which goals.py reads under ORCH_ROOT=the freshly cloned target repo, so a hand edit is overwritten by the clone.",
+            "severity": "high"
+          },
+          {
+            "path": "docker-compose.executor.yml",
+            "line": 14,
+            "issue": "`${ORCH_CREDS}` has no default and no `:?` guard. If it is unset (e.g. a systemd unit, a fresh shell, or `docker compose` run by a different user than the one that exported it) compose substitutes an empty string and mounts `/claude-a`, `/codex`, `/gh` from the host filesystem root \u2014 Docker creates those as root-owned empty dirs at `/`, and the executor starts with empty credential stores instead of failing loudly. Use `${ORCH_CREDS:?set ORCH_CREDS to the credential root}`.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 70,
+            "issue": "Step ordering bug: step 4 runs `docker compose -f docker-compose.executor.yml run --rm ...`, but `env_file: ./executor.env` (compose line 11) is mandatory and executor.env is not created until step 5. Following the runbook in order aborts with 'env file ... not found'. Either move the executor.env step before the login step or mark the env_file `required: false`.",
+            "severity": "med"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 46,
+            "issue": "The codex asset is hard-coded to `x86_64-unknown-linux-musl` while `FROM ubuntu:24.04` (line 5) is multi-arch and unpinned to a platform. On an arm64 builder the image resolves to arm64 and the installed `codex` is exec-format-error at runtime; the build evidence in the task result came from this arm64 Darwin host, so what was smoke-tested is not necessarily what kenta-server will build. Pin `FROM --platform=linux/amd64` or select the asset from `dpkg --print-architecture` as the gh repo line already does.",
+            "severity": "med"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 40,
+            "issue": "No integrity verification on any of the three third-party installs: uv (`curl | sh`, line 40), Claude Code (`curl https://claude.ai/install.sh | bash`, line 59) and the codex tarball (line 45-48) are fetched over TLS and executed/installed with no checksum or signature check, and the base image is tagged, not digest-pinned. Versions are pinned, which bounds drift, but not tampering or a compromised release asset \u2014 the container holds live OAuth tokens for two Claude accounts, Codex and gh. At minimum verify the codex tarball against the release's published checksum and pin `ubuntu:24.04@sha256:...`.",
+            "severity": "med"
+          },
+          {
+            "path": "docker-compose.executor.yml",
+            "line": 13,
+            "issue": "`./work` is never created or chowned by the runbook (step 7 goes straight to `up -d`). Docker creates a missing bind-mount source as root:root, so the container's `orch` user (uid from the build arg) cannot write /work and every repo clone by serve.py fails. Add the mkdir+chown to step 2 alongside the credential dirs.",
+            "severity": "med"
+          },
+          {
+            "path": ".dockerignore",
+            "line": 1,
+            "issue": "Does not exclude `.git`, `.mcp*.json`, `.orchestrator/pool_state.json`, `.orchestrator/memory` or `.orchestrator/tasks`, so `COPY . /opt/orchestrator` bakes the full git history and all local-only operator state into an image layer that also carries credential mounts (1.66GB per the task result). No committed secret is leaked today (.mcp.json uses `${GH_READ_TOKEN}` indirection), but the build context is the operator's working repo and anything untracked in it lands in the image.",
+            "severity": "med"
+          },
+          {
+            "path": "docker-compose.executor.yml",
+            "line": 19,
+            "issue": "No container hardening for a service that runs unattended agents with permissions bypassed and four read-write credential mounts: no `security_opt: [no-new-privileges:true]`, no `cap_drop: [ALL]`, no memory/pid limits. Cheap to add and directly relevant at this trust level.",
+            "severity": "low"
+          }
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6110,
+          "trimmed": {
+            "comments": 1
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789752929.226901,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789752743.8581991,
+  "pid": 30488,
+  "account": "B",
+  "review_verdict": "request_changes"
+}

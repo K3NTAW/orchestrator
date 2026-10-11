@@ -1,0 +1,247 @@
+{
+  "id": "T-0696",
+  "created_at": 1789998642.7108228,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Q4 v2: orchestrator/planner_router.py \u2014 Planner tier router: modes off|shadow|active, hard vs soft Fable escalation, evidence gate, Fable reserve, hold instead of silent downgrade; decision_log kind planner_route (P5, P9, P11, P17, P18)",
+  "spec": "Why: decision.route (orchestrator/decision.py) decides routine/investigate/escalate and names escalate_tier fable; planner_runs.launch_routed (lines 1090-1110) resolves that alias to [models].planner. There is no Opus tier between investigate (sonnet) and escalate (fable), no hard/soft split, no evidence gate, no Fable reserve and no hold path (brief P5, P9, P11, P17, P18). Spec review T-0681's five risks are folded in: plain notify, record() inputs, dict access, classification producer, evidence provenance.\nWhat: new pure module orchestrator/planner_router.py plus one new entry \"planner_route\" in decision_log.KINDS. No bus, pool or file reads; inputs never mutated. Every structured input is a plain dict read with .get(): ctx (decision.route's ctx, see decision.py docstring), classification (planner_taxonomy.classify output, module orchestrator/planner_taxonomy.py from T-0675 on goal/T-0674: keys decision_type, architectural, ambiguous, risk_class none|low|high, signals, band, task_class), evidence ({\"n\": int, \"noninferior\": True|False|None, \"reescalation_rate\": float}; produced later by Q5 planner_scorecard.class_evidence, same goal; this module only consumes the dict), availability ({tier: {\"available\": bool, \"reason\": str}, \"fable_reserve_ok\": bool}), jev_signal ({\"soft_adjust\": float} or None). route is decision.Route (attributes name, reason, evidence, tier) or a dict with the same keys; accept both via a tiny _get(obj, key) helper.\n- load_cfg(pool_cfg) -> routing dict with defaults from pool_cfg.get(\"planner\", {}).get(\"routing\", {}): mode \"shadow\" (off|shadow|active), default_tier \"opus\", escalation_tier \"fable\", hard_complexity_min 9, hard_security True, hard_spec_review_request_changes_min 2, hard_ambiguous True, min_samples 20, shadow_sample_rate 1.0, fable_reserve_share 0.2, jev_mode \"shadow\", soft_threshold 0.5. An unknown mode or a non-numeric number -> default plus one plain notify.notify(f\"pool.toml [planner.routing].{key} invalid ({value!r}); using {default!r}\") per key per process (module-level set of warned keys), exactly like daemon._load_scheduler_cfg; never raises, never touches the bus.\n- @dataclass(frozen=True) RouterDecision: tier (str), mode (str), hard (bool), hold (bool), hold_reason (str|None), reasons (tuple[str, ...]), soft_score (float), shadow_tier (str|None), candidates (tuple[str, ...]), evidence (dict), decision_type (str), hard_reasons (tuple[str, ...]).\n- hard_escalation(classification, ctx, route, cfg) -> list[str]: route name != \"escalate\" -> []; route reason startswith \"unknown:\" or reason == \"routes_disabled\" -> \"unknown_risk\"; complexity (ctx.get(\"complexity\") or classification band 7-10 with ctx complexity unknown counts as 0) >= hard_complexity_min -> \"complexity\"; hard_security and (classification.get(\"risk_class\") == \"high\" or ctx.get(\"security_trigger\") or ctx.get(\"touches_auth\") or ctx.get(\"touches_data_deletion\")) -> \"security\"; hard_ambiguous and classification.get(\"decision_type\") in (\"architectural_replan\", \"ambiguous_requirement\") -> \"architectural_or_ambiguous\"; ctx.get(\"spec_review_request_changes\", 0) >= hard_spec_review_request_changes_min -> \"repeated_spec_rejection\"; both ctx auto_fix_rounds_used and auto_fix_rounds ints and used >= cap -> \"lineage_cap\"; ctx.get(\"reescalation\") -> \"reescalation\". Callers pass ctx[\"complexity\"] (task complexity for held, goal complexity otherwise); document this.\n- soft_score(classification, ctx, evidence, jev_signal=None) -> float in [0, 1]: +0.3 classification architectural; +0.2 ctx complexity in (7, 8); +0.2 evidence reescalation_rate > 0.2; +0.2 evidence noninferior is False; +0.1 risk_class low; plus jev_signal soft_adjust clamped to [-0.2, 0.2]; clamp to [0, 1]. Tokens/usd never inputs (docstring).\n- decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0) -> RouterDecision. Rules in order: route name != \"escalate\" -> tier = route tier or \"fable\", reasons (\"not_escalate_route\",), unchanged in every mode. mode off -> tier route tier or \"fable\", reasons (\"mode_off\",), shadow_tier None. hard reasons non-empty -> tier escalation_tier, hard True; escalation tier unavailable -> hold True, hold_reason f\"fable_unavailable:{reason}\" (never downgrade, jev ignored). mode shadow -> tier escalation_tier (production unchanged); shadow_tier = default_tier when not hard and default tier available and sample <= shadow_sample_rate, else None with a reason (shadow_hard|shadow_default_unavailable|sampled_out). mode active, not hard: default_tier when evidence noninferior is True and n >= min_samples and soft_score < soft_threshold (\"evidence_noninferior\"); elif fable_reserve_ok is False and noninferior is not False -> default_tier (\"fable_reserve_low\"); else escalation_tier (\"insufficient_evidence\" when noninferior is None or n < min_samples, \"soft_escalation\" otherwise); a chosen tier that is unavailable falls back to the other available tier for soft decisions (\"fallback:<tier>_unavailable\"); none available -> hold, hold_reason \"no_planner_tier_available\".\n- record(decision, *, subject, route, jev_signal=None, root=None) -> decision_log.record(kind=\"planner_route\", subject=goal id, candidates=list(decision.candidates), hard_constraints=list(decision.hard_reasons), deterministic={\"route\": route name, \"reason\": route reason}, historical=decision.evidence, jev=jev_signal, selected=decision.tier if not decision.hold else \"hold\", reason=\";\".join(decision.reasons), mode=decision.mode, extra={\"decision_type\", \"hold_reason\", \"shadow_tier\", \"soft_score\"}, root=root).\n- explain(decision) -> one line. decision_log.py change: append \"planner_route\" to KINDS only.",
+  "inputs": [
+    "T-0692"
+  ],
+  "acceptance": [
+    "tests/test_planner_router.py::test_mode_off_reproduces_route_tier \u2014 mode off returns the route tier (fable) with reasons mode_off, shadow_tier None, hold False for every decision type; a non-escalate route returns its own tier unchanged in every mode",
+    "tests/test_planner_router.py::test_hard_escalation_never_downgrades_and_holds_when_fable_unavailable \u2014 complexity 9, security, ambiguous_requirement and repeated_spec_rejection each yield tier fable hard True in active mode even with noninferior evidence and jev soft_adjust -0.2; with fable unavailable the decision is hold True with hold_reason starting fable_unavailable",
+    "tests/test_planner_router.py::test_shadow_mode_keeps_fable_and_sets_shadow_tier \u2014 shadow mode yields tier fable and shadow_tier opus for a soft decision, shadow_tier None for a hard decision, when opus is unavailable, or when sample exceeds shadow_sample_rate",
+    "tests/test_planner_router.py::test_active_mode_requires_evidence_and_ignores_tokens \u2014 active with n 25 noninferior True picks opus; n 5 picks fable with reason insufficient_evidence; noninferior False picks fable; evidence carrying tokens_saved 1e9 changes nothing; fable_reserve_ok False with noninferior None picks opus with reason fable_reserve_low",
+    "tests/test_planner_router.py::test_load_cfg_defaults_and_record_kind \u2014 missing table gives every documented default; an invalid mode falls back to shadow with exactly one notify.notify call and no bus access; record(decision, subject, route, jev_signal) appends a decision_log row of kind planner_route with deterministic.route and jev set, readable by decision_log.explain under a sandbox root"
+  ],
+  "scope": [
+    "orchestrator/planner_router.py",
+    "orchestrator/decision_log.py",
+    "tests/test_planner_router.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0696",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "record()'s extra argument is written as a set literal `extra={\"decision_type\", \"hold_reason\", \"shadow_tier\", \"soft_score\"}` instead of a dict mapping those keys to decision.<attr> values. Implemented literally, `extra` is a python set; decision_log.record stores it verbatim and schedlog.append (orchestrator/schedlog.py:15) calls json.dumps(record), which raises TypeError on a set. record() would crash, taking down test_load_cfg_defaults_and_record_kind with it.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "hard_escalation's complexity rule falls back to 'classification band 7-10' when ctx has no complexity, but attribution.band (orchestrator/attribution.py:118-125) returns a string like \"7-10\"/\"4-6\"/\"1-3\"/unknown, not a number -- it cannot be compared with `>= hard_complexity_min` as written. No acceptance test exercises the missing-ctx-complexity path, so whatever ad-hoc numeric mapping an implementer picks (e.g. treating band \"7-10\" as satisfying any hard_complexity_min, even 9 or 10) goes unverified and could hard-escalate complexity-7/8 goals that should route through soft scoring.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "RouterDecision.candidates is declared but decide() never specifies how it's populated, and no acceptance test inspects decision.candidates or record()'s resulting row['candidates']/row['rejected']. decision_log's whole audit purpose (candidates considered vs rejected) can silently degenerate to an always-empty tuple without any test catching it.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "In the hard-escalation branch, decide() defines hard_reasons via hard_escalation() but never states what the separate `reasons` field should hold for that branch (RouterDecision has both). Left to the implementer's guess; no acceptance test pins reasons vs hard_reasons equivalence in the hard case.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "load_cfg() defines defaults for fable_reserve_share and jev_mode, but neither key is read anywhere in the specified hard_escalation/soft_score/decide algorithm (decide consumes availability.fable_reserve_ok and jev_signal directly, both external inputs). Documenting unused config knobs under this module misleads whoever edits pool.toml later into thinking planner_router.py acts on them.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Spec says the per-key notify dedup works 'exactly like daemon._load_scheduler_cfg', but that function (orchestrator/daemon.py:593-596) uses one dedicated module-level bool per named warning, not a generic set keyed by arbitrary config key. The cited precedent doesn't match the 'set of warned keys' mechanism the spec actually asks for.",
+        "severity": "low",
+        "line": 596
+      }
+    ],
+    "suggested_spec_changes": [
+      "Rewrite the extra= construction as a dict: extra={\"decision_type\": decision.decision_type, \"hold_reason\": decision.hold_reason, \"shadow_tier\": decision.shadow_tier, \"soft_score\": decision.soft_score}.",
+      "Replace the band-based complexity fallback with an explicit numeric mapping (e.g. a BAND_FLOOR = {\"1-3\": 1, \"4-6\": 4, \"7-10\": 7, None: 0, \"unknown\": 0} lookup) and add an acceptance case where ctx has no 'complexity' key and classification band is \"7-10\", asserting the exact resulting hard/soft outcome.",
+      "Add one sentence defining RouterDecision.candidates content (e.g. candidates = (default_tier, escalation_tier) always) and one acceptance assertion on decision.candidates / the recorded row's candidates and rejected fields.",
+      "State explicitly that reasons == hard_reasons in the hard-escalation branch (or define the divergence) so RouterDecision's two reason fields aren't left to implementer discretion.",
+      "Either wire fable_reserve_share and jev_mode into this module's logic or drop them from planner_router.load_cfg's defaults and document which module (presumably the one producing `availability`) owns them."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998646.291153,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0696",
+      "claimed_at": 1789998646.290744
+    },
+    {
+      "ts": 1789998646.293279,
+      "account": "B"
+    },
+    {
+      "ts": 1789998647.1140869,
+      "pid": 18034,
+      "account": "B"
+    },
+    {
+      "ts": 1789998778.79892,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "record()'s extra argument is written as a set literal `extra={\"decision_type\", \"hold_reason\", \"shadow_tier\", \"soft_score\"}` instead of a dict mapping those keys to decision.<attr> values. Implemented literally, `extra` is a python set; decision_log.record stores it verbatim and schedlog.append (orchestrator/schedlog.py:15) calls json.dumps(record), which raises TypeError on a set. record() would crash, taking down test_load_cfg_defaults_and_record_kind with it.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "hard_escalation's complexity rule falls back to 'classification band 7-10' when ctx has no complexity, but attribution.band (orchestrator/attribution.py:118-125) returns a string like \"7-10\"/\"4-6\"/\"1-3\"/unknown, not a number -- it cannot be compared with `>= hard_complexity_min` as written. No acceptance test exercises the missing-ctx-complexity path, so whatever ad-hoc numeric mapping an implementer picks (e.g. treating band \"7-10\" as satisfying any hard_complexity_min, even 9 or 10) goes unverified and could hard-escalate complexity-7/8 goals that should route through soft scoring.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "RouterDecision.candidates is declared but decide() never specifies how it's populated, and no acceptance test inspects decision.candidates or record()'s resulting row['candidates']/row['rejected']. decision_log's whole audit purpose (candidates considered vs rejected) can silently degenerate to an always-empty tuple without any test catching it.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "In the hard-escalation branch, decide() defines hard_reasons via hard_escalation() but never states what the separate `reasons` field should hold for that branch (RouterDecision has both). Left to the implementer's guess; no acceptance test pins reasons vs hard_reasons equivalence in the hard case.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "load_cfg() defines defaults for fable_reserve_share and jev_mode, but neither key is read anywhere in the specified hard_escalation/soft_score/decide algorithm (decide consumes availability.fable_reserve_ok and jev_signal directly, both external inputs). Documenting unused config knobs under this module misleads whoever edits pool.toml later into thinking planner_router.py acts on them.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Spec says the per-key notify dedup works 'exactly like daemon._load_scheduler_cfg', but that function (orchestrator/daemon.py:593-596) uses one dedicated module-level bool per named warning, not a generic set keyed by arbitrary config key. The cited precedent doesn't match the 'set of warned keys' mechanism the spec actually asks for.",
+            "severity": "low",
+            "line": 596
+          }
+        ],
+        "suggested_spec_changes": [
+          "Rewrite the extra= construction as a dict: extra={\"decision_type\": decision.decision_type, \"hold_reason\": decision.hold_reason, \"shadow_tier\": decision.shadow_tier, \"soft_score\": decision.soft_score}.",
+          "Replace the band-based complexity fallback with an explicit numeric mapping (e.g. a BAND_FLOOR = {\"1-3\": 1, \"4-6\": 4, \"7-10\": 7, None: 0, \"unknown\": 0} lookup) and add an acceptance case where ctx has no 'complexity' key and classification band is \"7-10\", asserting the exact resulting hard/soft outcome.",
+          "Add one sentence defining RouterDecision.candidates content (e.g. candidates = (default_tier, escalation_tier) always) and one acceptance assertion on decision.candidates / the recorded row's candidates and rejected fields.",
+          "State explicitly that reasons == hard_reasons in the hard-escalation branch (or define the divergence) so RouterDecision's two reason fields aren't left to implementer discretion.",
+          "Either wire fable_reserve_share and jev_mode into this module's logic or drop them from planner_router.load_cfg's defaults and document which module (presumably the one producing `availability`) owns them."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998778.800142,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "record()'s extra argument is written as a set literal `extra={\"decision_type\", \"hold_reason\", \"shadow_tier\", \"soft_score\"}` instead of a dict mapping those keys to decision.<attr> values. Implemented literally, `extra` is a python set; decision_log.record stores it verbatim and schedlog.append (orchestrator/schedlog.py:15) calls json.dumps(record), which raises TypeError on a set. record() would crash, taking down test_load_cfg_defaults_and_record_kind with it.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "hard_escalation's complexity rule falls back to 'classification band 7-10' when ctx has no complexity, but attribution.band (orchestrator/attribution.py:118-125) returns a string like \"7-10\"/\"4-6\"/\"1-3\"/unknown, not a number -- it cannot be compared with `>= hard_complexity_min` as written. No acceptance test exercises the missing-ctx-complexity path, so whatever ad-hoc numeric mapping an implementer picks (e.g. treating band \"7-10\" as satisfying any hard_complexity_min, even 9 or 10) goes unverified and could hard-escalate complexity-7/8 goals that should route through soft scoring.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "RouterDecision.candidates is declared but decide() never specifies how it's populated, and no acceptance test inspects decision.candidates or record()'s resulting row['candidates']/row['rejected']. decision_log's whole audit purpose (candidates considered vs rejected) can silently degenerate to an always-empty tuple without any test catching it.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "In the hard-escalation branch, decide() defines hard_reasons via hard_escalation() but never states what the separate `reasons` field should hold for that branch (RouterDecision has both). Left to the implementer's guess; no acceptance test pins reasons vs hard_reasons equivalence in the hard case.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "load_cfg() defines defaults for fable_reserve_share and jev_mode, but neither key is read anywhere in the specified hard_escalation/soft_score/decide algorithm (decide consumes availability.fable_reserve_ok and jev_signal directly, both external inputs). Documenting unused config knobs under this module misleads whoever edits pool.toml later into thinking planner_router.py acts on them.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec says the per-key notify dedup works 'exactly like daemon._load_scheduler_cfg', but that function (orchestrator/daemon.py:593-596) uses one dedicated module-level bool per named warning, not a generic set keyed by arbitrary config key. The cited precedent doesn't match the 'set of warned keys' mechanism the spec actually asks for.",
+          "severity": "low",
+          "line": 596
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789998646.290744,
+  "account": "B",
+  "pid": 18034,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "record()'s extra argument is written as a set literal `extra={\"decision_type\", \"hold_reason\", \"shadow_tier\", \"soft_score\"}` instead of a dict mapping those keys to decision.<attr> values. Implemented literally, `extra` is a python set; decision_log.record stores it verbatim and schedlog.append (orchestrator/schedlog.py:15) calls json.dumps(record), which raises TypeError on a set. record() would crash, taking down test_load_cfg_defaults_and_record_kind with it.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "hard_escalation's complexity rule falls back to 'classification band 7-10' when ctx has no complexity, but attribution.band (orchestrator/attribution.py:118-125) returns a string like \"7-10\"/\"4-6\"/\"1-3\"/unknown, not a number -- it cannot be compared with `>= hard_complexity_min` as written. No acceptance test exercises the missing-ctx-complexity path, so whatever ad-hoc numeric mapping an implementer picks (e.g. treating band \"7-10\" as satisfying any hard_complexity_min, even 9 or 10) goes unverified and could hard-escalate complexity-7/8 goals that should route through soft scoring.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "RouterDecision.candidates is declared but decide() never specifies how it's populated, and no acceptance test inspects decision.candidates or record()'s resulting row['candidates']/row['rejected']. decision_log's whole audit purpose (candidates considered vs rejected) can silently degenerate to an always-empty tuple without any test catching it.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "In the hard-escalation branch, decide() defines hard_reasons via hard_escalation() but never states what the separate `reasons` field should hold for that branch (RouterDecision has both). Left to the implementer's guess; no acceptance test pins reasons vs hard_reasons equivalence in the hard case.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "load_cfg() defines defaults for fable_reserve_share and jev_mode, but neither key is read anywhere in the specified hard_escalation/soft_score/decide algorithm (decide consumes availability.fable_reserve_ok and jev_signal directly, both external inputs). Documenting unused config knobs under this module misleads whoever edits pool.toml later into thinking planner_router.py acts on them.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec says the per-key notify dedup works 'exactly like daemon._load_scheduler_cfg', but that function (orchestrator/daemon.py:593-596) uses one dedicated module-level bool per named warning, not a generic set keyed by arbitrary config key. The cited precedent doesn't match the 'set of warned keys' mechanism the spec actually asks for.",
+      "severity": "low",
+      "line": 596
+    }
+  ]
+}

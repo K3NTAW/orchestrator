@@ -1,0 +1,1150 @@
+{
+  "id": "T-1048",
+  "created_at": 1790156319.287603,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S1c worker_registry: durable runtime registry of running workers with structured events, reconciliation and read-only inspection CLI (P11, P12)",
+  "spec": "Create orchestrator/worker_registry.py. STATUSES = (\"starting\",\"running\",\"waiting\",\"steering\",\"cancelling\",\"cancelled\",\"done\",\"failed\",\"held\"). Files: .orchestrator/workers/<task>.json (one document: task, role, model, provider, account, pid, worktree, branch, started_at, last_event_at, stage, current_tool (only if the event stream reports it), tokens (input_uncached, cache_read, output so far when known), usd, elapsed_s (computed on read), parent, children (task ids whose constraints.fix_round_for equals this task; the parent field is the goal container and is never used here), status, status_reason) and .orchestrator/workers/<task>.events.jsonl (append-only: ts, kind, data; kinds at least spawned, claimed, stage, tool, usage, exit, reconciled, held). Writes are atomic (temp file + rename) under the existing bus lock helper if one is exposed, else a registry-local fcntl lock. API: upsert(task_id, **fields), get(task_id), active(), event(task_id, kind, **data), finish(task_id, status, reason=None), reconcile(alive_fn) (alive_fn is a required argument; worker_registry never imports daemon) marks entries whose pid is dead and status is running/starting as failed with reason process_dead and emits a reconciled event (no bus changes; daemon.reconcile_dead stays the authority for task status).\nWire producers with minimal edits: spawn.py where the claude -p Popen is created (around line 1046: spawned with pid, account, model, worktree, branch) and where the json result is parsed (around line 1084-1090: usage event + finish done/failed); executor.py where a codex exec thread starts and ends (provider codex, thread id as pid substitute in field thread, plus usage and finish); daemon.tick calls worker_registry.reconcile(alive) exactly once per tick after its dead-task loop, passing the daemon's own alive function. Never store packet text, prompts, transcripts or secrets in the registry; only identifiers, numbers and event kinds. Never expose hidden reasoning: only observable runtime events.\nCLI: `orchestrator workers [--task T-dddd] [--all] [--json]`: table of active workers (task, role, model, provider, status, stage, elapsed, tokens, worktree) and with --task the full document plus the last 20 events; --all includes finished ones from the last 24 h. Docs: docs/hermes-hardening/03-worker-registry.md (document shape, event kinds, what is deliberately not recorded).\nSpec review T-1029 folded in: the base text above is now consistent with the round-1 fold (required alive_fn, once-per-tick call in tick, fix_round_for-only children). Timeout: subprocess.run killed the child on TimeoutExpired; with Popen the except TimeoutExpired handler must call p.kill() and then communicate() to reap it (mirror spawn.py's handler near line 1049) before returning the failed result, so no codex exec process is orphaned.\nSpec review T-1000 folded in: (1) executor.py runs codex through one blocking subprocess.run (near line 159) and learns thread_id only after stdout is parsed: upsert the registry entry BEFORE launching (status starting, provider codex, model, worktree, branch, task, account codex) and replace subprocess.run with Popen plus communicate(timeout=...) preserving the existing timeout, capture and error semantics, so the pid is recorded at launch (event spawned with pid) and the entry is live for the whole run; add the thread id to the entry after parsing (event claimed or thread). Acceptance test: a patched Popen for codex shows an active entry with pid before communicate returns. (2) worker_registry.py never imports daemon (daemon imports it): reconcile(alive_fn) takes the function as a required argument, and daemon.tick calls worker_registry.reconcile(alive) exactly once per tick after the dead-task loop (not inside reconcile_dead). (3) children = task ids whose constraints.fix_round_for equals this task only (the parent field carries the goal container, never the spawning worker); drop the parent-based half of the definition; document that in 03-worker-registry.md.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_worker_registry.py::test_upsert_event_finish_roundtrip (document and event file shapes, atomic write, elapsed computed)",
+    "tests/test_worker_registry.py::test_reconcile_marks_dead_pids (alive_fn false marks failed process_dead and appends reconciled event; alive entries untouched)",
+    "tests/test_worker_registry.py::test_registry_never_stores_prompt_text (upsert with a packet or prompt kwarg raises ValueError)",
+    "tests/test_spawn.py::test_spawn_records_worker_registry_entry (patched Popen and json output produce spawned, usage and exit events)",
+    "tests/test_cli.py::test_workers_cli_lists_active (workers --json lists an active entry; --task shows events)",
+    "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (patched Popen: entry exists with pid and status running while the process runs; usage and exit events after)",
+    "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (patched worker_registry.reconcile called once with the daemon's alive function)",
+    "tests/test_executor.py::test_codex_timeout_kills_process (patched Popen whose communicate raises TimeoutExpired: kill called, failed result returned, registry finish failed)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/worker_registry.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_worker_registry.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/03-worker-registry.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1048",
+  "codex_thread": "01a0cda3-c021-7af1-a2a3-beeeda7e3134",
+  "result": {
+    "summary": "Implemented registry, lifecycle tracking, reconciliation, CLI, and docs. Commit: `8cdf996a143c5a7e8dabef1f9527014a4572b0c5`; working tree clean.\nGate: **FAILED (exit 2)**. Executor mocks require changes outside scope; required executor/daemon tests were added to `test_worker_registry.py`.\nScoped tests pass. Two additional PATH-related `uv` failures pass independently with normal PATH. No dependencies added.\n\n```text\n docs/hermes-hardening/03-worker-registry.md | 59\n orchestrator/cli.py                        | 25\n orchestrator/daemon.py                     |  4\n orchestrator/executor.py                   | 26\n orchestrator/spawn.py                      | 21\n orchestrator/worker_registry.py            | 189\n tests/test_cli.py                          | 25\n tests/test_spawn.py                        | 23\n tests/test_worker_registry.py              | 129\n 9 files changed, 493 insertions(+), 8 deletions(-)\n```\n\nFailures-only test output:\n\n```text\nFileNotFoundError: [Errno 2] No such file or directory: 'codex'\nFileNotFoundError: [Errno 2] No such file or directory: 'uv'\nFAILED (errors=15, skipped=1)\n```",
+    "executed_by": "codex:astra",
+    "thread": "01a0cda3-c021-7af1-a2a3-beeeda7e3134",
+    "usage": {
+      "input_tokens": 1540656,
+      "cached_input_tokens": 1474304,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 14768,
+      "reasoning_output_tokens": 3829,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790156319.289206,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 14:40: spec reviews T-1029 and the round-1 review folded in; two rounds reviewed, Planner approves (waiver)"
+    },
+    {
+      "ts": 1790156404.89891,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871
+      }
+    },
+    {
+      "ts": 1790156404.9004228,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372
+      }
+    },
+    {
+      "ts": 1790156410.6144361,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261
+      }
+    },
+    {
+      "ts": 1790156453.393249,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        }
+      }
+    },
+    {
+      "ts": 1790156455.060886,
+      "packet_meta": {
+        "chars": 6883,
+        "est_tokens": 1720,
+        "presented_tokens": 1720,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "e15aaffd90097bbef3fcc9e9fcdf240f37b3f887697599755ca8d8a025073e7f"
+          },
+          "objective": {
+            "chars": 4814,
+            "est_tokens": 1203,
+            "sha256": "fe2204d4736102868897ae54b121165cbe6f8a34e4980908d834f896bc7edc90"
+          },
+          "acceptance": {
+            "chars": 1229,
+            "est_tokens": 307,
+            "sha256": "8944b03bdee74e33ee37211a769a006635ed09d0e8450cc79c1337a028788ad6"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 267,
+            "est_tokens": 66,
+            "sha256": "d08f4092bf3057637f79f42bb0176186f89aea24df7c4e680c6b52f030189a49"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "024af7090e32",
+        "version": "024af7090e32",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@31f178a95c0e gotchas@b6e9fc8f7f7d memory@notes over cap by 2083 chars: acceptance kept whole routed=active",
+        "policy_version": "31f178a95c0e",
+        "gotchas": "b6e9fc8f7f7d",
+        "candidate_tokens": 3649,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 21295,
+        "routed_reduction_ratio": 0.9190763918860596,
+        "routed_hidden": 2,
+        "routed_ambiguous": 27,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4010a139d8e8",
+          "9ad6e5af9288",
+          "4752025bab3c",
+          "b431847265e7",
+          "d03a3f88d83b",
+          "635e3c636ee4",
+          "87e581a8d8e7",
+          "26714913a455",
+          "2a6bdc323f43",
+          "99c8f6480324",
+          "f691f21d34c7",
+          "58303a4118ed",
+          "17210891e218",
+          "dbc22db138df",
+          "24eb129315e6",
+          "d0fbb0eef6a9",
+          "d0844cdc7c5a",
+          "e85932106229",
+          "504365aa02ad",
+          "66f4838b52f6",
+          "534970e530dd",
+          "fe12cbca17dd",
+          "d5e9a181e10d",
+          "11f2b56e15c8",
+          "0b097298f429",
+          "c5ae501d627c",
+          "fc33965751ba",
+          "2492483663bb",
+          "b893e0175703",
+          "ab6d33732327",
+          "ccd13f4092ef",
+          "cf1765949624",
+          "3192ed0d9b3e",
+          "e218edcee9a3",
+          "173db7ca42f4",
+          "c3dfe3c4be07",
+          "cc1cd4b61a9d",
+          "873a72e0cde5",
+          "a85fd3841c6b",
+          "905a6abcf429",
+          "b3ab8bc12116",
+          "abaad4f43aaa",
+          "38b4bc10e597",
+          "8f867327fd09",
+          "4f96461c1223",
+          "f51f433adb45",
+          "fa0d597b3047",
+          "e4c630cc87b3",
+          "8f938ad31ca7",
+          "82dbf3b7ed1f",
+          "e146114ba8ec",
+          "f5e9df567728",
+          "584f4a33bddf",
+          "66ab1306ccfc",
+          "5d279e520eff",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "23e11d66dd12",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "669cef77d8ef"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790156455.0622249,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1048",
+      "claimed_at": 1790156455.06208
+    },
+    {
+      "ts": 1790156455.063165,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790157061.530005,
+      "codex_thread": "01a0cda3-c021-7af1-a2a3-beeeda7e3134",
+      "codex_thread_head": "8cdf996a143c5a7e8dabef1f9527014a4572b0c5"
+    },
+    {
+      "ts": 1790157061.5324621,
+      "packet_meta": {
+        "chars": 6883,
+        "est_tokens": 1720,
+        "presented_tokens": 1720,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "e15aaffd90097bbef3fcc9e9fcdf240f37b3f887697599755ca8d8a025073e7f"
+          },
+          "objective": {
+            "chars": 4814,
+            "est_tokens": 1203,
+            "sha256": "fe2204d4736102868897ae54b121165cbe6f8a34e4980908d834f896bc7edc90"
+          },
+          "acceptance": {
+            "chars": 1229,
+            "est_tokens": 307,
+            "sha256": "8944b03bdee74e33ee37211a769a006635ed09d0e8450cc79c1337a028788ad6"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 267,
+            "est_tokens": 66,
+            "sha256": "d08f4092bf3057637f79f42bb0176186f89aea24df7c4e680c6b52f030189a49"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "024af7090e32",
+        "version": "024af7090e32",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@31f178a95c0e gotchas@b6e9fc8f7f7d memory@notes over cap by 2083 chars: acceptance kept whole routed=active",
+        "policy_version": "31f178a95c0e",
+        "gotchas": "b6e9fc8f7f7d",
+        "candidate_tokens": 3649,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 21295,
+        "routed_reduction_ratio": 0.9190763918860596,
+        "routed_hidden": 2,
+        "routed_ambiguous": 27,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4010a139d8e8",
+          "9ad6e5af9288",
+          "4752025bab3c",
+          "b431847265e7",
+          "d03a3f88d83b",
+          "635e3c636ee4",
+          "87e581a8d8e7",
+          "26714913a455",
+          "2a6bdc323f43",
+          "99c8f6480324",
+          "f691f21d34c7",
+          "58303a4118ed",
+          "17210891e218",
+          "dbc22db138df",
+          "24eb129315e6",
+          "d0fbb0eef6a9",
+          "d0844cdc7c5a",
+          "e85932106229",
+          "504365aa02ad",
+          "66f4838b52f6",
+          "534970e530dd",
+          "fe12cbca17dd",
+          "d5e9a181e10d",
+          "11f2b56e15c8",
+          "0b097298f429",
+          "c5ae501d627c",
+          "fc33965751ba",
+          "2492483663bb",
+          "b893e0175703",
+          "ab6d33732327",
+          "ccd13f4092ef",
+          "cf1765949624",
+          "3192ed0d9b3e",
+          "e218edcee9a3",
+          "173db7ca42f4",
+          "c3dfe3c4be07",
+          "cc1cd4b61a9d",
+          "873a72e0cde5",
+          "a85fd3841c6b",
+          "905a6abcf429",
+          "b3ab8bc12116",
+          "abaad4f43aaa",
+          "38b4bc10e597",
+          "8f867327fd09",
+          "4f96461c1223",
+          "f51f433adb45",
+          "fa0d597b3047",
+          "e4c630cc87b3",
+          "8f938ad31ca7",
+          "82dbf3b7ed1f",
+          "e146114ba8ec",
+          "f5e9df567728",
+          "584f4a33bddf",
+          "66ab1306ccfc",
+          "5d279e520eff",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "23e11d66dd12",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "669cef77d8ef"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790157061.540596,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790157061.543712,
+      "status": "done",
+      "result": {
+        "summary": "Implemented registry, lifecycle tracking, reconciliation, CLI, and docs. Commit: `8cdf996a143c5a7e8dabef1f9527014a4572b0c5`; working tree clean.\nGate: **FAILED (exit 2)**. Executor mocks require changes outside scope; required executor/daemon tests were added to `test_worker_registry.py`.\nScoped tests pass. Two additional PATH-related `uv` failures pass independently with normal PATH. No dependencies added.\n\n```text\n docs/hermes-hardening/03-worker-registry.md | 59\n orchestrator/cli.py                        | 25\n orchestrator/daemon.py                     |  4\n orchestrator/executor.py                   | 26\n orchestrator/spawn.py                      | 21\n orchestrator/worker_registry.py            | 189\n tests/test_cli.py                          | 25\n tests/test_spawn.py                        | 23\n tests/test_worker_registry.py              | 129\n 9 files changed, 493 insertions(+), 8 deletions(-)\n```\n\nFailures-only test output:\n\n```text\nFileNotFoundError: [Errno 2] No such file or directory: 'codex'\nFileNotFoundError: [Errno 2] No such file or directory: 'uv'\nFAILED (errors=15, skipped=1)\n```",
+        "executed_by": "codex:astra",
+        "thread": "01a0cda3-c021-7af1-a2a3-beeeda7e3134",
+        "usage": {
+          "input_tokens": 1540656,
+          "cached_input_tokens": 1474304,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 14768,
+          "reasoning_output_tokens": 3829,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790157092.3979478,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790157092.54283,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790157092.542669,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+          "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_registry_entry_is_live_before_exit"
+          ],
+          [
+            "tests/test_daemon.py",
+            "test_tick_reconciles_registry_once_per_tick"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_codex_timeout_kills_process"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1790157094.224768,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+          "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_registry_entry_is_live_before_exit"
+          ],
+          [
+            "tests/test_daemon.py",
+            "test_tick_reconciles_registry_once_per_tick"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_codex_timeout_kills_process"
+          ]
+        ],
+        "rejected_ids": [
+          "(missing:",
+          "test",
+          "not",
+          "defined)"
+        ]
+      }
+    },
+    {
+      "ts": 1790157094.332455,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+          "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_registry_entry_is_live_before_exit"
+          ],
+          [
+            "tests/test_daemon.py",
+            "test_tick_reconciles_registry_once_per_tick"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_codex_timeout_kills_process"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit",
+              "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick",
+              "tests/test_executor.py::test_codex_timeout_kills_process"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nFAILED (errors=3)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790157094.334605,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790157092.542669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790157094.847724,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790157092.542669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790157092.54283": true
+        }
+      }
+    },
+    {
+      "ts": 1790157132.520912,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+          "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_registry_entry_is_live_before_exit"
+          ],
+          [
+            "tests/test_daemon.py",
+            "test_tick_reconciles_registry_once_per_tick"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_codex_timeout_kills_process"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit",
+              "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick",
+              "tests/test_executor.py::test_codex_timeout_kills_process"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nFAILED (errors=3)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(missing:",
+          "test",
+          "not",
+          "defined)"
+        ]
+      }
+    },
+    {
+      "ts": 1790157171.757192,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+          "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_registry_entry_is_live_before_exit"
+          ],
+          [
+            "tests/test_daemon.py",
+            "test_tick_reconciles_registry_once_per_tick"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_codex_timeout_kills_process"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit",
+              "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick",
+              "tests/test_executor.py::test_codex_timeout_kills_process"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nFAILED (errors=3)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(missing:",
+          "test",
+          "not",
+          "defined)"
+        ]
+      }
+    },
+    {
+      "ts": 1790157211.20233,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+          "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+          "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_executor.py",
+            "test_codex_registry_entry_is_live_before_exit"
+          ],
+          [
+            "tests/test_daemon.py",
+            "test_tick_reconciles_registry_once_per_tick"
+          ],
+          [
+            "tests/test_executor.py",
+            "test_codex_timeout_kills_process"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit",
+              "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick",
+              "tests/test_executor.py::test_codex_timeout_kills_process"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nFAILED (errors=3)\n"
+          }
+        ],
+        "rejected_ids": [
+          "(missing:",
+          "test",
+          "not",
+          "defined)"
+        ]
+      }
+    },
+    {
+      "ts": 1790157494.5627189,
+      "codex_thread": "01a0cda3-c021-7af1-a2a3-beeeda7e3134",
+      "codex_thread_head": "f4df5de4148d68fb1ac69346cb92dda0e40bbbb1"
+    },
+    {
+      "ts": 1790157494.570564,
+      "rounds": 1
+    },
+    {
+      "ts": 1790157692.509818,
+      "pipeline": {
+        "first_ready_at": 1790156404.898871,
+        "dispatched_at": 1790156404.900372,
+        "dispatched_at_lease": 1790157304.900372,
+        "dispatched_at_done": 1790156410.614261,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790156453.39295
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790157092.542669,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790157092.54283": true
+        },
+        "first_green_at": 1790157692.505835,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790164183.495018,
+      "status": "done",
+      "hold_reason": null,
+      "merged_into": "goal/T-0991",
+      "merged_via": "fix_round:T-1065",
+      "reason": "Planner: fix round T-1065 (same worktree) merged at 9bcba6a with review T-1068 approve; root marked merged"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner: fix round T-1065 (same worktree) merged at 9bcba6a with review T-1068 approve; root marked merged",
+  "pipeline": {
+    "first_ready_at": 1790156404.898871,
+    "dispatched_at": 1790156404.900372,
+    "dispatched_at_lease": 1790157304.900372,
+    "dispatched_at_done": 1790156410.614261,
+    "handoff": {
+      "baseline": "astra",
+      "selected": "astra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790156453.39295
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "3b94020bef023afa8d501f0212d89e7c56b92bbb",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790157092.542669,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_skipped": {
+      "1790157092.54283": true
+    },
+    "first_green_at": 1790157692.505835,
+    "lineage_fix_rounds": 1
+  },
+  "packet_meta": {
+    "chars": 6883,
+    "est_tokens": 1720,
+    "presented_tokens": 1720,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "e15aaffd90097bbef3fcc9e9fcdf240f37b3f887697599755ca8d8a025073e7f"
+      },
+      "objective": {
+        "chars": 4814,
+        "est_tokens": 1203,
+        "sha256": "fe2204d4736102868897ae54b121165cbe6f8a34e4980908d834f896bc7edc90"
+      },
+      "acceptance": {
+        "chars": 1229,
+        "est_tokens": 307,
+        "sha256": "8944b03bdee74e33ee37211a769a006635ed09d0e8450cc79c1337a028788ad6"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+      },
+      "write_scope": {
+        "chars": 267,
+        "est_tokens": 66,
+        "sha256": "d08f4092bf3057637f79f42bb0176186f89aea24df7c4e680c6b52f030189a49"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "024af7090e32",
+    "version": "024af7090e32",
+    "candidate_known": true,
+    "base": "1acfc3b30612",
+    "sources": "pool.toml@31f178a95c0e gotchas@b6e9fc8f7f7d memory@notes over cap by 2083 chars: acceptance kept whole routed=active",
+    "policy_version": "31f178a95c0e",
+    "gotchas": "b6e9fc8f7f7d",
+    "candidate_tokens": 3649,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 21295,
+    "routed_reduction_ratio": 0.9190763918860596,
+    "routed_hidden": 2,
+    "routed_ambiguous": 27,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "4010a139d8e8",
+      "9ad6e5af9288",
+      "4752025bab3c",
+      "b431847265e7",
+      "d03a3f88d83b",
+      "635e3c636ee4",
+      "87e581a8d8e7",
+      "26714913a455",
+      "2a6bdc323f43",
+      "99c8f6480324",
+      "f691f21d34c7",
+      "58303a4118ed",
+      "17210891e218",
+      "dbc22db138df",
+      "24eb129315e6",
+      "d0fbb0eef6a9",
+      "d0844cdc7c5a",
+      "e85932106229",
+      "504365aa02ad",
+      "66f4838b52f6",
+      "534970e530dd",
+      "fe12cbca17dd",
+      "d5e9a181e10d",
+      "11f2b56e15c8",
+      "0b097298f429",
+      "c5ae501d627c",
+      "fc33965751ba",
+      "2492483663bb",
+      "b893e0175703",
+      "ab6d33732327",
+      "ccd13f4092ef",
+      "cf1765949624",
+      "3192ed0d9b3e",
+      "e218edcee9a3",
+      "173db7ca42f4",
+      "c3dfe3c4be07",
+      "cc1cd4b61a9d",
+      "873a72e0cde5",
+      "a85fd3841c6b",
+      "905a6abcf429",
+      "b3ab8bc12116",
+      "abaad4f43aaa",
+      "38b4bc10e597",
+      "8f867327fd09",
+      "4f96461c1223",
+      "f51f433adb45",
+      "fa0d597b3047",
+      "e4c630cc87b3",
+      "8f938ad31ca7",
+      "82dbf3b7ed1f",
+      "e146114ba8ec",
+      "f5e9df567728",
+      "584f4a33bddf",
+      "66ab1306ccfc",
+      "5d279e520eff",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "23e11d66dd12",
+      "d02e6bc9902a",
+      "bb8ef90a30f4",
+      "461132b06b06",
+      "669cef77d8ef"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790156455.06208,
+  "rounds": 1,
+  "executor": "astra",
+  "codex_thread_head": "f4df5de4148d68fb1ac69346cb92dda0e40bbbb1",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (missing: test not defined)",
+      "FAILED tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (missing: test not defined)",
+      "FAILED tests/test_executor.py::test_codex_timeout_kills_process (missing: test not defined)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_executor.py",
+        "test_codex_registry_entry_is_live_before_exit"
+      ],
+      [
+        "tests/test_daemon.py",
+        "test_tick_reconciles_registry_once_per_tick"
+      ],
+      [
+        "tests/test_executor.py",
+        "test_codex_timeout_kills_process"
+      ]
+    ],
+    "flaky_runs": [
+      {
+        "ids": [
+          "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit",
+          "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick",
+          "tests/test_executor.py::test_codex_timeout_kills_process"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1048/tests/test_executor.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nFAILED (errors=3)\n"
+      }
+    ],
+    "rejected_ids": [
+      "(missing:",
+      "test",
+      "not",
+      "defined)"
+    ]
+  },
+  "merged_into": "goal/T-0991",
+  "merged_via": "fix_round:T-1065"
+}

@@ -1,0 +1,684 @@
+{
+  "id": "T-1268",
+  "created_at": 1790175866.388664,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2f2 steering_policy in shadow: deterministic triggers (dependency merged, stuck, out-of-scope, repeated gate failure, security concern) produce decision_log rows kind steering; promotion feature steering_policy (P14)",
+  "spec": "Create orchestrator/steering_policy.py. evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg) -> {\"action\": \"continue\"|\"steer\"|\"cancel\", \"trigger\": name|None, \"reasons\": [...], \"message\": text|None}. Triggers, deterministic, in this order: security_concern (a merged sibling changed a security path the task reads: from stale_evidence stale_paths matching [review] security_paths); dependency_changed (stale_evidence risk medium or high on the task's read scope); stuck (no registry event for [steering].stuck_after_s, default 900, while status running); out_of_scope (registry tool events touching paths outside write_scope and read_scope more than [steering].out_of_scope_events, default 3); repeated_failure (two gate reds with the same failure signature on this lineage). Action: steer for dependency_changed, out_of_scope, repeated_failure; cancel for security_concern when the task is not on the critical path, else steer; continue otherwise. The message names the trigger, lists the changed paths or the repeated failure, and never restates the spec. daemon tick: for every running execute task compute evaluate and record decision_log rows kind steering (add to KINDS) with candidates continue/steer/cancel, hard constraints, deterministic evidence, selected, mode; [steering].mode = \"shadow\" (dated comment; off|shadow|active). Active: call worker_control.steer or cancel with the message; shadow: rows only; never more than one steering per task per [steering].min_interval_s (default 1800). promotion FEATURES entry steering_policy with criteria: at least 20 shadow rows with a steer or cancel candidate and, once active, fewer fix rounds per task than the shadow baseline with no rise in token cost. Docs: docs/hermes-hardening/12-steering-policy.md.\nSpec review T-1262 folded in: (1) Inputs defined: gate_history = the list of daemon.failure_signature values of every gate-red round in the task's lineage (the fix_round_for chain up to the root), repeated_failure fires when the last two are equal; out_of_scope uses the worktree's `git status --porcelain` paths (not registry tool payloads): a path is outside scope when it matches no write_scope or read_scope entry by fnmatch (glob entries) or path prefix (directory entries); the count threshold applies to distinct paths. (2) evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now): critical is computed by the daemon as 'task is first in critical_path.rank over running plus ready tasks'; cancel is chosen only when critical is False AND the worktree has no commits beyond its base; any exception or missing input inside evaluate yields continue (fail closed) with reason evaluation_error. (3) daemon.tick wraps worker_control.steer/cancel in try/except: a failure writes a steering row with outcome error and does not consume the interval. (4) Interval and dedupe from persisted state: the last steering decision_log row for the task (bounded read of the last 500 rows) defines min_interval_s; a shadow row is written only when (trigger, evidence hash) differs from the task's last row, so ticks do not flood rows. (5) [steering] section is new: defaults live in code (mode shadow, stuck_after_s 900, out_of_scope_events 3, min_interval_s 1800); steering_policy.mode(cfg) validates and falls back to off on unknown values with invalid_config on the row; tests/test_pool.py gets a validation case (scope). (6) decision_log: steering rows carry trigger, severity, critical, action, evidence_hash, message_chars (never the message text) and the standard candidates/hard_constraints/deterministic/reason/selected/mode fields; tests/test_decision_log.py (scope) updates any KINDS count assertions. (7) promotion.collect gains a steering_policy branch: n, steer and cancel counts, mean fix rounds of steered versus non-steered tasks over the window (from constraints.fix_round_for on the bus). (8) security_paths empty in [review] means fail closed: every orchestrator/*.py counts as a security path, mirroring the daemon. (9) Tests: shadow asserts steer and cancel are never called (unittest.mock); active calls once and respects min_interval_s; the error path writes an error row.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1264"
+  ],
+  "acceptance": [
+    "tests/test_steering_policy.py::test_triggers_in_order_and_actions (each trigger from fixtures yields the documented action and message)",
+    "tests/test_steering_policy.py::test_min_interval_and_critical_path_rule",
+    "tests/test_daemon.py::test_tick_records_steering_rows_in_shadow_without_calling_worker_control",
+    "tests/test_promotion.py::test_steering_policy_feature_registered",
+    "tests/test_daemon.py::test_active_steering_calls_once_respects_interval_and_logs_errors",
+    "tests/test_pool.py::test_steering_section_defaults_and_invalid_mode_falls_back",
+    "tests/test_decision_log.py::test_steering_rows_omit_message_text",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/steering_policy.py",
+    "orchestrator/daemon.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_steering_policy.py",
+    "tests/test_daemon.py",
+    "tests/test_promotion.py",
+    "docs/hermes-hardening/12-steering-policy.md",
+    "tests/test_pool.py",
+    "tests/test_decision_log.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1268",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/steering_policy.py",
+        "issue": "The spec's evaluate signature disagrees with itself. The first paragraph lists no critical or now parameters, and the review fold-in (2) adds them. Tests and the daemon call site can diverge unless one final signature is fixed. Time-based triggers such as stuck also need an injected now, otherwise they cannot be tested deterministically.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The spec says gate_history is built from daemon.failure_signature, but that function lives in orchestrator/failures.py and is only imported into daemon.py (daemon.py:16). The lineage chain logic already exists at daemon.py:178-190 and mixes constraints.failure_signature with recomputation. The spec should name one source. Recorded constraints.failure_signature on chain tasks is the likely one. It should also say how a gate-red round is identified, since not every chain task is a red gate.",
+        "severity": "med",
+        "line": 190
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The out_of_scope trigger uses `git status --porcelain` in the worktree on every tick for every running task. This is an unguarded subprocess. The spec does not say what happens on timeout or a missing worktree, and it does not say how renames (`old -> new`) and quoted paths are parsed. It also does not say whether untracked build or cache paths (.pyc, __pycache__, .orchestrator state) are excluded, and those would trip the trigger constantly. The fold-in also says the cancel guard needs 'no commits beyond base'. That needs a defined git call (rev-list base..HEAD) with the same failure handling.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/steering_policy.py",
+        "issue": "security_concern reads stale_evidence stale_paths, but the spec does not name the producer or its shape. dependency_changed likewise reads 'risk medium or high on the task's read scope'. The T-1213 evidence-reuse contract must be cited or pinned, or the fixtures will encode a guessed shape. A missing or partial shape yields 'continue', which is a silent fallback.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Dedupe and interval semantics are ambiguous across modes. In shadow no steer happens, so 'last steering row' governs the interval. A shadow row would therefore start the 1800 s clock. When the mode is flipped to active, a real steer could be suppressed by a shadow row, or the reverse. Interval accounting should count only rows with mode=active and outcome!=error. Dedupe on (trigger, evidence_hash) also suppresses re-steering when the evidence is unchanged after a steer that did not work. It needs an explicit rule for what happens after the interval expires.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Active-mode safety is underspecified. It does not say whether a task that was steered but has not resumed (the T-1216 epoch and delivery recovery) is skipped. It does not say what happens if the worker exits between evaluate and steer or cancel. The critical flag is computed 'over running plus ready tasks', which could differ from the scheduler's own priority view. Cancel is destructive and the state is unrecoverable, so cancel should probably stay shadow-only or need an extra confirmation until the promotion criteria pass.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/decision_log.py",
+        "issue": "The decision_log KINDS tuple is presumably also mirrored in schema or other docs and count assertions outside the scoped tests, so adding 'steering' can break unscoped tests. The row payload also has to satisfy the existing per-kind validators. The acceptance test test_steering_rows_omit_message_text needs a concrete assertion, for example that message_chars is present and the message string is absent from the serialized row.",
+        "severity": "low",
+        "line": 34
+      }
+    ],
+    "suggested_spec_changes": [
+      "State one final evaluate signature (task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now) and update the first paragraph to match.",
+      "Name the source of gate_history: constraints.failure_signature on the fix_round_for chain, and only rounds that were gate-red. Import failures.failure_signature rather than 'daemon.failure_signature'.",
+      "Cite the shape of stale_evidence (producer module and keys: stale_paths, risk) so fixtures match the real contract.",
+      "Define the git subprocess handling for porcelain and base..HEAD: timeout, missing worktree yields continue with evaluation_error, rename parsing, and an ignore list for cache and state paths.",
+      "Compute min_interval_s only from rows with mode=active and outcome!=error. Shadow rows use only the (trigger, evidence_hash) dedupe.",
+      "Skip tasks with a steer already in flight (a registry steer without steered, or a pending cancel_requested) and re-check that the worker is still running immediately before the call.",
+      "Keep cancel as shadow-only, or behind a separate [steering].allow_cancel default false, until promotion evidence exists.",
+      "Fix the promotion criterion: define the baseline as shadow rows with a would-steer candidate, and either add a token cost field to collect or remove the token clause.",
+      "Add a rollback line to the docs and the pool.toml comment: mode = off restores prior behaviour, with no state migration.",
+      "Require the test that message_chars is present and the message text is absent from the serialized row, and add a KINDS count update in any unscoped test that asserts it, or list that test in scope."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 7183,
+      "trimmed": {
+        "risks": 3
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790175867.85604,
+      "packet_meta": {
+        "chars": 7153,
+        "est_tokens": 1788,
+        "presented_tokens": 1788,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b28ad01a5f29fa502986cc581a8d48f1ca13bb2f2e67ba7950370100b840b862"
+          },
+          "spec": {
+            "chars": 5142,
+            "est_tokens": 1285,
+            "sha256": "a6cd275a3a81fac65f824dc7bf2a15935d1e24e69931dbcde37848aa88e430bf"
+          },
+          "acceptance": {
+            "chars": 667,
+            "est_tokens": 166,
+            "sha256": "0e5f0deb308b5f6142534d162027ffdafa847e5b3978d0d3d190a8e0459568ca"
+          },
+          "scope": {
+            "chars": 330,
+            "est_tokens": 82,
+            "sha256": "dc0f853f99bcb31644bb6949b10558ecd4a0d210bda9179115441244e845a2fb"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "e0518dd24af35a661afae751bb40dec913a5e8d34a6fa9e8a3cd2d587270d062"
+          },
+          "existing tests": {
+            "chars": 771,
+            "est_tokens": 192,
+            "sha256": "1f9b574e35ce061a300e1317788f196e09b2ada8f574ded27d2cae55ac243b6c"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "496f6bf92864",
+        "version": "496f6bf92864",
+        "candidate_known": false,
+        "base": "10537342c1f9",
+        "sources": "task@T-1264 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790175869.555424,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1268",
+      "claimed_at": 1790175869.5551171
+    },
+    {
+      "ts": 1790175869.55671,
+      "account": "A"
+    },
+    {
+      "ts": 1790175870.4275148,
+      "pid": 35108,
+      "account": "A"
+    },
+    {
+      "ts": 1790175908.28975,
+      "packet_meta": {
+        "chars": 7153,
+        "est_tokens": 1788,
+        "presented_tokens": 1788,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b28ad01a5f29fa502986cc581a8d48f1ca13bb2f2e67ba7950370100b840b862"
+          },
+          "spec": {
+            "chars": 5142,
+            "est_tokens": 1285,
+            "sha256": "a6cd275a3a81fac65f824dc7bf2a15935d1e24e69931dbcde37848aa88e430bf"
+          },
+          "acceptance": {
+            "chars": 667,
+            "est_tokens": 166,
+            "sha256": "0e5f0deb308b5f6142534d162027ffdafa847e5b3978d0d3d190a8e0459568ca"
+          },
+          "scope": {
+            "chars": 330,
+            "est_tokens": 82,
+            "sha256": "dc0f853f99bcb31644bb6949b10558ecd4a0d210bda9179115441244e845a2fb"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "e0518dd24af35a661afae751bb40dec913a5e8d34a6fa9e8a3cd2d587270d062"
+          },
+          "existing tests": {
+            "chars": 771,
+            "est_tokens": 192,
+            "sha256": "1f9b574e35ce061a300e1317788f196e09b2ada8f574ded27d2cae55ac243b6c"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "496f6bf92864",
+        "version": "496f6bf92864",
+        "candidate_known": false,
+        "base": "10537342c1f9",
+        "sources": "task@T-1264 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "4aeb3e3d-fd22-46e3-867b-bec59e6e4836"
+      }
+    },
+    {
+      "ts": 1790175908.325135,
+      "packet_meta": {
+        "chars": 7153,
+        "est_tokens": 1788,
+        "presented_tokens": 1788,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b28ad01a5f29fa502986cc581a8d48f1ca13bb2f2e67ba7950370100b840b862"
+          },
+          "spec": {
+            "chars": 5142,
+            "est_tokens": 1285,
+            "sha256": "a6cd275a3a81fac65f824dc7bf2a15935d1e24e69931dbcde37848aa88e430bf"
+          },
+          "acceptance": {
+            "chars": 667,
+            "est_tokens": 166,
+            "sha256": "0e5f0deb308b5f6142534d162027ffdafa847e5b3978d0d3d190a8e0459568ca"
+          },
+          "scope": {
+            "chars": 330,
+            "est_tokens": 82,
+            "sha256": "dc0f853f99bcb31644bb6949b10558ecd4a0d210bda9179115441244e845a2fb"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "e0518dd24af35a661afae751bb40dec913a5e8d34a6fa9e8a3cd2d587270d062"
+          },
+          "existing tests": {
+            "chars": 771,
+            "est_tokens": 192,
+            "sha256": "1f9b574e35ce061a300e1317788f196e09b2ada8f574ded27d2cae55ac243b6c"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "496f6bf92864",
+        "version": "496f6bf92864",
+        "candidate_known": false,
+        "base": "10537342c1f9",
+        "sources": "task@T-1264 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "4aeb3e3d-fd22-46e3-867b-bec59e6e4836",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790175908.331311,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/steering_policy.py",
+            "issue": "The spec's evaluate signature disagrees with itself. The first paragraph lists no critical or now parameters, and the review fold-in (2) adds them. Tests and the daemon call site can diverge unless one final signature is fixed. Time-based triggers such as stuck also need an injected now, otherwise they cannot be tested deterministically.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The spec says gate_history is built from daemon.failure_signature, but that function lives in orchestrator/failures.py and is only imported into daemon.py (daemon.py:16). The lineage chain logic already exists at daemon.py:178-190 and mixes constraints.failure_signature with recomputation. The spec should name one source. Recorded constraints.failure_signature on chain tasks is the likely one. It should also say how a gate-red round is identified, since not every chain task is a red gate.",
+            "severity": "med",
+            "line": 190
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The out_of_scope trigger uses `git status --porcelain` in the worktree on every tick for every running task. This is an unguarded subprocess. The spec does not say what happens on timeout or a missing worktree, and it does not say how renames (`old -> new`) and quoted paths are parsed. It also does not say whether untracked build or cache paths (.pyc, __pycache__, .orchestrator state) are excluded, and those would trip the trigger constantly. The fold-in also says the cancel guard needs 'no commits beyond base'. That needs a defined git call (rev-list base..HEAD) with the same failure handling.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/steering_policy.py",
+            "issue": "security_concern reads stale_evidence stale_paths, but the spec does not name the producer or its shape. dependency_changed likewise reads 'risk medium or high on the task's read scope'. The T-1213 evidence-reuse contract must be cited or pinned, or the fixtures will encode a guessed shape. A missing or partial shape yields 'continue', which is a silent fallback.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Dedupe and interval semantics are ambiguous across modes. In shadow no steer happens, so 'last steering row' governs the interval. A shadow row would therefore start the 1800 s clock. When the mode is flipped to active, a real steer could be suppressed by a shadow row, or the reverse. Interval accounting should count only rows with mode=active and outcome!=error. Dedupe on (trigger, evidence_hash) also suppresses re-steering when the evidence is unchanged after a steer that did not work. It needs an explicit rule for what happens after the interval expires.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Active-mode safety is underspecified. It does not say whether a task that was steered but has not resumed (the T-1216 epoch and delivery recovery) is skipped. It does not say what happens if the worker exits between evaluate and steer or cancel. The critical flag is computed 'over running plus ready tasks', which could differ from the scheduler's own priority view. Cancel is destructive and the state is unrecoverable, so cancel should probably stay shadow-only or need an extra confirmation until the promotion criteria pass.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/decision_log.py",
+            "issue": "The decision_log KINDS tuple is presumably also mirrored in schema or other docs and count assertions outside the scoped tests, so adding 'steering' can break unscoped tests. The row payload also has to satisfy the existing per-kind validators. The acceptance test test_steering_rows_omit_message_text needs a concrete assertion, for example that message_chars is present and the message string is absent from the serialized row.",
+            "severity": "low",
+            "line": 34
+          }
+        ],
+        "suggested_spec_changes": [
+          "State one final evaluate signature (task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now) and update the first paragraph to match.",
+          "Name the source of gate_history: constraints.failure_signature on the fix_round_for chain, and only rounds that were gate-red. Import failures.failure_signature rather than 'daemon.failure_signature'.",
+          "Cite the shape of stale_evidence (producer module and keys: stale_paths, risk) so fixtures match the real contract.",
+          "Define the git subprocess handling for porcelain and base..HEAD: timeout, missing worktree yields continue with evaluation_error, rename parsing, and an ignore list for cache and state paths.",
+          "Compute min_interval_s only from rows with mode=active and outcome!=error. Shadow rows use only the (trigger, evidence_hash) dedupe.",
+          "Skip tasks with a steer already in flight (a registry steer without steered, or a pending cancel_requested) and re-check that the worker is still running immediately before the call.",
+          "Keep cancel as shadow-only, or behind a separate [steering].allow_cancel default false, until promotion evidence exists.",
+          "Fix the promotion criterion: define the baseline as shadow rows with a would-steer candidate, and either add a token cost field to collect or remove the token clause.",
+          "Add a rollback line to the docs and the pool.toml comment: mode = off restores prior behaviour, with no state migration.",
+          "Require the test that message_chars is present and the message text is absent from the serialized row, and add a KINDS count update in any unscoped test that asserts it, or list that test in scope."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 7183,
+          "trimmed": {
+            "risks": 3
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790175908.3324401,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/steering_policy.py",
+          "issue": "The spec's evaluate signature disagrees with itself. The first paragraph lists no critical or now parameters, and the review fold-in (2) adds them. Tests and the daemon call site can diverge unless one final signature is fixed. Time-based triggers such as stuck also need an injected now, otherwise they cannot be tested deterministically.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec says gate_history is built from daemon.failure_signature, but that function lives in orchestrator/failures.py and is only imported into daemon.py (daemon.py:16). The lineage chain logic already exists at daemon.py:178-190 and mixes constraints.failure_signature with recomputation. The spec should name one source. Recorded constraints.failure_signature on chain tasks is the likely one. It should also say how a gate-red round is identified, since not every chain task is a red gate.",
+          "severity": "med",
+          "line": 190
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The out_of_scope trigger uses `git status --porcelain` in the worktree on every tick for every running task. This is an unguarded subprocess. The spec does not say what happens on timeout or a missing worktree, and it does not say how renames (`old -> new`) and quoted paths are parsed. It also does not say whether untracked build or cache paths (.pyc, __pycache__, .orchestrator state) are excluded, and those would trip the trigger constantly. The fold-in also says the cancel guard needs 'no commits beyond base'. That needs a defined git call (rev-list base..HEAD) with the same failure handling.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/steering_policy.py",
+          "issue": "security_concern reads stale_evidence stale_paths, but the spec does not name the producer or its shape. dependency_changed likewise reads 'risk medium or high on the task's read scope'. The T-1213 evidence-reuse contract must be cited or pinned, or the fixtures will encode a guessed shape. A missing or partial shape yields 'continue', which is a silent fallback.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Dedupe and interval semantics are ambiguous across modes. In shadow no steer happens, so 'last steering row' governs the interval. A shadow row would therefore start the 1800 s clock. When the mode is flipped to active, a real steer could be suppressed by a shadow row, or the reverse. Interval accounting should count only rows with mode=active and outcome!=error. Dedupe on (trigger, evidence_hash) also suppresses re-steering when the evidence is unchanged after a steer that did not work. It needs an explicit rule for what happens after the interval expires.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Active-mode safety is underspecified. It does not say whether a task that was steered but has not resumed (the T-1216 epoch and delivery recovery) is skipped. It does not say what happens if the worker exits between evaluate and steer or cancel. The critical flag is computed 'over running plus ready tasks', which could differ from the scheduler's own priority view. Cancel is destructive and the state is unrecoverable, so cancel should probably stay shadow-only or need an extra confirmation until the promotion criteria pass.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "The decision_log KINDS tuple is presumably also mirrored in schema or other docs and count assertions outside the scoped tests, so adding 'steering' can break unscoped tests. The row payload also has to satisfy the existing per-kind validators. The acceptance test test_steering_rows_omit_message_text needs a concrete assertion, for example that message_chars is present and the message string is absent from the serialized row.",
+          "severity": "low",
+          "line": 34
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "The FEATURES criterion 'fewer fix rounds than the shadow baseline with no rise in token cost' has no defined data source for the baseline or the token cost. collect covers only n, counts and mean fix rounds. Token cost is not collected, so the criterion cannot be evaluated. Selection bias also applies, because steered tasks are the troubled ones, so a naive steered-versus-non-steered comparison will show more fix rounds. Define the baseline as shadow-period tasks that would have been steered, or drop the token clause.",
+          "severity": "med",
+          "line": 11
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "The spec says pool.toml [steering] mode = shadow with a dated comment, but fold-in (5) says defaults live in code. Decide whether the toml section is documentation only. Add a rollback line: set mode = off. The docs file also needs a rollback and revert path. The FEATURES 'files' and 'tests' fields should also be checked against roadmap.py registration checks, which may require a roadmap entry outside scope.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_steering_policy.py",
+          "issue": "The stuck trigger relies on 'no registry event' from worker_registry with an unspecified reader and event kinds. Events such as steer/steered/cancel_requested that the policy itself generates should not reset the stuck clock. The trigger order is also fixed while several triggers can fire together, so the fixture should assert that reasons lists all firing triggers while trigger names the first.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 7153,
+    "est_tokens": 1788,
+    "presented_tokens": 1788,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "b28ad01a5f29fa502986cc581a8d48f1ca13bb2f2e67ba7950370100b840b862"
+      },
+      "spec": {
+        "chars": 5142,
+        "est_tokens": 1285,
+        "sha256": "a6cd275a3a81fac65f824dc7bf2a15935d1e24e69931dbcde37848aa88e430bf"
+      },
+      "acceptance": {
+        "chars": 667,
+        "est_tokens": 166,
+        "sha256": "0e5f0deb308b5f6142534d162027ffdafa847e5b3978d0d3d190a8e0459568ca"
+      },
+      "scope": {
+        "chars": 330,
+        "est_tokens": 82,
+        "sha256": "dc0f853f99bcb31644bb6949b10558ecd4a0d210bda9179115441244e845a2fb"
+      },
+      "depends_on": {
+        "chars": 144,
+        "est_tokens": 36,
+        "sha256": "e0518dd24af35a661afae751bb40dec913a5e8d34a6fa9e8a3cd2d587270d062"
+      },
+      "existing tests": {
+        "chars": 771,
+        "est_tokens": 192,
+        "sha256": "1f9b574e35ce061a300e1317788f196e09b2ada8f574ded27d2cae55ac243b6c"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "496f6bf92864",
+    "version": "496f6bf92864",
+    "candidate_known": false,
+    "base": "10537342c1f9",
+    "sources": "task@T-1264 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "4aeb3e3d-fd22-46e3-867b-bec59e6e4836",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790175869.5551171,
+  "account": "A",
+  "pid": 35108,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/steering_policy.py",
+      "issue": "The spec's evaluate signature disagrees with itself. The first paragraph lists no critical or now parameters, and the review fold-in (2) adds them. Tests and the daemon call site can diverge unless one final signature is fixed. Time-based triggers such as stuck also need an injected now, otherwise they cannot be tested deterministically.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec says gate_history is built from daemon.failure_signature, but that function lives in orchestrator/failures.py and is only imported into daemon.py (daemon.py:16). The lineage chain logic already exists at daemon.py:178-190 and mixes constraints.failure_signature with recomputation. The spec should name one source. Recorded constraints.failure_signature on chain tasks is the likely one. It should also say how a gate-red round is identified, since not every chain task is a red gate.",
+      "severity": "med",
+      "line": 190
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The out_of_scope trigger uses `git status --porcelain` in the worktree on every tick for every running task. This is an unguarded subprocess. The spec does not say what happens on timeout or a missing worktree, and it does not say how renames (`old -> new`) and quoted paths are parsed. It also does not say whether untracked build or cache paths (.pyc, __pycache__, .orchestrator state) are excluded, and those would trip the trigger constantly. The fold-in also says the cancel guard needs 'no commits beyond base'. That needs a defined git call (rev-list base..HEAD) with the same failure handling.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/steering_policy.py",
+      "issue": "security_concern reads stale_evidence stale_paths, but the spec does not name the producer or its shape. dependency_changed likewise reads 'risk medium or high on the task's read scope'. The T-1213 evidence-reuse contract must be cited or pinned, or the fixtures will encode a guessed shape. A missing or partial shape yields 'continue', which is a silent fallback.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Dedupe and interval semantics are ambiguous across modes. In shadow no steer happens, so 'last steering row' governs the interval. A shadow row would therefore start the 1800 s clock. When the mode is flipped to active, a real steer could be suppressed by a shadow row, or the reverse. Interval accounting should count only rows with mode=active and outcome!=error. Dedupe on (trigger, evidence_hash) also suppresses re-steering when the evidence is unchanged after a steer that did not work. It needs an explicit rule for what happens after the interval expires.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Active-mode safety is underspecified. It does not say whether a task that was steered but has not resumed (the T-1216 epoch and delivery recovery) is skipped. It does not say what happens if the worker exits between evaluate and steer or cancel. The critical flag is computed 'over running plus ready tasks', which could differ from the scheduler's own priority view. Cancel is destructive and the state is unrecoverable, so cancel should probably stay shadow-only or need an extra confirmation until the promotion criteria pass.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "The decision_log KINDS tuple is presumably also mirrored in schema or other docs and count assertions outside the scoped tests, so adding 'steering' can break unscoped tests. The row payload also has to satisfy the existing per-kind validators. The acceptance test test_steering_rows_omit_message_text needs a concrete assertion, for example that message_chars is present and the message string is absent from the serialized row.",
+      "severity": "low",
+      "line": 34
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "The FEATURES criterion 'fewer fix rounds than the shadow baseline with no rise in token cost' has no defined data source for the baseline or the token cost. collect covers only n, counts and mean fix rounds. Token cost is not collected, so the criterion cannot be evaluated. Selection bias also applies, because steered tasks are the troubled ones, so a naive steered-versus-non-steered comparison will show more fix rounds. Define the baseline as shadow-period tasks that would have been steered, or drop the token clause.",
+      "severity": "med",
+      "line": 11
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "The spec says pool.toml [steering] mode = shadow with a dated comment, but fold-in (5) says defaults live in code. Decide whether the toml section is documentation only. Add a rollback line: set mode = off. The docs file also needs a rollback and revert path. The FEATURES 'files' and 'tests' fields should also be checked against roadmap.py registration checks, which may require a roadmap entry outside scope.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_steering_policy.py",
+      "issue": "The stuck trigger relies on 'no registry event' from worker_registry with an unspecified reader and event kinds. Events such as steer/steered/cancel_requested that the policy itself generates should not reset the stuck clock. The trigger order is also fixed while several triggers can fire together, so the fixture should assert that reasons lists all firing triggers while trigger names the first.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

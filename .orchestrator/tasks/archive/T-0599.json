@@ -1,0 +1,445 @@
+{
+  "id": "T-0599",
+  "created_at": 1789972331.2664099,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "R4 v3: orchestrator/concurrency.py \u2014 adaptive concurrency 0..hard_max from compatible groups (coupled clusters cap their own contribution), capacity and merge pressure, with pinned input shapes (AP P13, P11)",
+  "spec": "Why: daemon.dispatch fills wave_limit = min(slots, max_wave or slots) (orchestrator/daemon.py:690), so concurrency is always the hard maximum; AP P13 wants a selected concurrency below the cap derived from evidence, AP P11 wants merge pressure to bound it. v3 after spec reviews T-0569 and T-0589.\nWhat: new pure module orchestrator/concurrency.py; no daemon edits. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in that file; no pytest fixtures.\n- reason_kind(reason) -> reason.split(':', 1)[0] (own implementation; do not import interference._reason_kind).\n- compatible_groups(ready_ids, pairwise_rows) -> list of lists: connected components over rows with level hard or soft (interference.pairwise shape {a, b, level, reasons}); singletons are independent; deterministic order (sorted by first member).\n- group_contribution(group, pairwise_rows) -> int: singleton 1; every internal pair hard -> 1; size >= 3 with any hard edge -> 1; otherwise (soft-only, or size 2 mixed) -> 2. (Under interference.DEFAULT_RULES same_glob/glob_covers are already hard, so no separate shared-interface branch exists; the kind names 'interface' and 'migration' are reserved for a future interference extension and documented as such.)\n- select_limit(hard_max, ready_ids, tasks, pairwise_rows, priorities, snapshot=None, pressure=None, durations=None, cfg=None) -> {\"hard_max\", \"limit\", \"reasons\": [str], \"tasks_considered\": ready_ids, \"expected_benefit_s\", \"groups\": [{\"members\", \"contribution\"}]}. Input shapes pinned: snapshot = {\"executors\": {id: {\"free\": int, ...}}, \"claude_workers_free\": int, \"fallback\": bool} (capacity.snapshot); pressure = {\"pressure\": \"none\"|\"elevated\"|\"saturated\", ...} (merge_pressure.assess); durations = {task_id: seconds}; priorities = {task_id: critical_path.explain dict}. Rules, each appended to reasons when it binds: ready empty -> limit 0, reasons ['no_ready']; start at hard_max ('hard_max=N'); structural bound sum of contributions ('groups=k contributions=m'), a cluster capped to 1 adds 'coupled_group:<sorted ids>'; capacity bound = sum of executor free, or claude_workers_free when fallback ('capacity=m'); pressure saturated -> limit <= max(1, number of singleton groups) ('merge_pressure=saturated'); cfg [scheduler].concurrency_mode 'fixed'|'adaptive' (default adaptive; fixed -> hard_max, reasons ['fixed']); minimum 1 when ready work exists and capacity > 0; never above hard_max.\n- expected_benefit_s: selected = the first `limit` ranked ids (ranked by priorities['priority'] descending then id); 0.0 when selected is empty; otherwise sum(est) - max(est) with est from durations or critical_path.est_duration_s(tasks[id]).\n- log_row(result, wave_ids=None) -> dict for schedlog.append('concurrency', ...) with hard_max, limit, reasons, tasks_considered, expected_benefit_s, selected, observed_outcome None.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_concurrency.py::test_coupled_cluster_caps_only_its_own_contribution \u2014 a hard-coupled cluster of four plus three independent singletons with hard_max 8 yields limit 4 and a coupled_group reason naming the cluster",
+    "tests/test_concurrency.py::test_soft_group_contributes_two_and_mixed_cluster_one \u2014 two soft-linked tasks contribute 2; three tasks with one hard edge contribute 1",
+    "tests/test_concurrency.py::test_independent_modules_select_higher_concurrency \u2014 five ready tasks with no interference and hard_max 4 yield limit 4 with the hard_max reason",
+    "tests/test_concurrency.py::test_hard_max_is_never_exceeded_and_fixed_mode \u2014 twenty independent tasks and hard_max 3 yield limit 3; concurrency_mode fixed returns hard_max with reasons ['fixed']",
+    "tests/test_concurrency.py::test_no_ready_work_yields_zero_benefit_zero \u2014 empty ready set yields limit 0, reasons ['no_ready'] and expected_benefit_s 0.0 without raising",
+    "tests/test_concurrency.py::test_quota_and_merge_pressure_bound_the_limit \u2014 a snapshot with two free executor slots bounds the limit to 2 with a capacity reason; pressure saturated with one singleton bounds to 1 with merge_pressure=saturated; log_row carries hard_max, limit, reasons, tasks_considered, expected_benefit_s"
+  ],
+  "scope": [
+    "orchestrator/concurrency.py",
+    "tests/test_concurrency.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/interference.py",
+      "orchestrator/critical_path.py",
+      "orchestrator/daemon.py",
+      "orchestrator/schedlog.py",
+      "tests/test_interference.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "select_limit(hard_max, ready_ids, tasks, pairwise_rows, priorities, snapshot=None, pressure=None, durations=None, cfg=None) -> {hard_max, limit, reasons, tasks_considered, expected_benefit_s, groups}; compatible_groups; group_contribution; reason_kind; snapshot {executors:{id:{free}}, claude_workers_free, fallback}; pressure {pressure: none|elevated|saturated}; config [scheduler].concurrency_mode fixed|adaptive default adaptive; must not import daemon"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0599",
+  "codex_thread": "01a0c2ad-d6cf-79a0-bb5c-4ac550af7d52",
+  "result": {
+    "summary": "Implemented adaptive concurrency selection and all six acceptance tests.\n\n- Gate: `tests-green: OK 843 8515a18 94s`\n- Commit: `6389b9464e37afafbfe27e5a66cc397b86bd9864`\n- Files changed: `orchestrator/concurrency.py`, `tests/test_concurrency.py`\n- Failures-only output: empty\n- Worktree: clean",
+    "executed_by": "codex:sol",
+    "thread": "01a0c2ad-d6cf-79a0-bb5c-4ac550af7d52",
+    "usage": {
+      "input_tokens": 540368,
+      "cached_input_tokens": 507264,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 5854,
+      "reasoning_output_tokens": 823,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789972331.2672808,
+      "spec_review_verdict": "approve",
+      "spec_review_waived": "Planner decision 2026-09-21 09:20 after spec-review rounds T-0569 and T-0589: every raised risk folded into v3 (empty guard, dead branch dropped, shapes pinned, own reason split)"
+    },
+    {
+      "ts": 1789972534.4400299,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862
+      }
+    },
+    {
+      "ts": 1789972534.441696,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752
+      }
+    },
+    {
+      "ts": 1789972535.168751,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857
+      }
+    },
+    {
+      "ts": 1789972567.466683,
+      "packet_meta": {
+        "chars": 2760,
+        "est_tokens": 690,
+        "hash": "c30eff5f8352",
+        "version": "c30eff5f8352",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@5b80835d7bca memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "5b80835d7bca"
+      }
+    },
+    {
+      "ts": 1789972567.478069,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0599",
+      "claimed_at": 1789972567.471412
+    },
+    {
+      "ts": 1789972567.483453,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789972880.398772,
+      "codex_thread": "01a0c2ad-d6cf-79a0-bb5c-4ac550af7d52",
+      "codex_thread_head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+    },
+    {
+      "ts": 1789972880.403432,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        }
+      }
+    },
+    {
+      "ts": 1789972880.405775,
+      "status": "done",
+      "result": {
+        "summary": "Implemented adaptive concurrency selection and all six acceptance tests.\n\n- Gate: `tests-green: OK 843 8515a18 94s`\n- Commit: `6389b9464e37afafbfe27e5a66cc397b86bd9864`\n- Files changed: `orchestrator/concurrency.py`, `tests/test_concurrency.py`\n- Failures-only output: empty\n- Worktree: clean",
+        "executed_by": "codex:sol",
+        "thread": "01a0c2ad-d6cf-79a0-bb5c-4ac550af7d52",
+        "usage": {
+          "input_tokens": 540368,
+          "cached_input_tokens": 507264,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 5854,
+          "reasoning_output_tokens": 823,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973199.931315,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789973289.436057,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789973289.5031989,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0599",
+          "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973289.502914,
+          "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+        }
+      }
+    },
+    {
+      "ts": 1789973289.630293,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0599",
+          "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973289.502914,
+          "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+        },
+        "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+      }
+    },
+    {
+      "ts": 1789973289.63612,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0599",
+          "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973289.502914,
+          "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+        },
+        "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+        "gated_at_done": 1789973289.635937
+      }
+    },
+    {
+      "ts": 1789973381.296502,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789973484.513852,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0599",
+          "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973289.502914,
+          "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+        },
+        "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+        "gated_at_done": 1789973289.635937,
+        "merged_at": 1789973484.5137432,
+        "merged_at_lease": 1789974384.5137432
+      }
+    },
+    {
+      "ts": 1789973572.307359,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "e022dd74ecdbbd7ddcb487c7bd9b7974523d23c4"
+    },
+    {
+      "ts": 1789973572.619513,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0599",
+          "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973289.502914,
+          "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+        },
+        "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+        "gated_at_done": 1789973289.635937,
+        "merged_at": 1789973484.5137432,
+        "merged_at_lease": 1789974384.5137432,
+        "accepted_at": 1789973572.619221
+      }
+    },
+    {
+      "ts": 1789973572.716785,
+      "pipeline": {
+        "first_ready_at": 1789972534.439862,
+        "dispatched_at": 1789972534.4414752,
+        "dispatched_at_lease": 1789973434.4414752,
+        "dispatched_at_done": 1789972535.16857,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789973289.435897,
+        "gated_at_lease": 1789974189.435897,
+        "first_green_at": 1789973289.4350111,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0599",
+          "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789973289.502914,
+          "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+        },
+        "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+        "gated_at_done": 1789973289.635937,
+        "merged_at": 1789973484.5137432,
+        "merged_at_lease": 1789974384.5137432,
+        "accepted_at": 1789973572.619221,
+        "merged_at_done": 1789973572.716672
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_waived": "Planner decision 2026-09-21 09:20 after spec-review rounds T-0569 and T-0589: every raised risk folded into v3 (empty guard, dead branch dropped, shapes pinned, own reason split)",
+  "pipeline": {
+    "first_ready_at": 1789972534.439862,
+    "dispatched_at": 1789972534.4414752,
+    "dispatched_at_lease": 1789973434.4414752,
+    "dispatched_at_done": 1789972535.16857,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "7ec34e9d975bc3e983a99985b9b0780484c240c8"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789973289.435897,
+    "gated_at_lease": 1789974189.435897,
+    "first_green_at": 1789973289.4350111,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0599",
+      "goal_head": "1ffdb1734cfe7c3289ef15366916de80cd023449",
+      "moved_count": 2,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789973289.502914,
+      "head": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+    },
+    "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+    "gated_at_done": 1789973289.635937,
+    "merged_at": 1789973484.5137432,
+    "merged_at_lease": 1789974384.5137432,
+    "accepted_at": 1789973572.619221,
+    "merged_at_done": 1789973572.716672
+  },
+  "packet_meta": {
+    "chars": 2760,
+    "est_tokens": 690,
+    "hash": "c30eff5f8352",
+    "version": "c30eff5f8352",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@ef740c717cf2 gotchas@5b80835d7bca memory@notes",
+    "policy_version": "ef740c717cf2",
+    "gotchas": "5b80835d7bca"
+  },
+  "claimed_at": 1789972567.471412,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0561",
+  "sha": "e022dd74ecdbbd7ddcb487c7bd9b7974523d23c4"
+}

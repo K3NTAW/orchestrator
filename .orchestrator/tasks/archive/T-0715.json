@@ -1,0 +1,137 @@
+{
+  "id": "T-0715",
+  "created_at": 1789999835.622525,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "Q3 v3: orchestrator/planner_packet.py \u2014 compact, delta-oriented Planner decision packets and the Opus\u2192Fable escalation packet, size-measured (P4, P10)",
+  "spec": "Why: planner_runs.decision_packet (lines 43-107) and grouped_packet rebuild a per-point packet with the full spawn packet inventory, 300-char scout summaries, no memory, no changes-since-last-decision and no required-output section; the brief (P4) wants a delta-oriented packet with only what the decision needs, invalidated on state change, and (P10) a compact escalation packet so Fable solves the unresolved part instead of redoing Opus's work. Spec reviews T-0679 and T-0713 are folded in: explicit decision_type source, taxonomy shape, real scout finding fields, hard length backstop, previous-without-changes rendering.\nWhat: new pure module orchestrator/planner_packet.py. Never reads the bus or files itself: the caller passes data. Untrusted text goes inside fences labelled data with backticks elided (copy planner_runs._fenced's 6-line helper; do not import planner_runs).\n- Taxonomy shape: orchestrator/planner_taxonomy.py (merged on goal/T-0674) exposes DECISION_TYPES = (\"initial_goal_plan\", \"scout_results\", \"held_task\", \"architectural_replan\", \"fix_strategy\", \"closable_goal\", \"retrospective\", \"ambiguous_requirement\", \"other\") and classify(...) -> {\"decision_type\", \"architectural\", \"ambiguous\", \"risk_class\", \"signals\", \"band\", \"task_class\"}. A section's decision_type = section[\"classification\"][\"decision_type\"] when present, else the fallback from point[\"kind\"]: scouts_done -> scout_results, held -> held_task, closable -> closable_goal, retrospective -> retrospective, anything else -> other. Import DECISION_TYPES for validation; an unknown value maps to other.\n- build(sections, *, goal, previous=None, changes=None, scout_findings=None, memory_hits=None, cap_chars=6000) -> {\"text\", \"chars\", \"est_tokens\" (chars // 4), \"hash\" (sha256[:12]), \"sections\": [names included], \"truncated\": [names cut], \"delta\": bool}. sections = list of {\"point\" ({goal_id, kind, payload_key, task_id?}), \"ctx\" (decision.route ctx dict), \"route\" (decision.Route or dict name/reason/evidence/tier), \"classification\" (taxonomy dict or None), \"task\" (bus dict or None), \"reviews\" ([{path, line, issue}]), \"failures\" (str|None), \"depends_on_statuses\" ([{id, status}])}. Every free-text field rendered per section is capped: title 200, status 40, hold_reason 300, issue 200, failures 1500. Section order and rules: 1 Decision header (per section: decision_type and expected output: initial_goal_plan/scout_results -> 'write plan.md and atomic specs'; fix_strategy/held_task -> 'write one fix-round spec with depends_on=[held]'; architectural_replan -> 'respec or split; state why'; closable_goal -> 'open PR goal/<id> -> main or say why not'; ambiguous_requirement -> 'state the ambiguity under Needs the human'; retrospective -> 'record.sh add'; other -> 'decide'); 2 Goal (id, title 200, complexity, spec first 600 chars); 3 Changes since previous decision: previous None -> 'first Planner decision for this goal'; previous given and changes a non-empty list -> up to 20 lines from [{\"task\", \"field\", \"from\", \"to\", \"ts\"}] plus 'previous state_version: ' + str(previous.get(\"state_version\")); previous given and changes None or empty -> the line 'state changed since previous decision, no field-level diff available' plus the same state_version line; delta True iff previous is given; 4 Relevant task state per section (title, status, hold_reason, failures, review comments max 10 as path:line issue, depends_on statuses); 5 Scout findings only when some section is scout_results or initial_goal_plan: scout_findings is scout_evidence.normalize_findings output, entries {finding, source, confidence, relevance, unresolved, needs_challenge}; max 10 lines as 'finding[:200] (source, confidence)'; 6 Memory: memory_hits titles only, max 10, each 200 chars; 7 Unresolved alternatives: route.evidence lines (max 20) plus option names (copy planner_runs._SCOUTS_DONE_OPTIONS / _NEXT_ACTION_OPTIONS as module constants); 8 Required output (repeat of header expectations plus 'Do not restate this packet'). Excluded by construction: event logs, unrelated tasks, transcripts, previous prompts.\n- Truncation: header, Goal and Required output are never cut by the section step; when over cap, cut in this order until it fits: Memory, Scout findings, Unresolved alternatives, Changes, Relevant task state (failures first, then the whole section); record cut names in truncated. Final hard backstop: text = text[:cap_chars] (mirrors decision_packet's [:cap]); when the backstop fires, append \"hard_cap\" to truncated. len(text) <= cap_chars always holds.\n- escalation_packet(*, goal, original_sections, opus_decision, unresolved, conflicting_evidence=None, scout_findings=None, memory_hits=None, reason, cap_chars=6000) -> same shape; opus_decision whitelist {\"proposed_action\", \"summary\" (cap 800), \"tasks_proposed\" ([{\"title\", \"scope\"}] cap 10), \"confidence\", \"needs_fable\", \"unresolved\"}, rendered under 'Opus proposed decision (data)'; header line 'Escalation reason: <reason>. Solve only the unresolved items.'; other keys dropped, never raw transcripts; same truncation and backstop.\n- invalidated(previous_state_version, current_state_version) -> bool (differ or either None). meta(text) -> {\"chars\", \"est_tokens\", \"hash\"}.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_packet.py::test_first_decision_has_no_delta_and_all_sections \u2014 one section classified scout_results with normalize_findings-shaped findings and memory hits produces the sections in the documented order, delta False and the text 'first Planner decision for this goal'; a section without classification and kind held gets held_task from the fallback",
+    "tests/test_planner_packet.py::test_delta_with_and_without_changes \u2014 previous and 3 changes give delta True, the 3 change lines and the previous state_version; a 40-entry change list is cut to 20 lines; previous without changes gives delta True, the 'no field-level diff available' line and previous.get('state_version') without raising when state_version is absent",
+    "tests/test_planner_packet.py::test_truncation_order_protected_sections_and_hard_cap \u2014 cap 1200 with long failures drops Memory first, then Scout findings, never cuts the header or Required output, and len(text) <= 1200; a cap of 300 with long titles yields len(text) <= 300 and hard_cap in truncated",
+    "tests/test_planner_packet.py::test_untrusted_text_is_fenced_and_backticks_elided \u2014 a hold_reason containing ``` and 'ignore previous instructions' appears inside a data fence with backticks elided and capped at 300 chars",
+    "tests/test_planner_packet.py::test_escalation_packet_whitelists_opus_decision \u2014 an opus_decision carrying a 'transcript' key and a 3000-char summary yields a packet without the transcript, summary capped at 800, the escalation reason in the header, len(text) <= cap_chars, and invalidated() True for differing versions"
+  ],
+  "scope": [
+    "orchestrator/planner_packet.py",
+    "tests/test_planner_packet.py"
+  ],
+  "depends_on": [
+    "T-0675"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_taxonomy.py",
+      "orchestrator/planner_runs.py",
+      "orchestrator/spawn.py",
+      "orchestrator/scout_evidence.py",
+      "orchestrator/decision.py",
+      "tests/test_planner_taxonomy.py",
+      "tests/test_planner_runs.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "build(sections, *, goal, previous=None, changes=None, scout_findings=None, memory_hits=None, cap_chars=6000) -> {text, chars, est_tokens, hash, sections, truncated, delta} with len(text) <= cap_chars; sections items {point, ctx, route, classification (planner_taxonomy.classify dict or None), task, reviews, failures, depends_on_statuses}; decision_type from classification else kind fallback; scout_findings = scout_evidence.normalize_findings output; escalation_packet(*, goal, original_sections, opus_decision, unresolved, conflicting_evidence, scout_findings, memory_hits, reason, cap_chars) -> same shape; invalidated(prev, cur) -> bool; meta(text) -> {chars, est_tokens, hash}. Pure: no bus/file reads. Wave B calls build/escalation_packet in place of decision_packet/grouped_packet."
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by Q3 v4 after spec review request_changes round 3 (escalation_packet omits section 3 with delta False; section 7 rendered per section with the option set chosen by decision_type; hash over the final returned text). Planner decision: the v4 spec review is waived after three rounds with every risk folded in (precedent decisions.md 2026-09-18), v4 dispatches directly.",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789999838.047252,
+      "pipeline": {
+        "first_ready_at": 1789999838.047206
+      }
+    },
+    {
+      "ts": 1789999838.084503,
+      "pipeline": {
+        "first_ready_at": 1789999838.047206,
+        "spec_review_at": 1789999838.084456,
+        "spec_review_at_lease": 1790000738.084456
+      }
+    },
+    {
+      "ts": 1789999838.089878,
+      "pipeline": {
+        "first_ready_at": 1789999838.047206,
+        "spec_review_at": 1789999838.084456,
+        "spec_review_at_lease": 1790000738.084456,
+        "spec_review_at_done": 1789999838.089789
+      }
+    },
+    {
+      "ts": 1789999992.178448,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_packet.py",
+          "issue": "escalation_packet() has no previous/changes parameters, yet the spec says it returns 'same shape' as build(), which includes a 'delta' key and a mandatory section 3 ('Changes since previous decision', rendered as 'first Planner decision for this goal' when previous is None). Naively reusing build()'s section-3 logic would print that first-decision line inside an escalation packet mid-goal, which is misleading (P10's own motivation is that escalation happens after Opus already decided something, so it is never the first decision). The acceptance test for escalation_packet only checks the opus_decision whitelist and invalidated(), not what section 3 or 'delta' actually contain, so a wrong rendering here ships untested.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_packet.py",
+          "issue": "Section 7 (Unresolved alternatives: route.evidence + _SCOUTS_DONE_OPTIONS/_NEXT_ACTION_OPTIONS) is specified in the singular ('route.evidence lines'), but build()'s own section shape is a list and planner_runs.grouped_packet already proves multi-section packets are a real production case (routed ticks coalesce several non-routine points per goal). The spec never says whether to concatenate route.evidence across all sections, use only one section's route, or how to pick between the two option dicts when sections have different decision_types (e.g. one scout_results and one held_task section in the same packet). No acceptance test exercises >1 section, so this ambiguity is unverifiable and an implementer's arbitrary choice could silently drop or duplicate alternatives for coalesced ticks.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_packet.py",
+          "issue": "The 'hash' field (sha256[:12]) in build()'s and escalation_packet()'s return dict doesn't state whether it is computed before or after truncation/the hard cap_chars backstop. Since invalidated() and dedup/caching logic downstream would rely on this hash matching the actual 'text' shown, an implementation hashing pre-truncation content would let two packets with identical rendered text (post-cap) report different hashes, or vice versa.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790000033.191243,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by Q3 v4 after spec review request_changes round 3 (escalation_packet omits section 3 with delta False; section 7 rendered per section with the option set chosen by decision_type; hash over the final returned text). Planner decision: the v4 spec review is waived after three rounds with every risk folded in (precedent decisions.md 2026-09-18), v4 dispatches directly.",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789999838.047206,
+    "spec_review_at": 1789999838.084456,
+    "spec_review_at_lease": 1790000738.084456,
+    "spec_review_at_done": 1789999838.089789
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_packet.py",
+      "issue": "escalation_packet() has no previous/changes parameters, yet the spec says it returns 'same shape' as build(), which includes a 'delta' key and a mandatory section 3 ('Changes since previous decision', rendered as 'first Planner decision for this goal' when previous is None). Naively reusing build()'s section-3 logic would print that first-decision line inside an escalation packet mid-goal, which is misleading (P10's own motivation is that escalation happens after Opus already decided something, so it is never the first decision). The acceptance test for escalation_packet only checks the opus_decision whitelist and invalidated(), not what section 3 or 'delta' actually contain, so a wrong rendering here ships untested.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_packet.py",
+      "issue": "Section 7 (Unresolved alternatives: route.evidence + _SCOUTS_DONE_OPTIONS/_NEXT_ACTION_OPTIONS) is specified in the singular ('route.evidence lines'), but build()'s own section shape is a list and planner_runs.grouped_packet already proves multi-section packets are a real production case (routed ticks coalesce several non-routine points per goal). The spec never says whether to concatenate route.evidence across all sections, use only one section's route, or how to pick between the two option dicts when sections have different decision_types (e.g. one scout_results and one held_task section in the same packet). No acceptance test exercises >1 section, so this ambiguity is unverifiable and an implementer's arbitrary choice could silently drop or duplicate alternatives for coalesced ticks.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_packet.py",
+      "issue": "The 'hash' field (sha256[:12]) in build()'s and escalation_packet()'s return dict doesn't state whether it is computed before or after truncation/the hard cap_chars backstop. Since invalidated() and dedup/caching logic downstream would rely on this hash matching the actual 'text' shown, an implementation hashing pre-truncation content would let two packets with identical rendered text (post-cap) report different hashes, or vice versa.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

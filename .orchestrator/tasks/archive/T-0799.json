@@ -1,0 +1,704 @@
+{
+  "id": "T-0799",
+  "created_at": 1790086732.030151,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "Deterministic context win 1: send spec, acceptance and scope once per execute prompt (packet only), all three render call sites (v2)",
+  "spec": "P0 audit finding (docs/context-economy/00-audit.md, plan.md): every execute prompt carries spec, acceptance and scope twice: once inside the packet built by spawn._packet_body (sections objective \"- discovery: {spec}\", acceptance, write_scope; spawn.py ~286-305) and again as literal lines in .orchestrator/prompts/execute.md (the three lines starting \"Spec:\", \"Acceptance:\" and \"Scope (only these paths):\", each holding the double-brace placeholder of the same name). The P1 telemetry (merged before this task; context field on runs, per-section meta) is the before/after measure.\nDo:\n1. .orchestrator/prompts/execute.md: remove the three literal lines. Replace with one line: \"The packet above is the task contract: implement the ## objective, satisfy every line of ## acceptance, and edit only paths listed in ## write_scope.\" Keep every other instruction line verbatim (gate loop, commit, unittest rules, _harness rule, dependencies, tool-call budget).\n2. spawn.render: execute no longer needs spec/acceptance/scope kwargs. Update the three call sites so they pass only packet= (spawn.py:773-774 run_worker, daemon.py:561 _dispatch_fresh_fix, daemon.py:853 dispatch). render()'s unfilled-placeholder check must still pass (no leftover double-brace tokens) and extra kwargs must not be silently required; if any call site appends more text after render (spawn.py:774 `+ \\`), keep that text.\n3. Packet guarantee: _packet_body must keep objective (with the full spec), acceptance and write_scope untrimmable even when the packet is over the 4800-char cap (they already are: trimmable = dependencies, evidence, decisions, gotchas, symbols, relevant_tests). Add a regression test that a task with a 9000-char spec and 6 acceptance lines still has every acceptance line and the full spec text and every scope path in the rendered execute prompt exactly once.\n4. Fix-round path: _dispatch_fresh_fix renders execute for the fix task; the fix task's spec is the fix-round spec (failures + acceptance). Verify the packet's objective carries it and nothing is lost; the repair delta path (executor.reply) is unaffected.\n5. Update P1 telemetry expectations if a test in tests/test_spawn.py or tests/test_daemon.py asserts on instruction tokens or on the literal \"Spec:\" line; adjust the expected numbers, never weaken the assertion shape.\n6. Record the measured delta in docs/context-economy/03-dedup-execute-prompt.md (\u226430 lines): chars and est_tokens of the execute prompt for one representative task before and after (use spawn.packet_run_meta or the P1 section meta on a fixture task), and the revert path (git revert the commit).\nTests: tests/test_spawn.py::test_execute_prompt_carries_contract_once (spec, each acceptance line and each scope path appear exactly once in the rendered prompt; no \"Spec:\" literal); tests/test_daemon.py::test_fresh_fix_prompt_renders_without_contract_kwargs (the fresh-fix render path succeeds and the prompt contains the fix spec once). Do not ask questions; decide and note decisions in the result.\n\nv2 (2026-09-22 16:35): re-filed because v1's spec quoted literal double-brace placeholders, which spawn.render rejects (unfilled_placeholder); never quote them in a spec.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_prompt_carries_contract_once passes",
+    "tests/test_daemon.py::test_fresh_fix_prompt_renders_without_contract_kwargs passes",
+    ".orchestrator/prompts/execute.md has no double-brace spec, double-brace acceptance or double-brace scope placeholders and all three render call sites pass only packet=",
+    "docs/context-economy/03-dedup-execute-prompt.md records before/after chars and est_tokens; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    ".orchestrator/prompts/execute.md",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py",
+    "docs/context-economy/03-dedup-execute-prompt.md"
+  ],
+  "depends_on": [
+    "T-0769",
+    "T-0771"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "refactor",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0799",
+  "codex_thread": "01a0c97c-7175-74a3-bbe8-844981702d1e",
+  "result": {
+    "summary": "Implemented and committed execute-prompt contract deduplication, untrimmable full specs, regressions, and telemetry documentation.\n\nFiles changed: 6 scoped files. Worktree clean.  \nCommit: `364c84f4316cbf79e835e8a6b0f3fc18cd04a920`\n\nGate result: **red** on the second permitted full run; the four affected tests pass after the fix, but the two-run cap prevented another full gate.\n\nFailures-only output from the last full gate:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_render_single_pass_never_resubstitutes (test_spawn.ReviewVerdict.test_render_single_pass_never_resubstitutes)\nTraceback (most recent call last):\nAssertionError: 0 != 1\nFAIL: test_render_validates_against_template_not_output (test_spawn.ReviewVerdict.test_render_validates_against_template_not_output)\nTraceback (most recent call last):\nAssertionError: 0 != 1\nFAILED (failures=2)\n```",
+    "executed_by": "codex:sol",
+    "thread": "01a0c97c-7175-74a3-bbe8-844981702d1e",
+    "usage": {
+      "input_tokens": 911314,
+      "cached_input_tokens": 867584,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7777,
+      "reasoning_output_tokens": 1859,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790086744.619481,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425
+      }
+    },
+    {
+      "ts": 1790086744.6206532,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595
+      }
+    },
+    {
+      "ts": 1790086749.0701609,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081
+      }
+    },
+    {
+      "ts": 1790086770.779893,
+      "packet_meta": {
+        "chars": 4872,
+        "est_tokens": 1218,
+        "hash": "44f5cb5debd4",
+        "version": "44f5cb5debd4",
+        "base": "b6554efa37bb",
+        "sources": "pool.toml@c6194eabcbae gotchas@6c9f35441222 memory@notes over cap by 72 chars: acceptance kept whole",
+        "policy_version": "c6194eabcbae",
+        "gotchas": "6c9f35441222"
+      }
+    },
+    {
+      "ts": 1790086770.781316,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0799",
+      "claimed_at": 1790086770.7811468
+    },
+    {
+      "ts": 1790086770.782319,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790087302.807956,
+      "codex_thread": "01a0c97c-7175-74a3-bbe8-844981702d1e",
+      "codex_thread_head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+    },
+    {
+      "ts": 1790087302.813663,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790087302.816973,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed execute-prompt contract deduplication, untrimmable full specs, regressions, and telemetry documentation.\n\nFiles changed: 6 scoped files. Worktree clean.  \nCommit: `364c84f4316cbf79e835e8a6b0f3fc18cd04a920`\n\nGate result: **red** on the second permitted full run; the four affected tests pass after the fix, but the two-run cap prevented another full gate.\n\nFailures-only output from the last full gate:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_render_single_pass_never_resubstitutes (test_spawn.ReviewVerdict.test_render_single_pass_never_resubstitutes)\nTraceback (most recent call last):\nAssertionError: 0 != 1\nFAIL: test_render_validates_against_template_not_output (test_spawn.ReviewVerdict.test_render_validates_against_template_not_output)\nTraceback (most recent call last):\nAssertionError: 0 != 1\nFAILED (failures=2)\n```",
+        "executed_by": "codex:sol",
+        "thread": "01a0c97c-7175-74a3-bbe8-844981702d1e",
+        "usage": {
+          "input_tokens": 911314,
+          "cached_input_tokens": 867584,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7777,
+          "reasoning_output_tokens": 1859,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790087311.5295,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790087435.049226,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790087435.570826,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        }
+      }
+    },
+    {
+      "ts": 1790087435.6679392,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        },
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+      }
+    },
+    {
+      "ts": 1790087435.680175,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        },
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+        "gated_at_done": 1790087435.6800158
+      }
+    },
+    {
+      "ts": 1790089502.39638,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790089504.779999,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        },
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+        "gated_at_done": 1790087435.6800158,
+        "merged_at": 1790089504.7797859,
+        "merged_at_lease": 1790090404.7797859
+      }
+    },
+    {
+      "ts": 1790089630.421612,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "sha": "512845ddff3db201df36bb2e10522aa62387bade",
+      "merged_at": 1790089630.420322,
+      "changed_files": [
+        ".orchestrator/prompts/execute.md",
+        "docs/context-economy/03-dedup-execute-prompt.md",
+        "orchestrator/daemon.py",
+        "orchestrator/spawn.py",
+        "tests/test_daemon.py",
+        "tests/test_spawn.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        },
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+        "gated_at_done": 1790087435.6800158,
+        "merged_at": 1790089504.7797859,
+        "merged_at_lease": 1790090404.7797859
+      }
+    },
+    {
+      "ts": 1790089631.153522,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        },
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+        "gated_at_done": 1790087435.6800158,
+        "merged_at": 1790089504.7797859,
+        "merged_at_lease": 1790090404.7797859,
+        "accepted_at": 1790089631.153054
+      }
+    },
+    {
+      "ts": 1790089631.291379,
+      "pipeline": {
+        "first_ready_at": 1790086744.619425,
+        "dispatched_at": 1790086744.620595,
+        "dispatched_at_lease": 1790087644.620595,
+        "dispatched_at_done": 1790086749.070081,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790087435.049066,
+        "gated_at_lease": 1790088335.049066,
+        "first_green_at": 1790087435.048182,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0799",
+          "goal_head": "goal/T-0760",
+          "moved_count": 5,
+          "stale_paths": [
+            "docs/context-economy/05-context-router.md",
+            "orchestrator/context_router.py",
+            "orchestrator/evidence.py",
+            "tests/test_context_router.py",
+            "tests/test_evidence.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790087435.570239,
+          "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+        },
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+        "gated_at_done": 1790087435.6800158,
+        "merged_at": 1790089504.7797859,
+        "merged_at_lease": 1790090404.7797859,
+        "accepted_at": 1790089631.153054,
+        "merged_at_done": 1790089631.2911942
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790086744.619425,
+    "dispatched_at": 1790086744.620595,
+    "dispatched_at_lease": 1790087644.620595,
+    "dispatched_at_done": 1790086749.070081,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "eb8b0b3eaaa258039cd56291d0299475ca59c567",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790087435.049066,
+    "gated_at_lease": 1790088335.049066,
+    "first_green_at": 1790087435.048182,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0799",
+      "goal_head": "goal/T-0760",
+      "moved_count": 5,
+      "stale_paths": [
+        "docs/context-economy/05-context-router.md",
+        "orchestrator/context_router.py",
+        "orchestrator/evidence.py",
+        "tests/test_context_router.py",
+        "tests/test_evidence.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790087435.570239,
+      "head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+    },
+    "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+    "gated_at_done": 1790087435.6800158,
+    "merged_at": 1790089504.7797859,
+    "merged_at_lease": 1790090404.7797859,
+    "accepted_at": 1790089631.153054,
+    "merged_at_done": 1790089631.2911942
+  },
+  "packet_meta": {
+    "chars": 4872,
+    "est_tokens": 1218,
+    "hash": "44f5cb5debd4",
+    "version": "44f5cb5debd4",
+    "base": "b6554efa37bb",
+    "sources": "pool.toml@c6194eabcbae gotchas@6c9f35441222 memory@notes over cap by 72 chars: acceptance kept whole",
+    "policy_version": "c6194eabcbae",
+    "gotchas": "6c9f35441222"
+  },
+  "claimed_at": 1790086770.7811468,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0760",
+  "sha": "512845ddff3db201df36bb2e10522aa62387bade",
+  "merged_at": 1790089630.420322,
+  "changed_files": [
+    ".orchestrator/prompts/execute.md",
+    "docs/context-economy/03-dedup-execute-prompt.md",
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_spawn.py"
+  ]
+}

@@ -1,0 +1,731 @@
+{
+  "id": "T-0741",
+  "created_at": 1790002755.568128,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "B1 v3: planner_runs routing integration \u2014 taxonomy \u2192 router \u2192 tier per headless decision, mode off byte-identical, shadow Opus launch, hold instead of downgrade, telemetry rows and skip rows, re-escalation (P3, P5, P6, P9, P15, P17)",
+  "spec": "Why: planner_runs.run_group/launch_routed (planner_runs.py:1090-1236) launch every escalate-route decision on [models].planner (Fable); tick() drops routine/none points silently; run_group's early returns (same state_version, goal launch active, already decided) leave no record; usage is logged only as bus.log_run planner_decision rows. The Wave A modules are merged on goal/T-0674: planner_taxonomy.classify(point, ctx, *, goal, task); planner_router.load_cfg / fable_reserve_ok / effective_complexity / hard_escalation / decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal, sample) / record(decision, *, subject, route, jev_signal, root) / RouterDecision(tier, mode, hard, hold, hold_reason, reasons, hard_reasons, soft_score, shadow_tier, candidates, evidence, decision_type); planner_telemetry.record_launch/record_usage/snapshot/materiality/record_materiality/record_skip/read_invocations; jev_planner.should_ask(router_mode, jev_mode, hard_reasons, availability, route_name: str)/ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route: str, state_version, task, ...); planner_shadow.eligible/launch/parse/record/score; planner_scorecard.class_evidence (returns reescalation_rate None and noninferior None for under-sampled classes, without raising). Spec reviews of T-0732 and T-0738 folded in; the Planner waived a third spec review.\nWhat (planner_runs.py, decision.py, goals.py; new tests in tests/test_planner_runs_routing.py; existing tests keep passing):\n- Imports in planner_runs.py: `from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner` (module references only; planner_telemetry already imports planner_runs, so never `from .planner_telemetry import name`); planner_scorecard imported lazily inside _class_evidence with try/except ImportError.\n- goals.launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None, model=None): model None keeps cfg[\"models\"][\"planner\"]; argv otherwise unchanged. launch_routed(pool, route, prompt, account, budget, log) becomes a thin resolver: tier = route.tier or \"fable\"; model = models[\"planner\"] if tier == \"fable\" else models.get(tier, tier); return goals.launch_planner(ROOT, prompt, account.id, budget, log, model=model). Delete the duplicated argv block (lines 1096-1109). Mode off therefore produces exactly the legacy argv.\n- decision.route: kind \"retrospective\" -> routine \"retrospective_deterministic\"; ctx.get(\"state_unchanged\") True -> none \"unchanged_state\" (checked right after the infra check). Existing tests unchanged.\n- tick(): sections are 4-tuples (point, ctx, route, classification). Before routing each point: ctx[\"complexity\"] = task complexity for held points else goal complexity; ctx[\"state_version\"] = state_version(goal_id); ctx[\"state_unchanged\"] = (_goal_launches().get(goal_id) or {}).get(\"last_state_version\") == ctx[\"state_version\"]; classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task). Every point that does not reach run_group records planner_telemetry.record_skip(goal_id=..., event=\"tick\", reason=..., kind=..., payload_key=...) with reason routine, none:<route reason>, fix_round_in_flight, or unknown_gate.\n- run_group(sections, pool): every unpack site becomes 4-tuples (`for point, ctx, section_route, classification in sections`, the _blocked filter, the _claim loop, the record update loop, the skip loop, the running-record loop). Its early returns record skips for every section: same state_version -> record_skip(reason=\"same_state_version\"), goal launch active -> \"goal_launch_active\", already decided -> \"already_decided\" (event \"run_group\"); the session-attached and no-headroom paths already call _record_skip and additionally call planner_telemetry.record_skip with reasons \"planner_session_attached\" / \"no_account_headroom\". Leader section = max over sections by (route priority investigate 1 / escalate 2, planner_router.effective_complexity(classification, ctx), then the smallest payload_key string); its route, ctx and classification drive the decision and the telemetry row. rcfg = planner_router.load_cfg(pool.cfg). availability = {rcfg[\"default_tier\"]: {\"available\": models alias configured and account is not None, \"reason\": \"ok\" or why}, rcfg[\"escalation_tier\"]: same, \"fable_reserve_ok\": planner_router.fable_reserve_ok(headroom_share, rcfg)} with headroom_share None when the picked account's daily_budget is 0 else 1 - (day_tokens + planner_day_tokens) / daily_budget. evidence = _class_evidence(model, classification, pool): calls planner_scorecard.class_evidence(models[default_tier], decision_type, band, task_class, architectural, root=STATE, cfg=pool.cfg) under try/except Exception; in BOTH the success and the failure path normalise to {\"n\": int(evidence.get(\"n\") or 0), \"noninferior\": evidence.get(\"noninferior\") (True/False/None), \"reescalation_rate\": float(evidence.get(\"reescalation_rate\") or 0.0)} so soft_score never sees None. Re-escalation (P15): if the goal's latest invocation row (planner_telemetry.read_invocations() filtered by goal_id, max started_at) has tier == rcfg[\"default_tier\"] and (decision_type == \"architectural_replan\" or ctx spec_review_request_changes >= rcfg[\"hard_spec_review_request_changes_min\"] or the lineage cap is reached), set ctx[\"reescalation\"] = True before hard_escalation. hard_reasons = planner_router.hard_escalation(classification, ctx, route, rcfg). jev_signal = jev_planner.ask(classification, ctx, goal, cfg=rcfg, router_mode=rcfg[\"mode\"], hard_reasons=hard_reasons, availability=availability, route=route.name, state_version=ctx[\"state_version\"], task=held task or None) only when jev_planner.should_ask(rcfg[\"mode\"], rcfg[\"jev_mode\"], hard_reasons, availability, route.name)[0]; route.name (the plain string) in BOTH calls, never the Route object. sample = random.random(); decision = planner_router.decide(classification, ctx, route, cfg=rcfg, availability=availability, evidence=evidence, jev_signal=jev_signal, sample=sample); planner_router.record(decision, subject=goal_id, route=route, jev_signal=jev_signal).\n- Effects: decision.hold -> every section record gets status \"held_for_fable\", hold_reason = decision.hold_reason, notify.notify_once(goal_id, f\"held_for_fable:{launch_id}\", ...); return {\"launched\": False, \"reason\": decision.hold_reason}; the next tick retries (records in status held_for_fable never block and are never claimed). Otherwise before_snapshot = planner_telemetry.snapshot(goal_id); launched = launch_routed(pool, dataclasses.replace(route, tier=decision.tier), prompt, account, budget, log); planner_telemetry.record_launch(launch_id=launch_id, goal_id, event=\"tick\", decision_type, kind=leader kind, payload_keys=[per section: the bare held task id (payload_key.split(':')[0]) when kind == held else payload_key], model=resolved model id, tier=decision.tier, account=account.id, complexity=ctx[\"complexity\"], band, task_class, architectural, route=route.name, route_reason=route.reason, mode=rcfg[\"mode\"], state_version=ctx[\"state_version\"], packet_chars=len(prompt), started_at=now, reescalation=bool(ctx.get(\"reescalation\"))); records store telemetry_before and launch_started_at. Shadow: ok, why = planner_shadow.eligible(decision, rcfg, sample=sample); when ok: account_dict = the [[claude_accounts]] entry whose id == account.id; shadow = planner_shadow.launch(prompt, model=models[decision.shadow_tier], account=account_dict, budget_usd=limits.max_budget_usd.planner_shadow default 1.5, log=STATE/runs/f\"planner-shadow-{goal_id}-{launch_id}.log\"); when shadow is not None store shadow_pid, shadow_pid_start=goals._proc_start(shadow[\"pid\"]), shadow_log, shadow_started_at, shadow_tier on the records; exceptions printed to stderr and ignored.\n- _record_decision_usage(r): additionally planner_telemetry.record_usage(r[\"launch_id\"], input_tokens=..., output_tokens=..., cache_read_tokens=..., cache_write_tokens=..., usd=..., latency_s=now - r[\"launch_started_at\"], outcome=..., session_id=...) when the record has launch_id.\n- reconcile(): when a running record's process is gone and telemetry_before exists: planner_telemetry.record_materiality(launch_id, before, planner_telemetry.snapshot(goal_id)) once (flag materiality_logged). When shadow_log exists and not goals.identity_of(shadow_pid, shadow_pid_start): parsed = planner_shadow.parse(shadow_log); row = planner_shadow.record(launch_id=..., goal_id, decision_type, state_version, model, tier=shadow_tier, started_at=shadow_started_at, parsed, latency_s); r[\"shadow_agreement\"] = planner_shadow.score(row, materiality) once (flag shadow_logged).\nTests use the sandbox pattern of tests/test_planner_runs.py; patch goals.Popen / planner_shadow popen, and for the Jev case patch jev.ask (the network function) rather than jev_planner.ask so the real should_ask/ask string contract is exercised.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_runs_routing.py::test_mode_off_argv_identical_to_legacy \u2014 with [planner.routing].mode off, run_group produces exactly the argv that goals.launch_planner produced before this change for the same decision (captured via patched Popen, compared list-equal), one Popen call only, and no held_for_fable record",
+    "tests/test_planner_runs_routing.py::test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes \u2014 shadow mode: the first Popen argv uses models.planner and .mcp.planner.json, the second uses models.opus, .mcp.planner-shadow.json and --disallowedTools; bus task files and plan.md are byte-identical after the shadow launch; the record carries shadow_log and shadow_pid_start; a launch row exists with tier fable, mode shadow and packet_chars",
+    "tests/test_planner_runs_routing.py::test_hard_decision_holds_when_fable_unavailable \u2014 active mode, goal complexity 9, escalation tier unavailable: no Popen call, every section record has status held_for_fable with hold_reason starting fable_unavailable, one notify_once, and a second tick with the tier available launches instead of giving up",
+    "tests/test_planner_runs_routing.py::test_skips_usage_materiality_and_jev_invocation \u2014 a routine point, an unchanged-state goal and a run_group same_state_version early return each produce planner_skips rows with reasons routine, none:unchanged_state and same_state_version; on a shadow-mode escalate decision with two available tiers and no hard reasons, a patched jev.ask is called exactly once and the planner_jev row has asked True (so should_ask/ask received the route name string), while a hard decision never calls jev.ask; an under-sampled class_evidence result (reescalation_rate None) does not raise; a launched decision followed by a fake exit whose log carries usage yields usage and materiality rows under the same launch_id, materiality naming the task created during the run",
+    "tests/test_planner_runs_routing.py::test_reescalation_forces_fable_after_opus_and_tie_break \u2014 a goal whose latest invocation row has tier opus and whose held point has spec_review_request_changes 2 launches on models.planner in active mode with reescalation True in the launch row and a planner_route decision row whose hard_constraints contain repeated_spec_rejection and reescalation; two escalate sections in one group pick the leader with the higher effective complexity, then the smaller payload_key; tests/test_decision.py::test_retrospective_and_unchanged_state_routes \u2014 kind retrospective routes routine retrospective_deterministic and state_unchanged True routes none unchanged_state"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    "orchestrator/goals.py",
+    "tests/test_planner_runs_routing.py",
+    "tests/test_decision.py",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py"
+  ],
+  "depends_on": [
+    "T-0675",
+    "T-0708",
+    "T-0700",
+    "T-0706",
+    "T-0729",
+    "T-0730"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "security",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_runs.py",
+      "orchestrator/decision.py",
+      "orchestrator/goals.py",
+      "orchestrator/planner_taxonomy.py",
+      "orchestrator/planner_router.py",
+      "orchestrator/planner_telemetry.py",
+      "orchestrator/jev_planner.py",
+      "orchestrator/jev.py",
+      "orchestrator/planner_shadow.py",
+      "orchestrator/planner_scorecard.py",
+      "orchestrator/pool.py",
+      "orchestrator/notify.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/daemon.py",
+      "tests/test_planner_runs.py",
+      "tests/test_decision.py",
+      "tests/test_goals.py",
+      "tests/test_planner_router.py",
+      "tests/test_planner_telemetry.py",
+      "tests/test_planner_shadow.py",
+      "tests/test_jev_planner.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "goals.launch_planner(..., model=None) is the single argv builder; launch_routed resolves the tier alias and delegates to it; decision.route gains routine retrospective_deterministic and none unchanged_state; tick builds 4-tuple sections (point, ctx, route, classification) with ctx complexity/state_version/state_unchanged and records skips; run_group records skips on its own early returns, picks a deterministic leader section, normalises class_evidence output (None -> 0.0), consults planner_router.decide with availability {default_tier, escalation_tier, fable_reserve_ok}, jev_planner.should_ask/ask with route.name; hold -> held_for_fable + notify_once, retried next tick; planner_telemetry launch rows with payload_keys[0] = bare held task id for held kinds; usage rows in _record_decision_usage; materiality and shadow scoring (identity_of with shadow_pid_start) in reconcile. Mode off byte-identical."
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0741",
+  "codex_thread": "01a0c47a-df3c-7b43-9f89-ec2bca5880bc",
+  "result": {
+    "summary": "Implemented routing, retryable holds, shadow launches, telemetry, and acceptance tests.\n\nChanged six scoped files: three orchestrator modules and three test files.\nGate: **PASS \u2014 988 tests**. Working tree clean.\nCommit: `ef0483818802dfb1933d303d646bf63dfa464e1f`\n\nFailures-only output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c47a-df3c-7b43-9f89-ec2bca5880bc",
+    "usage": {
+      "input_tokens": 1808129,
+      "cached_input_tokens": 1725696,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10265,
+      "reasoning_output_tokens": 1216,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790002770.969762,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714
+      }
+    },
+    {
+      "ts": 1790002771.916041,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992
+      }
+    },
+    {
+      "ts": 1790002771.9570408,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981
+      }
+    },
+    {
+      "ts": 1790002771.962692,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563
+      }
+    },
+    {
+      "ts": 1790002781.751304,
+      "packet_meta": {
+        "chars": 5332,
+        "est_tokens": 1333,
+        "hash": "1d7db155ed9b",
+        "version": "1d7db155ed9b",
+        "base": "c9609a52c7d1",
+        "sources": "pool.toml@1e9fb4e32b17 gotchas@6ac111408e41 memory@notes over cap by 532 chars: acceptance kept whole",
+        "policy_version": "1e9fb4e32b17",
+        "gotchas": "6ac111408e41"
+      }
+    },
+    {
+      "ts": 1790002781.752643,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0741",
+      "claimed_at": 1790002781.752537
+    },
+    {
+      "ts": 1790002781.753401,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790003066.114687,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Leader-section tie-break requires (route priority desc, effective_complexity desc, payload_key asc), but a naive `max(sections, key=lambda s: (priority, complexity, payload_key))` picks the LARGEST payload_key on a tie, not the smallest as test_reescalation_forces_fable_after_opus_and_tie_break requires. The spec states the criteria but not how to mix ascending/descending in one max() call.",
+          "severity": "med",
+          "line": 1160
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "reconcile()'s existing loop skips the whole record via `continue` while the production pid is still alive (goals.identity_of check). The spec's shadow-log scoring (planner_shadow.parse/record/score, keyed off shadow_pid) needs to run independently of that continue or shadow_agreement gets silently deferred until production also exits, which could be much later or never revisited once status leaves 'running' for another reason.",
+          "severity": "med",
+          "line": 727
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "_claim() marks records 'claimed' inside the first bus.locked() block (lines 1161-1183), before account = pool.pick('planner') resolves in the following unlocked try block. But the new availability/headroom_share computation needs the picked account's daily_budget, and a hold decision must rewrite already-claimed records to non-blocking 'held_for_fable' under a lock. The spec doesn't say where the new rcfg/availability/decide() block sits relative to the account pick and the two separate lock scopes, risking either headroom_share always computing None or a record left stuck at blocking 'claimed' if the process dies mid-transition.",
+          "severity": "med",
+          "line": 1184
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The spec's 'Imports' bullet enumerates `from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner` as if exhaustive, but the effects section calls dataclasses.replace(...) and random.random(), and neither `dataclasses` nor `random` is imported at line 22 today.",
+          "severity": "low",
+          "line": 22
+        }
+      ]
+    },
+    {
+      "ts": 1790003256.810077,
+      "codex_thread": "01a0c47a-df3c-7b43-9f89-ec2bca5880bc",
+      "codex_thread_head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+    },
+    {
+      "ts": 1790003256.816643,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790003256.8192089,
+      "status": "done",
+      "result": {
+        "summary": "Implemented routing, retryable holds, shadow launches, telemetry, and acceptance tests.\n\nChanged six scoped files: three orchestrator modules and three test files.\nGate: **PASS \u2014 988 tests**. Working tree clean.\nCommit: `ef0483818802dfb1933d303d646bf63dfa464e1f`\n\nFailures-only output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c47a-df3c-7b43-9f89-ec2bca5880bc",
+        "usage": {
+          "input_tokens": 1808129,
+          "cached_input_tokens": 1725696,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10265,
+          "reasoning_output_tokens": 1216,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790003270.164588,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790003360.9396632,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790003361.3277209,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        }
+      }
+    },
+    {
+      "ts": 1790003361.3843331,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        },
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+      }
+    },
+    {
+      "ts": 1790003361.3928242,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        },
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+        "gated_at_done": 1790003361.392705
+      }
+    },
+    {
+      "ts": 1790003571.622562,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790003579.6849122,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        },
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+        "gated_at_done": 1790003361.392705,
+        "merged_at": 1790003579.6847491,
+        "merged_at_lease": 1790004479.6847491
+      }
+    },
+    {
+      "ts": 1790003670.804199,
+      "status": "done",
+      "merged_into": "goal/T-0674",
+      "sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+      "merged_at": 1790003670.803211,
+      "changed_files": [
+        "orchestrator/decision.py",
+        "orchestrator/goals.py",
+        "orchestrator/planner_runs.py",
+        "tests/test_decision.py",
+        "tests/test_planner_runs.py",
+        "tests/test_planner_runs_routing.py"
+      ],
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        },
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+        "gated_at_done": 1790003361.392705,
+        "merged_at": 1790003579.6847491,
+        "merged_at_lease": 1790004479.6847491
+      }
+    },
+    {
+      "ts": 1790003671.2138722,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        },
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+        "gated_at_done": 1790003361.392705,
+        "merged_at": 1790003579.6847491,
+        "merged_at_lease": 1790004479.6847491,
+        "accepted_at": 1790003671.21354
+      }
+    },
+    {
+      "ts": 1790003671.305094,
+      "pipeline": {
+        "dispatched_at_done": 1790002770.969714,
+        "first_ready_at": 1790002771.915992,
+        "spec_review_at": 1790002771.956981,
+        "spec_review_at_lease": 1790003671.956981,
+        "spec_review_at_done": 1790002771.962563,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790003360.939523,
+        "gated_at_lease": 1790004260.939523,
+        "first_green_at": 1790003360.938654,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0741",
+          "goal_head": "goal/T-0674",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790003361.327379,
+          "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+        },
+        "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+        "gated_at_done": 1790003361.392705,
+        "merged_at": 1790003579.6847491,
+        "merged_at_lease": 1790004479.6847491,
+        "accepted_at": 1790003671.21354,
+        "merged_at_done": 1790003671.3049421
+      }
+    }
+  ],
+  "pipeline": {
+    "dispatched_at_done": 1790002770.969714,
+    "first_ready_at": 1790002771.915992,
+    "spec_review_at": 1790002771.956981,
+    "spec_review_at_lease": 1790003671.956981,
+    "spec_review_at_done": 1790002771.962563,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "64255b9b1178266e01f02d270457f3d94a1c9e74",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790003360.939523,
+    "gated_at_lease": 1790004260.939523,
+    "first_green_at": 1790003360.938654,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0741",
+      "goal_head": "goal/T-0674",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790003361.327379,
+      "head": "ef0483818802dfb1933d303d646bf63dfa464e1f"
+    },
+    "reviewed_sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+    "gated_at_done": 1790003361.392705,
+    "merged_at": 1790003579.6847491,
+    "merged_at_lease": 1790004479.6847491,
+    "accepted_at": 1790003671.21354,
+    "merged_at_done": 1790003671.3049421
+  },
+  "packet_meta": {
+    "chars": 5332,
+    "est_tokens": 1333,
+    "hash": "1d7db155ed9b",
+    "version": "1d7db155ed9b",
+    "base": "c9609a52c7d1",
+    "sources": "pool.toml@1e9fb4e32b17 gotchas@6ac111408e41 memory@notes over cap by 532 chars: acceptance kept whole",
+    "policy_version": "1e9fb4e32b17",
+    "gotchas": "6ac111408e41"
+  },
+  "claimed_at": 1790002781.752537,
+  "rounds": 0,
+  "executor": "astra",
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Leader-section tie-break requires (route priority desc, effective_complexity desc, payload_key asc), but a naive `max(sections, key=lambda s: (priority, complexity, payload_key))` picks the LARGEST payload_key on a tie, not the smallest as test_reescalation_forces_fable_after_opus_and_tie_break requires. The spec states the criteria but not how to mix ascending/descending in one max() call.",
+      "severity": "med",
+      "line": 1160
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "reconcile()'s existing loop skips the whole record via `continue` while the production pid is still alive (goals.identity_of check). The spec's shadow-log scoring (planner_shadow.parse/record/score, keyed off shadow_pid) needs to run independently of that continue or shadow_agreement gets silently deferred until production also exits, which could be much later or never revisited once status leaves 'running' for another reason.",
+      "severity": "med",
+      "line": 727
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "_claim() marks records 'claimed' inside the first bus.locked() block (lines 1161-1183), before account = pool.pick('planner') resolves in the following unlocked try block. But the new availability/headroom_share computation needs the picked account's daily_budget, and a hold decision must rewrite already-claimed records to non-blocking 'held_for_fable' under a lock. The spec doesn't say where the new rcfg/availability/decide() block sits relative to the account pick and the two separate lock scopes, risking either headroom_share always computing None or a record left stuck at blocking 'claimed' if the process dies mid-transition.",
+      "severity": "med",
+      "line": 1184
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The spec's 'Imports' bullet enumerates `from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner` as if exhaustive, but the effects section calls dataclasses.replace(...) and random.random(), and neither `dataclasses` nor `random` is imported at line 22 today.",
+      "severity": "low",
+      "line": 22
+    }
+  ],
+  "codex_thread_head": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0674",
+  "sha": "ef0483818802dfb1933d303d646bf63dfa464e1f",
+  "merged_at": 1790003670.803211,
+  "changed_files": [
+    "orchestrator/decision.py",
+    "orchestrator/goals.py",
+    "orchestrator/planner_runs.py",
+    "tests/test_decision.py",
+    "tests/test_planner_runs.py",
+    "tests/test_planner_runs_routing.py"
+  ]
+}

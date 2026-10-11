@@ -1,0 +1,151 @@
+{
+  "id": "T-0635",
+  "created_at": 1789977357.232552,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R11: orchestrator/speculation.py \u2014 selective speculative execution: strict eligibility, shadow estimator of economic benefit, deterministic single-result selection, mode off by default (AP P17)",
+  "spec": "Why: AP P17 / brief P13 ask for an experimental, OFF-by-default capability to run a rare critical-path task on two executors and keep exactly one result; before any dispatch path exists the architecture needs eligibility, a shadow estimator answering \"would speculation have paid\", deterministic result selection and telemetry. Dispatching the duplicate is NOT part of this task (a later daemon task, only if evidence supports it).\nWhat: new pure module orchestrator/speculation.py.\n- cfg [speculation]: mode off|shadow|active (default off), min_fix_round_p 0.5, min_samples 5, min_retry_cost_usd 1.0, security_paths from [review].security_paths.\n- eligible(task, *, priority, ready_priorities, evidence, snapshot, budget_left_usd, cfg=None) -> {\"eligible\": bool, \"reasons\": [...], \"executors\": [a, b] or []}: requires all of: critical (priority critical_path_s == max over ready), fix_round_p >= min_fix_round_p with n >= min_samples for the baseline executor, expected retry cost (fix_round_cost_usd) >= min_retry_cost_usd, spare capacity (at least two distinct eligible executors with free > 0 in snapshot, brief: never speculate because capacity is idle alone), budget_left_usd >= 2 * cost_to_accepted_usd, safe to duplicate (task_class not security, no scope path matching security_paths or containing migration/config/pool.toml). Every failed condition appended to reasons; an ordinary task lists \"not_critical\".\n- shadow_estimate(root=STATE, evidence=None) -> rows per merged lineage with fix rounds: {\"task\", \"initial_usd\", \"fix_round_usd\", \"dup_cost_usd\" (2 x initial), \"expected_saved_usd\" (fix_round_usd x p_other_first_pass - initial_usd), \"latency_saved_s\" (fix-round wall time), \"would_have_paid\": expected_saved_usd > 0} using scorecard.executor_economics and pipeline stamps; summary(rows) -> {\"n\", \"paid_rate\", \"net_usd\"}.\n- select_result(candidates) -> {\"selected\", \"discarded\", \"reason\"} over [{executor, tests_green, gate_reds, usd, duration_s, sha}]: exactly one selected: green first, then fewest gate_reds, then lowest usd, then shortest duration, then executor id; no green -> selected None with reason no_green; never returns two.\n- plan(task, **eligibility_kwargs) -> {\"speculate\": bool, \"mode\", \"reason\", \"eligibility\"}: off -> speculate False reason mode_off (eligibility still computed for the shadow estimator); shadow -> False with would_speculate; active -> eligibility[\"eligible\"]. record(task_id, plan) -> decision_log.record(kind=\"speculation\", ...). Selected results still go through the normal gate, review and serial merge (documented; nothing here merges).",
+  "inputs": [
+    "T-0581"
+  ],
+  "acceptance": [
+    "tests/test_speculation.py::test_default_mode_off_never_speculates \u2014 empty config: plan returns speculate False with reason mode_off even for a fully eligible task",
+    "tests/test_speculation.py::test_ordinary_task_is_ineligible_with_reasons \u2014 a non-critical task with low fix_round_p lists not_critical and low_fix_round_p",
+    "tests/test_speculation.py::test_critical_path_task_with_high_rework_and_capacity_is_eligible \u2014 active mode, critical task, fix_round_p 0.7 n 8, two free executors, budget ok: speculate True with two distinct executors",
+    "tests/test_speculation.py::test_insufficient_budget_or_no_spare_capacity_blocks \u2014 budget_left below 2x cost yields insufficient_budget; a single free executor yields no_spare_capacity",
+    "tests/test_speculation.py::test_select_result_picks_exactly_one_and_estimator_summary \u2014 two green candidates yield one selected by gate_reds then usd, the other discarded; shadow_estimate rows carry would_have_paid and summary paid_rate"
+  ],
+  "scope": [
+    "orchestrator/speculation.py",
+    "tests/test_speculation.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0635",
+  "codex_thread": null,
+  "result": {
+    "summary": "Diffstat matches the packet (354 insertions across orchestrator/speculation.py and tests/test_speculation.py). Ran the full test file with unittest: all 7 tests pass, including the 5 named acceptance tests. Verified eligible()'s field-name aliasing (fix_round_p/fix_round_probability, n/n_tasks, cost_to_accepted_usd/cost_to_accepted, first_pass_p/first_pass_green_rate) against the real return shape of scorecard.executor_economics \u2014 all correctly fall back to the real names. select_result's tie-break order (green, gate_reds, usd, duration_s, executor id) matches spec and the test. shadow_estimate's fix_round_usd/expected_saved_usd/would_have_paid arithmetic matches the test's expected values (2.1 and 0.68) exactly. decision_log.record is called with a valid kind ('speculation' is in KINDS) and matching keyword signature. _unsafe() correctly blocks security-classed tasks and migration/config/pool.toml/security_paths scope, satisfying the 'safe to duplicate' condition. No dispatch or merge logic is present \u2014 module only decides/measures, as required. Scope is limited to the two allowed files. No security-checklist concerns apply (no HTTP/CLI trust boundary, no secrets, no crypto, no migrations, no new dependencies).",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "a7087275dd61",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789977357.23397,
+      "reviewed_sha": "832929fe9e5483420fade4d65acef2989240a8f9"
+    },
+    {
+      "ts": 1789977360.5064268,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0635",
+      "claimed_at": 1789977360.5058858
+    },
+    {
+      "ts": 1789977360.508255,
+      "account": "B"
+    },
+    {
+      "ts": 1789977361.011192,
+      "pid": 88006,
+      "account": "B"
+    },
+    {
+      "ts": 1789977529.6263502,
+      "status": "done",
+      "result": {
+        "summary": "Diffstat matches the packet (354 insertions across orchestrator/speculation.py and tests/test_speculation.py). Ran the full test file with unittest: all 7 tests pass, including the 5 named acceptance tests. Verified eligible()'s field-name aliasing (fix_round_p/fix_round_probability, n/n_tasks, cost_to_accepted_usd/cost_to_accepted, first_pass_p/first_pass_green_rate) against the real return shape of scorecard.executor_economics \u2014 all correctly fall back to the real names. select_result's tie-break order (green, gate_reds, usd, duration_s, executor id) matches spec and the test. shadow_estimate's fix_round_usd/expected_saved_usd/would_have_paid arithmetic matches the test's expected values (2.1 and 0.68) exactly. decision_log.record is called with a valid kind ('speculation' is in KINDS) and matching keyword signature. _unsafe() correctly blocks security-classed tasks and migration/config/pool.toml/security_paths scope, satisfying the 'safe to duplicate' condition. No dispatch or merge logic is present \u2014 module only decides/measures, as required. Scope is limited to the two allowed files. No security-checklist concerns apply (no HTTP/CLI trust boundary, no secrets, no crypto, no migrations, no new dependencies).",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "a7087275dd61",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789977529.627721,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789977529.672864,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "832929fe9e5483420fade4d65acef2989240a8f9",
+        "packet_version": "a7087275dd61",
+        "review_pass_index": 2,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "832929fe9e5483420fade4d65acef2989240a8f9",
+      "packet_version": "a7087275dd61",
+      "review_pass_index": 2,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "832929fe9e5483420fade4d65acef2989240a8f9",
+  "claimed_at": 1789977360.5058858,
+  "account": "B",
+  "pid": 88006,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "832929fe9e5483420fade4d65acef2989240a8f9",
+    "packet_version": "a7087275dd61",
+    "review_pass_index": 2,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "a7087275dd61",
+  "review_pass_index": 2,
+  "reviews_expected": 1
+}

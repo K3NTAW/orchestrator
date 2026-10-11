@@ -1,0 +1,108 @@
+{
+  "id": "T-0457",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P0c v2: scorecard efficiency metrics (supersedes T-0451; adds read-time attribution for legacy rows) \u2014 tokens and cost per accepted task and goal with fix-round lineage collapsed, tokens and time to first green, time to accepted, first-pass and fix-round rates, fix-round tokens, calls and turns, model distribution, pipeline amplification with the nine-bucket breakdown, grouping by goal, executor, band, class and role, unknown bucket; CLI scorecard --efficiency",
+  "spec": "Phase I P0 (brief .orchestrator/phase-i-program.md, section P0 metrics and amplification). Replaces T-0451 unchanged except item 0. Base goal/T-0445 after P0a (T-0449 merged: row fields bucket, lineage_root, round_index, band, task_class, executor, model, normalized tokens, usd, usd_source; Jev rows with task and bucket; orchestrator/attribution.py with bucket_of, lineage, band, task_class, model_of) and P0b (T-0450: created_at, pipeline.first_green_at, gate_attempts, gate_reds, lineage_fix_rounds, accepted_at) merge. Scout facts: scorecard.build is per executor from execute rows (scorecard.py:186-249); by_task (403), by_goal (471), tokens_per_accepted_goal (637) and usd_per_accepted_goal (654) exist from G1b and H1; _tokens_of (381) keeps the discounted cache-read convention and _legacy_total_only (395) handles pre-normalisation rows; Jev rows are read by jev_footer (359) from runs/jev; the H1 rule: a ratio with zero denominator is None and renders n/a. CLI wiring for scorecard lives in cli.py (136, 237).\n0. Legacy rows (every row on disk written before P0a, and any row lacking bucket): a single helper scorecard._attributed(row, tasks) returns the row with bucket, lineage_root, round_index, band, task_class, executor and model filled at read time through orchestrator.attribution from the task file when the row names a task (row.task), and bucket_of(row.role, None) otherwise; rows that already carry the fields are returned unchanged; rows with neither task nor role fall into the unknown group. Every function below reads rows only through _attributed, so history and new rows use one code path. Stamps missing on old tasks (created_at, first_green_at, accepted_at, lineage_fix_rounds) give None for the dependent metric; fix_rounds for old tasks falls back to counting descendants whose constraints.fix_round_for chain reaches the root. Test: test_efficiency_legacy_rows_attributed_at_read_time (a fixture row without bucket, whose task is a fix round, lands in bucket fix_round under its root).\n1. scorecard.efficiency(root=STATE, by=None) -> dict. Rows = runs/*.jsonl plus runs/jev/*.jsonl (bucket jev). Attribute every row to a task lineage root (row.lineage_root, else row.task, else unknown) and to a goal (row.goal_id, else the task's parent, else unknown). An accepted task is an execute lineage root whose task has merged_into set (its accepted_at when present). An accepted goal is one whose GOAL task has a pr_url or result with pr_url (reuse accepted_goals(), scorecard.py:621).\nPer accepted task: tokens (sum of total_tokens using _tokens_of over every row attributed to the lineage: execute, fix_round, spec_review, review, challenge rows whose task or inputs[0] is in the lineage, jev rows keyed by lineage tasks), cost (usd sum), tokens_to_first_green (rows with ts <= root first_green_at), time_to_first_green_s (first_green_at - created_at), time_to_accepted_s (accepted_at - created_at), calls (row count), turns (sum turns), fix_rounds, fix_round_tokens (bucket fix_round rows), first_pass (first_green_at present and fix_rounds == 0 and gate_reds == 0; None when stamps are missing). Missing stamps make the specific metric None, never a crash.\nPer accepted goal: the sums over its accepted tasks plus planner rows (bucket planner with goal_id) and scout rows for that goal, with tokens_per_accepted_goal and usd_per_accepted_goal kept consistent with the existing functions (test that the new goal total equals tokens_per_accepted_goal for a fixture).\nRates over accepted tasks: first_pass_rate and fix_round_rate (share with fix_rounds >= 1) over tasks where the value is defined, with the defined count reported, avg_fix_rounds, median and max tokens per accepted task, model_distribution (rows and tokens per model per bucket).\nAmplification: breakdown = tokens per bucket in the fixed order Planner, Scout, Execution (bucket execute, initial runs only), Fix rounds, Spec review, Code review, Challenge, Jev, Other (bucket other or memory or unattributed) plus Total; pipeline_amplification = Total / Execution, None when Execution is 0. Computed for the whole window and per group.\nby in {None, goal, executor, band, class, role}: groups accepted tasks (role groups rows instead) and reports the per-group rates, medians, breakdown and amplification. An unknown group collects rows without a task or goal and is always shown with its token total so nothing silently disappears.\n2. CLI: orchestrator scorecard --efficiency [--by goal|executor|band|class|role] [--json] renders a text table with n/a for None and a footer with the breakdown and amplification; --json dumps the dict. Existing scorecard flags unchanged.\n3. Docstrings in scorecard.py name each formula; README is P0d's job.\nTests (tests/test_scorecard.py with synthetic runs and tasks fixtures, tests/test_cli.py for the CLI): test_efficiency_legacy_rows_attributed_at_read_time, test_efficiency_collapses_fix_round_lineage_into_root, test_efficiency_first_pass_and_fix_round_rates, test_efficiency_tokens_and_time_to_first_green_use_stamps, test_efficiency_missing_stamps_give_none_not_crash, test_efficiency_amplification_breakdown_sums_to_total_and_none_at_zero_execution, test_efficiency_unknown_bucket_is_reported, test_efficiency_goal_total_matches_tokens_per_accepted_goal, test_efficiency_group_by_band_class_executor_role, test_efficiency_model_distribution, test_cli_scorecard_efficiency_text_and_json. Existing scorecard and cli tests stay green; .claude/hooks/tests-green.sh exits 0; git add -A; commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0454"
+  ],
+  "acceptance": [
+    "tests/test_scorecard.py::test_efficiency_legacy_rows_attributed_at_read_time, test_efficiency_collapses_fix_round_lineage_into_root, test_efficiency_first_pass_and_fix_round_rates, test_efficiency_tokens_and_time_to_first_green_use_stamps, test_efficiency_missing_stamps_give_none_not_crash, test_efficiency_amplification_breakdown_sums_to_total_and_none_at_zero_execution, test_efficiency_unknown_bucket_is_reported, test_efficiency_goal_total_matches_tokens_per_accepted_goal, test_efficiency_group_by_band_class_executor_role, test_efficiency_model_distribution pass",
+    "tests/test_cli.py::test_cli_scorecard_efficiency_text_and_json passes",
+    "scorecard.efficiency returns every metric in the brief's P0 list with None for undefined values and an unknown bucket; legacy rows without attribution fields are attributed at read time; the breakdown order is Planner, Scout, Execution, Fix rounds, Spec review, Code review, Challenge, Jev, Other, Total, Amplification",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_scorecard.py",
+    "tests/test_cli.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0457",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 600,
+        "issue": "accepted_goals() now adds any task id to goal_ids if that task itself has a pr_url (top-level or in result), with no role=='goal' filter. An execute/review/scout task that happens to carry a pr_url (e.g. a directly-merged execute task recording its own PR link) is misclassified as a goal. It then gets accepted (line 607 checks goal.get('pr_url') directly) and flows into efficiency()'s goal_card as a phantom goal with no real members (no task's parent equals a non-goal id), diluting tokens_per_accepted_goal/usd_per_accepted_goal with spurious zero/low-usage 'goals'. This corrupts the exact P0 metric (goal-level cost/tokens) the task is building. No test exercises this because the only pr_url-bearing task in the new fixtures is the goal task itself.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 617,
+        "issue": "tokens_per_accepted_goal and usd_per_accepted_goal each unconditionally call efficiency(root) (full task+run+jev scan) even though its result is only used for goals whose accepted_tasks is truthy, falling back to `card` otherwise. This is wasteful (two full re-scans per call) and, more importantly, efficiency()'s _efficiency_rows resets and rewrites the shared module global `_last_malformed_lines` (same side-channel build()/by_task() use for the CLI's malformed-line footer), so a plain `scorecard --by goal` invocation now reports malformed-line counts from _efficiency_rows' parse of runs/*.jsonl instead of from whatever build()/by_goal() actually parsed \u2014 silently wrong footer output for the default (non --efficiency) goal view.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789920866.595287,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0457",
+      "claimed_at": 1789920866.594982
+    },
+    {
+      "ts": 1789920866.596204,
+      "account": "B"
+    },
+    {
+      "ts": 1789920866.623138,
+      "pid": 59481,
+      "account": "B"
+    },
+    {
+      "ts": 1789921029.4497888,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 600,
+            "issue": "accepted_goals() now adds any task id to goal_ids if that task itself has a pr_url (top-level or in result), with no role=='goal' filter. An execute/review/scout task that happens to carry a pr_url (e.g. a directly-merged execute task recording its own PR link) is misclassified as a goal. It then gets accepted (line 607 checks goal.get('pr_url') directly) and flows into efficiency()'s goal_card as a phantom goal with no real members (no task's parent equals a non-goal id), diluting tokens_per_accepted_goal/usd_per_accepted_goal with spurious zero/low-usage 'goals'. This corrupts the exact P0 metric (goal-level cost/tokens) the task is building. No test exercises this because the only pr_url-bearing task in the new fixtures is the goal task itself.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 617,
+            "issue": "tokens_per_accepted_goal and usd_per_accepted_goal each unconditionally call efficiency(root) (full task+run+jev scan) even though its result is only used for goals whose accepted_tasks is truthy, falling back to `card` otherwise. This is wasteful (two full re-scans per call) and, more importantly, efficiency()'s _efficiency_rows resets and rewrites the shared module global `_last_malformed_lines` (same side-channel build()/by_task() use for the CLI's malformed-line footer), so a plain `scorecard --by goal` invocation now reports malformed-line counts from _efficiency_rows' parse of runs/*.jsonl instead of from whatever build()/by_goal() actually parsed \u2014 silently wrong footer output for the default (non --efficiency) goal view.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789921029.451935,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789920866.594982,
+  "account": "B",
+  "pid": 59481,
+  "review_verdict": "request_changes"
+}

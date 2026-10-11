@@ -1,0 +1,327 @@
+{
+  "id": "T-0045",
+  "parent": "T-0043",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Scout C2: daemon and bus entry points for dependency-driven gate/review/merge/dispatch",
+  "spec": "HARD OUTPUT CAP: JSON under 4,500 chars; \u226412 findings; evidence path:line only. Read-only. Skill trace-callers.\nTrace: orchestrator/daemon.py tick() and main(); bus.create_task fields and update() restrictions (which fields the Planner owns; how a new `depends_on: list[str]` field would be stored and exposed via bus_mcp.bus_create_task); executor.start(task_id, prompt) and its fallback path; spawn.run_worker and spawn_review (mcp.py) for creating and running a review task; merge.merge(task_id, target) and merge.lock; how tests-green.sh is invoked (merge.py TESTS_GREEN, subprocess with cwd); how status/hold_reason are used. Then propose, with path:line anchors, the daemon state machine: for each queued execute task with all depends_on merged (task.merged_into set) and spec_review approved when complexity \u22655 \u2192 dispatch via executor.start(task_id, rendered prompt); for each done execute task without review \u2192 run gate on its worktree, create a review task (complexity \u22654; inputs [task]) and spawn it; for each review done with verdict approve \u2192 merge(task) into goal/<parent>; request_changes/failed/gate red \u2192 mark the execute task held with hold_reason and notify; idempotency guards needed (a `pipeline` field on the task json recording stage timestamps); which of these already exist. Note: the MCP server and the daemon are separate processes sharing pool_state.json and tasks/*.json \u2014 name the races.",
+  "inputs": [],
+  "acceptance": [
+    "every entry point cited with path:line",
+    "state machine proposal with idempotency guards and the races between daemon and MCP server named",
+    "result under 4,500 chars"
+  ],
+  "scope": [
+    "orchestrator/**",
+    ".claude/hooks/tests-green.sh"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0045",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "daemon.tick() only requeues running tasks whose pid died (>60s) and notifies on cooling/budget/codex-exhausted; no gate/review/merge/dispatch logic exists",
+        "evidence": [
+          "orchestrator/daemon.py:21-32",
+          "orchestrator/daemon.py:35-38"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "bus.create_task locks spec/acceptance/scope/complexity Planner-only; update() raises PermissionError on those; depends_on isn't a field, and bus_mcp.bus_create_task omits constraints so it can't reach bus.create_task's constraints dict without a signature change",
+        "evidence": [
+          "orchestrator/bus.py:45-57",
+          "orchestrator/bus.py:60-70",
+          "orchestrator/bus_mcp.py:9-12"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "executor.start() picks an executor, claims the task, runs codex exec; _exhausted() falls back to spawn.run_worker on a Claude tier or holds with hold_reason",
+        "evidence": [
+          "orchestrator/executor.py:90-107",
+          "orchestrator/executor.py:110-121"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "mcp.spawn_review/_bg spawn spawn.run_worker in a thread; run_worker builds review prompt from inputs[0]'s scoped diff, writes review_verdict onto review task and reviewed task",
+        "evidence": [
+          "orchestrator/mcp.py:10-24",
+          "orchestrator/spawn.py:176-221"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "merge.merge() takes a global fcntl lock on merge.lock, rebases onto goal/<parent>, runs tests-green.sh with wt as argv[1], fast-forwards target only on green, sets merged_into+sha",
+        "evidence": [
+          "orchestrator/merge.py:14-15",
+          "orchestrator/merge.py:19",
+          "orchestrator/merge.py:26",
+          "orchestrator/merge.py:35"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "no dedicated 'gate' script exists; tests-green.sh is the only gate, cd's into argv[1], exits 2 with failures-only stderr",
+        "evidence": [
+          ".claude/hooks/tests-green.sh:1-6",
+          ".claude/hooks/tests-green.sh:23-25"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "status/hold_reason set via bus.update(status='held',hold_reason=...) at every stall: usage-limit, no-headroom, cooling executor, rebase conflict, tests_red",
+        "evidence": [
+          "orchestrator/executor.py:73",
+          "orchestrator/executor.py:116",
+          "orchestrator/spawn.py:187",
+          "orchestrator/merge.py:24",
+          "orchestrator/merge.py:28"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "RACE: pool_state.json unlocked; daemon's long-lived Pool() and per-call fresh Pool() in the MCP process both read-modify-write via save(), losing cooldown/day_tokens/running updates under concurrency",
+        "evidence": [
+          "orchestrator/pool.py:109-124",
+          "orchestrator/daemon.py:36-38",
+          "orchestrator/executor.py:94",
+          "orchestrator/mcp.py:54"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "RACE: bus.update() is get()+mutate+_save() with no lock; daemon requeue vs a worker's own bus.claim/post_result on the same task_id can interleave and drop one side's writes",
+        "evidence": [
+          "orchestrator/bus.py:60-70",
+          "orchestrator/daemon.py:22-24"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "nothing reads depends_on/merged_into to gate dispatch, runs the gate on done execute tasks to spawn a review, or auto-merges on approve/holds on reject: the daemon state machine is unimplemented",
+        "evidence": [
+          "orchestrator/daemon.py:21-32",
+          "orchestrator/mcp.py:1-84"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "depends_on: new bus.create_task param or reuse constraints{}?",
+      "daemon calls merge/spawn_review in-process or via MCP tools, to avoid a 2nd write path?"
+    ],
+    "suggested_next": [
+      "add pipeline{dispatched_at,gated_at,reviewed_at,merged_at}; daemon only advances a stage whose stamp is unset, inside the bus.update call",
+      "dispatch: execute+queued+all(depends_on merged)+(complexity<5 or review approved) -> executor.start once, guard dispatched_at",
+      "gate+review: execute+done+reviewed_at unset -> tests-green.sh on worktree; red->hold 'gate_red'; green->create review task(complexity>=4,inputs=[task])+spawn_review, stamp reviewed_at at dispatch to dedupe",
+      "merge: review+done+verdict=='approve' -> merge.merge(reviewed_task); else hold execute task hold_reason=verdict, notify()",
+      "add an flock around daemon-side bus.update/Pool.save before autonomous dispatch: today daemon only reads; this makes it write concurrently with MCP calls"
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789671471.0818272,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0045",
+      "claimed_at": 1789671471.0814688
+    },
+    {
+      "ts": 1789671471.134399,
+      "pid": 46475,
+      "account": "B"
+    },
+    {
+      "ts": 1789671600.806195,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "daemon.tick() only requeues running tasks whose pid died (>60s) and notifies on cooling/budget/codex-exhausted; no gate/review/merge/dispatch logic exists",
+            "evidence": [
+              "orchestrator/daemon.py:21-32",
+              "orchestrator/daemon.py:35-38"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "bus.create_task locks spec/acceptance/scope/complexity Planner-only; update() raises PermissionError on those; depends_on isn't a field, and bus_mcp.bus_create_task omits constraints so it can't reach bus.create_task's constraints dict without a signature change",
+            "evidence": [
+              "orchestrator/bus.py:45-57",
+              "orchestrator/bus.py:60-70",
+              "orchestrator/bus_mcp.py:9-12"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "executor.start() picks an executor, claims the task, runs codex exec; _exhausted() falls back to spawn.run_worker on a Claude tier or holds with hold_reason",
+            "evidence": [
+              "orchestrator/executor.py:90-107",
+              "orchestrator/executor.py:110-121"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "mcp.spawn_review/_bg spawn spawn.run_worker in a thread; run_worker builds review prompt from inputs[0]'s scoped diff, writes review_verdict onto review task and reviewed task",
+            "evidence": [
+              "orchestrator/mcp.py:10-24",
+              "orchestrator/spawn.py:176-221"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "merge.merge() takes a global fcntl lock on merge.lock, rebases onto goal/<parent>, runs tests-green.sh with wt as argv[1], fast-forwards target only on green, sets merged_into+sha",
+            "evidence": [
+              "orchestrator/merge.py:14-15",
+              "orchestrator/merge.py:19",
+              "orchestrator/merge.py:26",
+              "orchestrator/merge.py:35"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "no dedicated 'gate' script exists; tests-green.sh is the only gate, cd's into argv[1], exits 2 with failures-only stderr",
+            "evidence": [
+              ".claude/hooks/tests-green.sh:1-6",
+              ".claude/hooks/tests-green.sh:23-25"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "status/hold_reason set via bus.update(status='held',hold_reason=...) at every stall: usage-limit, no-headroom, cooling executor, rebase conflict, tests_red",
+            "evidence": [
+              "orchestrator/executor.py:73",
+              "orchestrator/executor.py:116",
+              "orchestrator/spawn.py:187",
+              "orchestrator/merge.py:24",
+              "orchestrator/merge.py:28"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "RACE: pool_state.json unlocked; daemon's long-lived Pool() and per-call fresh Pool() in the MCP process both read-modify-write via save(), losing cooldown/day_tokens/running updates under concurrency",
+            "evidence": [
+              "orchestrator/pool.py:109-124",
+              "orchestrator/daemon.py:36-38",
+              "orchestrator/executor.py:94",
+              "orchestrator/mcp.py:54"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "RACE: bus.update() is get()+mutate+_save() with no lock; daemon requeue vs a worker's own bus.claim/post_result on the same task_id can interleave and drop one side's writes",
+            "evidence": [
+              "orchestrator/bus.py:60-70",
+              "orchestrator/daemon.py:22-24"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "nothing reads depends_on/merged_into to gate dispatch, runs the gate on done execute tasks to spawn a review, or auto-merges on approve/holds on reject: the daemon state machine is unimplemented",
+            "evidence": [
+              "orchestrator/daemon.py:21-32",
+              "orchestrator/mcp.py:1-84"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "depends_on: new bus.create_task param or reuse constraints{}?",
+          "daemon calls merge/spawn_review in-process or via MCP tools, to avoid a 2nd write path?"
+        ],
+        "suggested_next": [
+          "add pipeline{dispatched_at,gated_at,reviewed_at,merged_at}; daemon only advances a stage whose stamp is unset, inside the bus.update call",
+          "dispatch: execute+queued+all(depends_on merged)+(complexity<5 or review approved) -> executor.start once, guard dispatched_at",
+          "gate+review: execute+done+reviewed_at unset -> tests-green.sh on worktree; red->hold 'gate_red'; green->create review task(complexity>=4,inputs=[task])+spawn_review, stamp reviewed_at at dispatch to dedupe",
+          "merge: review+done+verdict=='approve' -> merge.merge(reviewed_task); else hold execute task hold_reason=verdict, notify()",
+          "add an flock around daemon-side bus.update/Pool.save before autonomous dispatch: today daemon only reads; this makes it write concurrently with MCP calls"
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789671471.0814688,
+  "pid": 46475,
+  "account": "B"
+}

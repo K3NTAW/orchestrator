@@ -1,0 +1,106 @@
+{
+  "id": "T-0245",
+  "parent": "T-0240",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "F3 fix round 1: dispatch-thread tests deterministic \u2014 tests-green went red once on the merge of T-0241 (test_diff_unavailable_fails_closed KeyError T-0002)",
+  "spec": "STEP 0 (before any edit): the worktree must be on task/T-0241 (df9074f \"Fix daemon posting of Codex dispatch results\" in git log). If git log --oneline -1 does not show df9074f, run: git checkout -B task/T-0245 task/T-0241 (your branch name stays task/T-0245). Never rebase or drop df9074f.\n\nContext: T-0241 changed orchestrator/daemon.py _dispatch_worker() to post done/failed bus results from executor.start()'s return, including a failed result when start raises, and added four tests to tests/test_daemon.py (test_dispatch_worker_posts_codex_done, _posts_codex_failed, _leaves_held, _exception_marks_failed). tests-green.sh passed three times in wt/T-0241 but the merge run went red once: ERROR test_diff_unavailable_fails_closed with a traceback ending KeyError 'T-0002' (bus.get raising for a task id that a previous test created), preceded on stderr by a RuntimeError boom traceback and a TypeError NoneType not subscriptable traceback from background threads. daemon.dispatch() runs _dispatch_worker through spawn_async (a daemon thread); after T-0241 that thread now writes to the bus (bus.post_result) on the failed and exception paths, so a thread leaked from one test can write into the bus of the next test on the shared module-level TMP.\n\nTask: make the suite deterministic.\n1. Find the exact interleaving (run tests/test_daemon.py in a loop, 20 iterations, or add a small sleep in the thread to force it) and record it in your final message.\n2. Fix it in tests/test_daemon.py first: the dispatch tests must not leak threads past their own test (swap daemon.spawn_async for a synchronous call in those tests, or join every spawned thread in tearDown); reuse the existing swap helper. Touch orchestrator/daemon.py only if the race has a production cause (for example _dispatch_worker raising inside the except branch when the task is gone, in which case guard it with a try/except that logs and returns); say in the final message whether daemon.py changed and why.\n3. Keep every T-0241 test and assertion intact.",
+  "inputs": [
+    "T-0241",
+    "T-0244"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows df9074f (the T-0241 commit) below your commit",
+    "for i in 1..20: python -m pytest tests/test_daemon.py -q (or the repo's unittest runner) passes every iteration with no ERROR and no traceback printed from a background thread after a test ended",
+    "the four T-0241 tests still pass unchanged in intent",
+    ".claude/hooks/tests-green.sh . exits 0 in the worktree",
+    "final message states the interleaving found and whether orchestrator/daemon.py was changed"
+  ],
+  "scope": [
+    "tests/test_daemon.py",
+    "orchestrator/daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "fix_round_for": "T-0241"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0245",
+  "codex_thread": "01a0ba81-83bb-7d72-9163-cb4b15c46711",
+  "result": {
+    "summary": "Codex (sol, thread 01a0ba81-83bb-7d72-9163-cb4b15c46711) committed fd2e078 on top of df9074f (T-0241) in wt/T-0245: tests/test_daemon.py only. Interleaving found: test cleanup restored executor.start and swapped the bus sandbox before the spawn_async dispatch thread finished; the late thread got None (TypeError), then posted into the next test's bus (KeyError T-0002). Fix: the test harness runs spawn_async synchronously, and the non-blocking test collects its threads and joins them in cleanup. orchestrator/daemon.py unchanged (test isolation, not a production race). Codex ran 20/20 daemon-suite iterations clean; Planner: tests-green.sh wt/T-0245 exited 0 and five more test_daemon runs passed (82 tests each). Result posted by hand (F3 not merged yet).",
+    "executed_by": "codex:sol",
+    "sha": "fd2e078",
+    "carries": "df9074f",
+    "confidence": 0.95,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789835443.9760919,
+      "pipeline": {
+        "dispatched_at": 1789835443.976044
+      }
+    },
+    {
+      "ts": 1789835445.132839,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0245",
+      "claimed_at": 1789835445.132465
+    },
+    {
+      "ts": 1789835445.134712,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789835802.220597,
+      "codex_thread": "01a0ba81-83bb-7d72-9163-cb4b15c46711"
+    },
+    {
+      "ts": 1789835963.389909,
+      "status": "done",
+      "result": {
+        "summary": "Codex (sol, thread 01a0ba81-83bb-7d72-9163-cb4b15c46711) committed fd2e078 on top of df9074f (T-0241) in wt/T-0245: tests/test_daemon.py only. Interleaving found: test cleanup restored executor.start and swapped the bus sandbox before the spawn_async dispatch thread finished; the late thread got None (TypeError), then posted into the next test's bus (KeyError T-0002). Fix: the test harness runs spawn_async synchronously, and the non-blocking test collects its threads and joins them in cleanup. orchestrator/daemon.py unchanged (test isolation, not a production race). Codex ran 20/20 daemon-suite iterations clean; Planner: tests-green.sh wt/T-0245 exited 0 and five more test_daemon runs passed (82 tests each). Result posted by hand (F3 not merged yet).",
+        "executed_by": "codex:sol",
+        "sha": "fd2e078",
+        "carries": "df9074f",
+        "confidence": 0.95,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789836043.156447,
+      "pipeline": {
+        "dispatched_at": 1789835443.976044,
+        "gated_at": 1789836043.156296,
+        "reviews_expected": 0,
+        "review_reason": "none"
+      }
+    },
+    {
+      "ts": 1789836101.739586,
+      "status": "done",
+      "merged_into": "goal/T-0240",
+      "sha": "fd2e07861e0d7c2e9253c08534feb113ed26a3a8"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789835443.976044,
+    "gated_at": 1789836043.156296,
+    "reviews_expected": 0,
+    "review_reason": "none"
+  },
+  "claimed_at": 1789835445.132465,
+  "rounds": 0,
+  "executor": "sol",
+  "merged_into": "goal/T-0240",
+  "sha": "fd2e07861e0d7c2e9253c08534feb113ed26a3a8"
+}

@@ -1,0 +1,691 @@
+{
+  "id": "T-1724",
+  "created_at": 1791430698.905195,
+  "parent": "T-1705",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: daemon: run gates in the background so a 60-min gate no longer freezes dispatch, reviews and merges",
+  "spec": "Root cause of the 2026-10-07/08 stalls (Planner, 05:20): orchestrator/daemon.py gate() (line 1435) loops over done\nexecute tasks and calls gate.run_gate(...) synchronously (line ~1491) inside tick(). A Deskmere iOS gate runs 40-60 min and an\norchestrator full gate 20-45 min under load, so the whole tick blocks: dispatch, steering, merge_reviewed and planner_runs\ndo not run until the gate returns. Observed: luna T-0618/T-0611/T-0612 eligible (daemon.eligible returned them) but not\ndispatched for 40+ min while the daemon ran T-0616's gate; ai-apprentice idle for hours the same way.\nFix:\n1. gate() starts each gate in a background worker (thread or subprocess via the existing spawn_async pattern) and stamps\n   pipeline.gated_at (lease) immediately; the result is posted when the run ends (same status/hold logic as today:\n   green -> reviews/merge path, red -> gate_red hold, timeout -> gate_timeout hold, infra failure as today).\n2. Concurrency: [gate].max_parallel in pool.toml (default 1, so behaviour is serial but non-blocking); a repo may set 2.\n   Never two gates on the same worktree. A daemon restart reconciles gated_at leases without a live gate (re-gate).\n3. tick() returns within seconds while a gate runs; dispatch and merges keep working.\n4. Keep the bus lock out of the gate run (no bus.locked() or open write transaction across the subprocess).\nTests (tests/test_daemon.py): test_gate_runs_in_background_and_tick_returns, test_gate_result_posted_when_run_ends\n(green, red, timeout), test_gate_max_parallel_respected, test_restart_regates_orphaned_gate_lease.\nRun: PYTHONPATH=tests uv run python -m unittest tests.test_daemon tests.test_gate_timeout. Commit on the task branch.",
+  "inputs": [
+    "T-1723"
+  ],
+  "acceptance": [
+    "tick() returns within 5 s while a gate is running",
+    "gate results post as before (green, red, timeout)",
+    "[gate].max_parallel respected, default 1",
+    "orphaned gate leases re-gate after a restart",
+    "the four named tests pass",
+    "tests.test_daemon and tests.test_gate_timeout pass"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gate.py",
+    "tests/test_daemon.py",
+    "tests/test_gate_timeout.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1724",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1519,
+        "issue": "Stamping gated_at at gate start collides with how gated_at is used today. It currently means 'gate finished, reviews or merge stamped'. Other code treats it as gated: the dependent 'imminent' check (~887), inflight_claude_dispatches (~510), running-set filtering (~860), merge_pressure.py:95, speculation.py:218/221, duration.py:33 and the scorecards. A running gate would make dependents look gated or merge-ready, and would skew duration and scorecard data. The spec gives no way to tell a gate in flight from a gate finished.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1807,
+        "issue": "sweep_leases already handles expired gated_at leases, and it reads pipeline['reviews_expected'] unconditionally. A start-time stamp has no reviews_expected, so an expired lease for a live or orphaned gate raises KeyError. If it were fixed to re-gate instead, it would also have to check for a live gate worker. A live gate often outlives the 900 s STAGE_LEASE_S, since gates run 20-60 min. The sweep would then take the already_merged, merge or _open_reviews path, or re-gate in parallel, while the first gate is still running. The spec says leases are 'reconciled' but does not name this branch, and sweep_leases is not mentioned at all.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1557,
+        "issue": "stamp() returns False when the stage is already set, and the current tail of gate() relies on stamp(gated_at, ...) at completion (held, red, timeout, green). If start-time stamping uses the same key, every completion stamp fails and results are silently dropped. The spec needs a separate in-flight marker (for example pipeline.gate_started_at plus lease), or clear_stage followed by stamp, and a rule for which one marks completion. The 'results post as before' criterion cannot be met otherwise.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/gate.py",
+        "line": 0,
+        "issue": "No code path is named for tracking live gates. The spec does not say how gate() knows which gates are running (in-process registry or bus fields), how 'never two gates on the same worktree' is enforced, or how max_parallel is counted when the daemon restarts. An in-memory set that is never cleared when a worker raises would leak a slot and stop gating for good. The worker needs try/finally release, and it needs to hold_failed on exceptions, as the current inline code does (hold_failed 'gated_error').",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 1521,
+        "issue": "The pre-gate work (gate_attempts increment, dirty check, already_merged git call, acceptance.missing_tests) and the whole post-gate tail (merged_into check, _hold_stale_high, _record_stale_check, _stale_rebase, report_merge/merge.merge, _open_reviews) are slow or git-heavy. The spec does not say which side of the thread boundary they run on. If the whole body goes into the worker, merge.merge and rebase run concurrently with tick()'s merge_reviewed and dispatch, with no serialization against them. Keep gate subprocess in the thread and post results from a tick-side reaper, or state clearly that the tail runs under bus.locked/merge serialization. Also, gate_attempts is bumped on each tick, so a task skipped for max_parallel would inflate it.",
+        "severity": "med"
+      }
+    ],
+    "suggested_spec_changes": [
+      "Introduce a separate in-flight marker (for example pipeline.gate_started_at with gate_started_at_lease, plus a gate_run_id or pid) instead of reusing gated_at. Keep gated_at meaning 'gate finished', so dependents, merge_pressure, speculation, duration and scorecard code keep their meaning. Alternatively, list every reader of gated_at that must ignore in-flight stamps, and add them to scope.",
+      "State exactly how sweep_leases treats an expired in-flight gate marker. If a live worker is registered, extend the lease or skip. If there is none (after a restart), clear the marker and any partial fields so gate() re-gates. Also fix the unconditional pipeline['reviews_expected'] read for gated_at stamps that never reached green. Name sweep_leases and the LEASED_STAGES handling as insertion points.",
+      "Define the completion path. The worker runs only gate.run_gate and returns the result. A tick-side reaper (or a locked block) applies the existing tail (merged_into check, stale-high hold, timeout, red, green, reviews or merge) with the same stamp and complete semantics. The tail must not run concurrently with merge_reviewed or dispatch without the bus lock or the existing merge serialization.",
+      "Specify the live-gate registry (module-level dict keyed by task id and worktree, guarded by a lock, released in finally). State the enforcement of max_parallel and same-worktree exclusion. Say that a task skipped because of the cap is not counted as an attempt (gate_attempts) and is retried on the next tick.",
+      "Put the max_parallel default and validation (int >= 1, fall back to 1 with a logged warning) in gate.settings(). State that pool.toml needs no change. Add a rollback switch, for example max_parallel = 0 or [gate].background = false for the old blocking behaviour.",
+      "Make the tests deterministic: gate the fake run_gate on threading.Event, assert tick returns while it is blocked, then release and join before checking the posted status. Add a case that a worker exception releases the slot and holds with gated_error. For test_restart_regates_orphaned_gate_lease, assert that an in-flight marker with no live registry entry is cleared and re-gated exactly once, and that a marker with a live worker is left alone.",
+      "Keep the daemon.gate.run_gate and daemon.gate.settings patch seam unchanged, and say why test_gate_timeout.py is touched (or drop it from scope)."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 7291,
+      "trimmed": {
+        "risks": 3
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791430744.7223942,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3229,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791430744.771989,
+      "packet_meta": {
+        "chars": 2490,
+        "est_tokens": 622,
+        "presented_tokens": 622,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "dbfd36a2eb4d1af890b661e80bdc1d00edac3e7f429f2c483cc99b472f6dd6dc"
+          },
+          "spec": {
+            "chars": 1708,
+            "est_tokens": 427,
+            "sha256": "3f6721a818e1ece6091f1ad060728567755fe353a3ff742fcfc817171c3f9dec"
+          },
+          "acceptance": {
+            "chars": 289,
+            "est_tokens": 72,
+            "sha256": "9f0f0ce5813e1aeea7bec4bb98d1d0021944cab38f19231db06a040194c80d03"
+          },
+          "scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "a6b2a75d89418d616d9c9f0cfd3d0b99bdeb5cf859563efeca8913fc8e734995"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "627e7facbf58f173ada1784d91f1ed6b67cdcab91e8b09081b3df97b0bb217ea"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "78d1eb99cea6",
+        "version": "78d1eb99cea6",
+        "candidate_known": false,
+        "base": "8f73d1ad2366",
+        "sources": "task@T-1723 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3229,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791430751.240769,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1724",
+      "claimed_at": 1791430751.236555
+    },
+    {
+      "ts": 1791430751.255487,
+      "account": "B"
+    },
+    {
+      "ts": 1791430782.292584,
+      "pid": 41507,
+      "account": "B"
+    },
+    {
+      "ts": 1791430842.764807,
+      "packet_meta": {
+        "chars": 2490,
+        "est_tokens": 622,
+        "presented_tokens": 622,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "dbfd36a2eb4d1af890b661e80bdc1d00edac3e7f429f2c483cc99b472f6dd6dc"
+          },
+          "spec": {
+            "chars": 1708,
+            "est_tokens": 427,
+            "sha256": "3f6721a818e1ece6091f1ad060728567755fe353a3ff742fcfc817171c3f9dec"
+          },
+          "acceptance": {
+            "chars": 289,
+            "est_tokens": 72,
+            "sha256": "9f0f0ce5813e1aeea7bec4bb98d1d0021944cab38f19231db06a040194c80d03"
+          },
+          "scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "a6b2a75d89418d616d9c9f0cfd3d0b99bdeb5cf859563efeca8913fc8e734995"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "627e7facbf58f173ada1784d91f1ed6b67cdcab91e8b09081b3df97b0bb217ea"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "78d1eb99cea6",
+        "version": "78d1eb99cea6",
+        "candidate_known": false,
+        "base": "8f73d1ad2366",
+        "sources": "task@T-1723 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3229,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "44c0ef26-2d30-463b-86bc-2f445eff80f0"
+      }
+    },
+    {
+      "ts": 1791430842.96651,
+      "packet_meta": {
+        "chars": 2490,
+        "est_tokens": 622,
+        "presented_tokens": 622,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "dbfd36a2eb4d1af890b661e80bdc1d00edac3e7f429f2c483cc99b472f6dd6dc"
+          },
+          "spec": {
+            "chars": 1708,
+            "est_tokens": 427,
+            "sha256": "3f6721a818e1ece6091f1ad060728567755fe353a3ff742fcfc817171c3f9dec"
+          },
+          "acceptance": {
+            "chars": 289,
+            "est_tokens": 72,
+            "sha256": "9f0f0ce5813e1aeea7bec4bb98d1d0021944cab38f19231db06a040194c80d03"
+          },
+          "scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "a6b2a75d89418d616d9c9f0cfd3d0b99bdeb5cf859563efeca8913fc8e734995"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "627e7facbf58f173ada1784d91f1ed6b67cdcab91e8b09081b3df97b0bb217ea"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "78d1eb99cea6",
+        "version": "78d1eb99cea6",
+        "candidate_known": false,
+        "base": "8f73d1ad2366",
+        "sources": "task@T-1723 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 3229,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "44c0ef26-2d30-463b-86bc-2f445eff80f0",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791430850.319514,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1519,
+            "issue": "Stamping gated_at at gate start collides with how gated_at is used today. It currently means 'gate finished, reviews or merge stamped'. Other code treats it as gated: the dependent 'imminent' check (~887), inflight_claude_dispatches (~510), running-set filtering (~860), merge_pressure.py:95, speculation.py:218/221, duration.py:33 and the scorecards. A running gate would make dependents look gated or merge-ready, and would skew duration and scorecard data. The spec gives no way to tell a gate in flight from a gate finished.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1807,
+            "issue": "sweep_leases already handles expired gated_at leases, and it reads pipeline['reviews_expected'] unconditionally. A start-time stamp has no reviews_expected, so an expired lease for a live or orphaned gate raises KeyError. If it were fixed to re-gate instead, it would also have to check for a live gate worker. A live gate often outlives the 900 s STAGE_LEASE_S, since gates run 20-60 min. The sweep would then take the already_merged, merge or _open_reviews path, or re-gate in parallel, while the first gate is still running. The spec says leases are 'reconciled' but does not name this branch, and sweep_leases is not mentioned at all.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1557,
+            "issue": "stamp() returns False when the stage is already set, and the current tail of gate() relies on stamp(gated_at, ...) at completion (held, red, timeout, green). If start-time stamping uses the same key, every completion stamp fails and results are silently dropped. The spec needs a separate in-flight marker (for example pipeline.gate_started_at plus lease), or clear_stage followed by stamp, and a rule for which one marks completion. The 'results post as before' criterion cannot be met otherwise.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/gate.py",
+            "line": 0,
+            "issue": "No code path is named for tracking live gates. The spec does not say how gate() knows which gates are running (in-process registry or bus fields), how 'never two gates on the same worktree' is enforced, or how max_parallel is counted when the daemon restarts. An in-memory set that is never cleared when a worker raises would leak a slot and stop gating for good. The worker needs try/finally release, and it needs to hold_failed on exceptions, as the current inline code does (hold_failed 'gated_error').",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 1521,
+            "issue": "The pre-gate work (gate_attempts increment, dirty check, already_merged git call, acceptance.missing_tests) and the whole post-gate tail (merged_into check, _hold_stale_high, _record_stale_check, _stale_rebase, report_merge/merge.merge, _open_reviews) are slow or git-heavy. The spec does not say which side of the thread boundary they run on. If the whole body goes into the worker, merge.merge and rebase run concurrently with tick()'s merge_reviewed and dispatch, with no serialization against them. Keep gate subprocess in the thread and post results from a tick-side reaper, or state clearly that the tail runs under bus.locked/merge serialization. Also, gate_attempts is bumped on each tick, so a task skipped for max_parallel would inflate it.",
+            "severity": "med"
+          }
+        ],
+        "suggested_spec_changes": [
+          "Introduce a separate in-flight marker (for example pipeline.gate_started_at with gate_started_at_lease, plus a gate_run_id or pid) instead of reusing gated_at. Keep gated_at meaning 'gate finished', so dependents, merge_pressure, speculation, duration and scorecard code keep their meaning. Alternatively, list every reader of gated_at that must ignore in-flight stamps, and add them to scope.",
+          "State exactly how sweep_leases treats an expired in-flight gate marker. If a live worker is registered, extend the lease or skip. If there is none (after a restart), clear the marker and any partial fields so gate() re-gates. Also fix the unconditional pipeline['reviews_expected'] read for gated_at stamps that never reached green. Name sweep_leases and the LEASED_STAGES handling as insertion points.",
+          "Define the completion path. The worker runs only gate.run_gate and returns the result. A tick-side reaper (or a locked block) applies the existing tail (merged_into check, stale-high hold, timeout, red, green, reviews or merge) with the same stamp and complete semantics. The tail must not run concurrently with merge_reviewed or dispatch without the bus lock or the existing merge serialization.",
+          "Specify the live-gate registry (module-level dict keyed by task id and worktree, guarded by a lock, released in finally). State the enforcement of max_parallel and same-worktree exclusion. Say that a task skipped because of the cap is not counted as an attempt (gate_attempts) and is retried on the next tick.",
+          "Put the max_parallel default and validation (int >= 1, fall back to 1 with a logged warning) in gate.settings(). State that pool.toml needs no change. Add a rollback switch, for example max_parallel = 0 or [gate].background = false for the old blocking behaviour.",
+          "Make the tests deterministic: gate the fake run_gate on threading.Event, assert tick returns while it is blocked, then release and join before checking the posted status. Add a case that a worker exception releases the slot and holds with gated_error. For test_restart_regates_orphaned_gate_lease, assert that an in-flight marker with no live registry entry is cleared and re-gated exactly once, and that a marker with a live worker is left alone.",
+          "Keep the daemon.gate.run_gate and daemon.gate.settings patch seam unchanged, and say why test_gate_timeout.py is touched (or drop it from scope)."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 7291,
+          "trimmed": {
+            "risks": 3
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791430850.3660128,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1519,
+          "issue": "Stamping gated_at at gate start collides with how gated_at is used today. It currently means 'gate finished, reviews or merge stamped'. Other code treats it as gated: the dependent 'imminent' check (~887), inflight_claude_dispatches (~510), running-set filtering (~860), merge_pressure.py:95, speculation.py:218/221, duration.py:33 and the scorecards. A running gate would make dependents look gated or merge-ready, and would skew duration and scorecard data. The spec gives no way to tell a gate in flight from a gate finished.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1807,
+          "issue": "sweep_leases already handles expired gated_at leases, and it reads pipeline['reviews_expected'] unconditionally. A start-time stamp has no reviews_expected, so an expired lease for a live or orphaned gate raises KeyError. If it were fixed to re-gate instead, it would also have to check for a live gate worker. A live gate often outlives the 900 s STAGE_LEASE_S, since gates run 20-60 min. The sweep would then take the already_merged, merge or _open_reviews path, or re-gate in parallel, while the first gate is still running. The spec says leases are 'reconciled' but does not name this branch, and sweep_leases is not mentioned at all.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1557,
+          "issue": "stamp() returns False when the stage is already set, and the current tail of gate() relies on stamp(gated_at, ...) at completion (held, red, timeout, green). If start-time stamping uses the same key, every completion stamp fails and results are silently dropped. The spec needs a separate in-flight marker (for example pipeline.gate_started_at plus lease), or clear_stage followed by stamp, and a rule for which one marks completion. The 'results post as before' criterion cannot be met otherwise.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/gate.py",
+          "line": 0,
+          "issue": "No code path is named for tracking live gates. The spec does not say how gate() knows which gates are running (in-process registry or bus fields), how 'never two gates on the same worktree' is enforced, or how max_parallel is counted when the daemon restarts. An in-memory set that is never cleared when a worker raises would leak a slot and stop gating for good. The worker needs try/finally release, and it needs to hold_failed on exceptions, as the current inline code does (hold_failed 'gated_error').",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1521,
+          "issue": "The pre-gate work (gate_attempts increment, dirty check, already_merged git call, acceptance.missing_tests) and the whole post-gate tail (merged_into check, _hold_stale_high, _record_stale_check, _stale_rebase, report_merge/merge.merge, _open_reviews) are slow or git-heavy. The spec does not say which side of the thread boundary they run on. If the whole body goes into the worker, merge.merge and rebase run concurrently with tick()'s merge_reviewed and dispatch, with no serialization against them. Keep gate subprocess in the thread and post results from a tick-side reaper, or state clearly that the tail runs under bus.locked/merge serialization. Also, gate_attempts is bumped on each tick, so a task skipped for max_parallel would inflate it.",
+          "severity": "med"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "issue": "Acceptance 'tick() returns within 5 s' is a wall-clock bound, a pattern already flaky in this repo (T-1710 replaced it with an event-based check). The test should block run_gate on a threading.Event and assert tick returns while it is blocked, then release it and join. Result-posting tests also need a deterministic join (the thread, or a reaper called by the test) rather than sleeps. The 'timeout' case must cover the double-timeout hold with gate_timeouts accounting, as today.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1608,
+          "issue": "gate.run_gate and gate.settings are patched onto the gate function object, and existing tests patch daemon.gate.run_gate. Any restructuring (a worker function, a new registry) must keep that seam and its call signature, or tests in test_daemon and test_gate_timeout will break with no clear cause. test_gate_timeout is in scope but the spec gives no reason for touching it.",
+          "severity": "low"
+        },
+        {
+          "path": "pool.toml",
+          "line": 0,
+          "issue": "[gate].max_parallel is a new config key, but pool.toml is not in scope, and gate.settings() in gate.py is said to own the [gate] defaults. The spec should say that the default lives in code (gate.settings) and that no pool.toml edit is required. It also needs a bound check (>=1, int), since 0 or a bad value would silently stop all gating. There is no rollback story, such as a way to restore serial in-line behaviour.",
+          "severity": "low"
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 2490,
+    "est_tokens": 622,
+    "presented_tokens": 622,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "dbfd36a2eb4d1af890b661e80bdc1d00edac3e7f429f2c483cc99b472f6dd6dc"
+      },
+      "spec": {
+        "chars": 1708,
+        "est_tokens": 427,
+        "sha256": "3f6721a818e1ece6091f1ad060728567755fe353a3ff742fcfc817171c3f9dec"
+      },
+      "acceptance": {
+        "chars": 289,
+        "est_tokens": 72,
+        "sha256": "9f0f0ce5813e1aeea7bec4bb98d1d0021944cab38f19231db06a040194c80d03"
+      },
+      "scope": {
+        "chars": 109,
+        "est_tokens": 27,
+        "sha256": "a6b2a75d89418d616d9c9f0cfd3d0b99bdeb5cf859563efeca8913fc8e734995"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 264,
+        "est_tokens": 66,
+        "sha256": "627e7facbf58f173ada1784d91f1ed6b67cdcab91e8b09081b3df97b0bb217ea"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "78d1eb99cea6",
+    "version": "78d1eb99cea6",
+    "candidate_known": false,
+    "base": "8f73d1ad2366",
+    "sources": "task@T-1723 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 3229,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "44c0ef26-2d30-463b-86bc-2f445eff80f0",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791430751.236555,
+  "account": "B",
+  "pid": 41507,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1519,
+      "issue": "Stamping gated_at at gate start collides with how gated_at is used today. It currently means 'gate finished, reviews or merge stamped'. Other code treats it as gated: the dependent 'imminent' check (~887), inflight_claude_dispatches (~510), running-set filtering (~860), merge_pressure.py:95, speculation.py:218/221, duration.py:33 and the scorecards. A running gate would make dependents look gated or merge-ready, and would skew duration and scorecard data. The spec gives no way to tell a gate in flight from a gate finished.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1807,
+      "issue": "sweep_leases already handles expired gated_at leases, and it reads pipeline['reviews_expected'] unconditionally. A start-time stamp has no reviews_expected, so an expired lease for a live or orphaned gate raises KeyError. If it were fixed to re-gate instead, it would also have to check for a live gate worker. A live gate often outlives the 900 s STAGE_LEASE_S, since gates run 20-60 min. The sweep would then take the already_merged, merge or _open_reviews path, or re-gate in parallel, while the first gate is still running. The spec says leases are 'reconciled' but does not name this branch, and sweep_leases is not mentioned at all.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1557,
+      "issue": "stamp() returns False when the stage is already set, and the current tail of gate() relies on stamp(gated_at, ...) at completion (held, red, timeout, green). If start-time stamping uses the same key, every completion stamp fails and results are silently dropped. The spec needs a separate in-flight marker (for example pipeline.gate_started_at plus lease), or clear_stage followed by stamp, and a rule for which one marks completion. The 'results post as before' criterion cannot be met otherwise.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/gate.py",
+      "line": 0,
+      "issue": "No code path is named for tracking live gates. The spec does not say how gate() knows which gates are running (in-process registry or bus fields), how 'never two gates on the same worktree' is enforced, or how max_parallel is counted when the daemon restarts. An in-memory set that is never cleared when a worker raises would leak a slot and stop gating for good. The worker needs try/finally release, and it needs to hold_failed on exceptions, as the current inline code does (hold_failed 'gated_error').",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1521,
+      "issue": "The pre-gate work (gate_attempts increment, dirty check, already_merged git call, acceptance.missing_tests) and the whole post-gate tail (merged_into check, _hold_stale_high, _record_stale_check, _stale_rebase, report_merge/merge.merge, _open_reviews) are slow or git-heavy. The spec does not say which side of the thread boundary they run on. If the whole body goes into the worker, merge.merge and rebase run concurrently with tick()'s merge_reviewed and dispatch, with no serialization against them. Keep gate subprocess in the thread and post results from a tick-side reaper, or state clearly that the tail runs under bus.locked/merge serialization. Also, gate_attempts is bumped on each tick, so a task skipped for max_parallel would inflate it.",
+      "severity": "med"
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "issue": "Acceptance 'tick() returns within 5 s' is a wall-clock bound, a pattern already flaky in this repo (T-1710 replaced it with an event-based check). The test should block run_gate on a threading.Event and assert tick returns while it is blocked, then release it and join. Result-posting tests also need a deterministic join (the thread, or a reaper called by the test) rather than sleeps. The 'timeout' case must cover the double-timeout hold with gate_timeouts accounting, as today.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1608,
+      "issue": "gate.run_gate and gate.settings are patched onto the gate function object, and existing tests patch daemon.gate.run_gate. Any restructuring (a worker function, a new registry) must keep that seam and its call signature, or tests in test_daemon and test_gate_timeout will break with no clear cause. test_gate_timeout is in scope but the spec gives no reason for touching it.",
+      "severity": "low"
+    },
+    {
+      "path": "pool.toml",
+      "line": 0,
+      "issue": "[gate].max_parallel is a new config key, but pool.toml is not in scope, and gate.settings() in gate.py is said to own the [gate] defaults. The spec should say that the default lives in code (gate.settings) and that no pool.toml edit is required. It also needs a bound check (>=1, int), since 0 or a bad value would silently stop all gating. There is no rollback story, such as a way to restore serial in-line behaviour.",
+      "severity": "low"
+    }
+  ]
+}

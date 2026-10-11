@@ -1,0 +1,119 @@
+{
+  "id": "T-0424",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H7 fix round 4: rerun ids are validated as test node ids (no leading dash, a .py path or ::) before becoming argv, and the rerun uses the worktree's own runner via uv run --project as tests-green.sh does, converting node ids to unittest form when needed (review T-0420)",
+  "spec": "STEP 0: the worktree must contain b9c2972, fb696ce, 4a605cc, a398092 and 95a5553 (T-0364, T-0412, T-0414, T-0418) in git log; never drop or amend them.\nReview T-0420 on T-0418, both findings to address:\n1. (high) orchestrator/daemon.py:153 _test_ids extracts whitespace-free tokens from untrusted failure text and this text now reaches subprocess.run(runner, ..., *ids); a crafted line such as --rootdir=/ becomes a runner argument. Fix: validate each id with one strict pattern before use: it must match a path ending in .py optionally followed by ::name segments (letters, digits, underscore, dots, brackets for parametrised ids), or a dotted module.Class.test name; anything starting with a dash, containing whitespace, shell metacharacters or path traversal (..) is dropped and counted in resume_hint.rejected_ids. Test: tests/test_daemon.py::test_rerun_rejects_argument_like_ids (a failure line with --rootdir=/ and ../x.py::t yields no rerun argv for those, they are recorded as rejected).\n2. (med) orchestrator/daemon.py:123 _flaky_rerun_command chooses pytest vs unittest with importlib.util.find_spec against the daemon's interpreter, while the gate resolved the runner inside the worktree via uv run --project .; when they diverge the rerun gets pytest node ids but runs python -m unittest with them and always errors, so a flaky test is misclassified as code_defect forever. Fix: build the rerun exactly as tests-green.sh does for the worktree: uv run --project <worktree> python -c \"import pytest\" decides; with pytest use uv run --project <worktree> pytest -q -x <ids>; without it convert each node id path/to/test_x.py::Class::name (or ::name) into the unittest dotted form (path.to.test_x.Class.name) and run uv run --project <worktree> python -m unittest <dotted ids>; ids that cannot be converted are treated as not rerunnable (kind stays unknown, recorded). Tests: tests/test_daemon.py::test_rerun_runner_resolved_in_worktree_not_daemon_interpreter (find_spec in the daemon says pytest, the worktree probe says no: unittest form is used), ::test_node_id_to_unittest_conversion.\nKeep every T-0364 lineage test green (adapt test_flaky_rerun_then_escalate and test_flaky_rerun_max_two_reruns_twice_then_escalates only where the argv shape changes, keeping their assertions on ids, cwd and timeout). Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0422"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 95a5553, a398092, 4a605cc, fb696ce and b9c2972 below your commit",
+    "tests/test_daemon.py::test_rerun_rejects_argument_like_ids, ::test_rerun_runner_resolved_in_worktree_not_daemon_interpreter and ::test_node_id_to_unittest_conversion pass",
+    "grep shows the rerun argv is built only from validated ids and the runner probe runs inside the worktree via uv run --project",
+    "tests/test_daemon.py::test_flaky_rerun_then_escalate, ::test_flaky_rerun_max_two_reruns_twice_then_escalates, ::test_flaky_rerun_has_timeout_and_timeout_is_not_flaky, ::test_unchanged_failure_signature_escalates_instead_of_new_round, ::test_changed_signature_gets_a_round, ::test_failure_kind_environment_escalates_without_round, ::test_quota_hold_creates_no_round still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0424",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 163,
+        "issue": "The pytest-availability probe (`uv run --project <worktree> python -c \"import pytest\"`) is called inside `_flaky_rerun_command`, invoked from the same try/except in `failure_kind` that bounds the actual rerun with `timeout=rerun_timeout`. The probe itself has no timeout, so a hang in `uv`/venv resolution for that worktree blocks the single-threaded daemon loop indefinitely, with no TimeoutExpired ever raised to trigger the existing handler.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 180,
+        "issue": "The `environment` marker list includes the bare substring \"tools/\", which isn't used as an environment-error convention anywhere else in the repo. Any real test failure whose traceback happens to mention a path containing `tools/` gets misclassified as `environment` instead of `code_defect`, causing `auto_fix_round` to skip the automatic fix round and escalate straight to a human instead.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 6,
+        "issue": "`importlib.util` is imported but never referenced anywhere in the file (only `hashlib` from that added pair is used).",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789913607.349876,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0424",
+      "claimed_at": 1789913607.349281
+    },
+    {
+      "ts": 1789913607.351983,
+      "account": "B"
+    },
+    {
+      "ts": 1789913607.39469,
+      "pid": 77263,
+      "account": "B"
+    },
+    {
+      "ts": 1789913875.062999,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 163,
+            "issue": "The pytest-availability probe (`uv run --project <worktree> python -c \"import pytest\"`) is called inside `_flaky_rerun_command`, invoked from the same try/except in `failure_kind` that bounds the actual rerun with `timeout=rerun_timeout`. The probe itself has no timeout, so a hang in `uv`/venv resolution for that worktree blocks the single-threaded daemon loop indefinitely, with no TimeoutExpired ever raised to trigger the existing handler.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 180,
+            "issue": "The `environment` marker list includes the bare substring \"tools/\", which isn't used as an environment-error convention anywhere else in the repo. Any real test failure whose traceback happens to mention a path containing `tools/` gets misclassified as `environment` instead of `code_defect`, causing `auto_fix_round` to skip the automatic fix round and escalate straight to a human instead.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 6,
+            "issue": "`importlib.util` is imported but never referenced anywhere in the file (only `hashlib` from that added pair is used).",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789913875.064696,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789913607.349281,
+  "account": "B",
+  "pid": 77263,
+  "review_verdict": "request_changes"
+}

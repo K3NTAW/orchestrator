@@ -1,0 +1,143 @@
+{
+  "id": "T-0396",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 2,
+  "title": "H5b fix round 2: the re-spawn age check reads the task's own events instead of a global bus.events page (which goes blind after 10,000 events), and _requeue clears respawned_at inside clear_stage's single update (review T-0394)",
+  "spec": "STEP 0: the worktree must contain ec54196, 3164bed and f7df4d7 (T-0363, T-0393) in git log; never drop or amend them.\nReview T-0394 on T-0393, both findings to address:\n1. (high) orchestrator/daemon.py:572 the re-spawn check calls bus.events(limit=10000, task_ids=[task id]), a global cursor page (seq greater than 0, limit 10000) filtered afterwards, so once the bus holds more than 10,000 events any newer review or spec_review has zero matching rows, created_at falls back to now, and the unclaimed-task recovery never fires. Use the task record's own events list (task[\"events\"], which bus.get returns and which carries claimed/status/requeue entries with ts) to find the creation time (first event ts, or the task file's first event) and the most recent \"process died; requeued\" event; never page the global event log for a per-task question. Test: tests/test_daemon.py::test_respawn_age_uses_task_events_not_global_page (seed the bus with more than 10,000 events, then a fresh unclaimed spec_review older than respawn_after_s is still re-spawned).\n2. (low) orchestrator/daemon.py:341 _requeue performs two locked update round trips (clear_stage's update, then a second update to pop respawned_at). Fold the respawned_at clear into clear_stage's single pipeline update (one event per requeue). Test: assert in the existing requeue test that one update event is appended, or add test_requeue_appends_one_event.\nKeep the T-0363 and T-0393 tests green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0393",
+    "T-0394"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f7df4d7, 3164bed and ec54196 below your commit",
+    "tests/test_daemon.py::test_respawn_age_uses_task_events_not_global_page passes and grep shows no bus.events call in the re-spawn path",
+    "tests/test_daemon.py::test_requeue_appends_one_event passes (or the existing requeue test asserts a single update event)",
+    "tests/test_daemon.py::test_dispatch_respawns_requeued_review_once, ::test_dispatch_respawns_unclaimed_spec_review_after_delay, ::test_respawn_ignores_unrelated_pipeline_keys still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0393",
+    "task_class": "reliability"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0396",
+  "codex_thread": "01a0bed1-007c-7ea1-8a34-fefe63a66b91",
+  "result": {
+    "summary": "Summary: Fixed review respawn age to use task-local events/file time and collapsed requeue into one update event.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py`\n\nCommit: `a553af1` \u2014 ancestors retained: `f7df4d7`, `3164bed`, `ec54196`.\n\nFailures-only test output: none. Focused daemon tests passed; `.claude/hooks/tests-green.sh` ran with no failure output.",
+    "executed_by": "codex:terra",
+    "thread": "01a0bed1-007c-7ea1-8a34-fefe63a66b91",
+    "usage": {
+      "input_tokens": 1096420,
+      "cached_input_tokens": 1044224,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10328,
+      "reasoning_output_tokens": 5562
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789907761.958884,
+      "pipeline": {
+        "dispatched_at": 1789907761.958833
+      }
+    },
+    {
+      "ts": 1789907763.281522,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0396",
+      "claimed_at": 1789907763.281136
+    },
+    {
+      "ts": 1789907763.282733,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789908475.5133061,
+      "codex_thread": "01a0bed1-007c-7ea1-8a34-fefe63a66b91"
+    },
+    {
+      "ts": 1789908475.51705,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Fixed review respawn age to use task-local events/file time and collapsed requeue into one update event.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py`\n\nCommit: `a553af1` \u2014 ancestors retained: `f7df4d7`, `3164bed`, `ec54196`.\n\nFailures-only test output: none. Focused daemon tests passed; `.claude/hooks/tests-green.sh` ran with no failure output.",
+        "executed_by": "codex:terra",
+        "thread": "01a0bed1-007c-7ea1-8a34-fefe63a66b91",
+        "usage": {
+          "input_tokens": 1096420,
+          "cached_input_tokens": 1044224,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10328,
+          "reasoning_output_tokens": 5562
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789908573.8057091,
+      "pipeline": {
+        "dispatched_at": 1789907761.958833,
+        "gated_at": 1789908573.80561,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789908765.803498,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789908782.6217,
+      "pipeline": {
+        "dispatched_at": 1789907761.958833,
+        "gated_at": 1789908573.80561,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789908782.62159
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0399 (request_changes)"
+    },
+    {
+      "ts": 1789910309.845609,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0405 9b058ab",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789907761.958833,
+    "gated_at": 1789908573.80561,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789908782.62159
+  },
+  "claimed_at": 1789907763.281136,
+  "rounds": 0,
+  "executor": "terra",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0405 9b058ab"
+}

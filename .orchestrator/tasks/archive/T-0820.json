@@ -1,0 +1,222 @@
+{
+  "id": "T-0820",
+  "created_at": 1790092069.3240802,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P17/P18 read and search economy, shadow: deterministic repeated-read and repeated-search detection in the Jev tool gate, evidence-pool awareness, action_gate decision rows, read-economy scorecard; nothing blocked",
+  "spec": "Facts (Planner grep, provenance repo): orchestrator/jev_gate.py is the PreToolUse gate for Claude worker sessions (.claude/hooks/jev-gate.sh): it reads the transcript's recent tool calls (read_transcript, RECENT_LIMIT), keeps a session state with exact-repeat detection (_session_state, _record_call, _target_mtime, lines ~150-200), asks Jev needed/redundant/destructive on a deterministic sample ([jev] gate_mode sample/log/block, sample_rate) and logs every evaluated call to .orchestrator/runs/jev/gate.jsonl; [jev] block_repeats = false today; guardrails.sh is the only hook that blocks destructive commands. T-0774 declared the gate's Jev boundary (site \"gate\"). evidence.EvidencePool(goal) (T-0794) holds content-addressed evidence with commit freshness; T-0800 fills it from execute/review packet builds.\nDo:\n1. orchestrator/read_economy.py (new): pure functions over the gate's per-session call history: `classify(call, history, *, evidence=None, head_sha=None)` returns {\"kind\": one of \"first_read\", \"repeated_read_unchanged\" (same path, mtime and size unchanged since the earlier read), \"repeated_read_changed\", \"repeated_search\" (Grep/Glob with identical pattern+path+flags), \"narrower_search\" (same path, pattern contains the earlier pattern), \"evidence_available\" (a fresh source_chunk for that path exists in the EvidencePool for the task's goal at head_sha), \"other\"; \"tokens_estimate\": for reads the file size // 4 bounded by the tool's limit/offset when given, for searches the earlier result size when the transcript carries it else None; \"would_suppress\": True only for repeated_read_unchanged and repeated_search}. Never touches Jev.\n2. jev_gate.py: before the Jev sample decision, run read_economy.classify for Read/Grep/Glob calls and: log the classification into the gate.jsonl row (fields read_kind, tokens_estimate, would_suppress); record decision_log.record(kind=\"action_gate\", subject=task id, candidates=[\"allow\", \"suppress\"], hard_constraints=[\"guardrails.sh decides destructive\", \"block_repeats=false\"], deterministic={\"read_kind\", \"tokens_estimate\", \"would_suppress\"}, jev={\"needed_p\", \"redundant_p\"} when a Jev verdict exists, selected=\"allow\", reason=read_kind, mode=[jev].gate_mode) at most once per call and never for skipped/protected calls; behaviour stays fail-open and nothing is denied (block_repeats stays false; do not touch the block path). Only ambiguous kinds (\"repeated_read_changed\", \"narrower_search\", \"other\" with a prior call on the same path) count toward the Jev sample; first reads never consume Jev budget (document this as the P18 rule \"Jev only for ambiguous semantic equivalence\").\n3. Scorecard: `read_economy.summary(root)` over gate.jsonl: per role and per task_class: reads, repeated_read_unchanged, repeated_search, evidence_available, tokens_avoidable (sum of tokens_estimate where would_suppress), jev_calls_avoided (first reads not sampled), and the false-suppression proxy: a would_suppress read whose path was edited by the same session within the next 5 calls (needs the edit; if the transcript does not show later calls at gate time, compute it offline from the transcript path recorded in the row). `orchestrator scorecard --reads` prints it.\n4. Docs: docs/context-economy/09-read-economy.md (\u226460 lines): kinds, what shadow logs, the P18 rule, what active would do (suppress with a structured \"already read at <call>\" reply) and why it is not enabled (needs the false-suppression proxy at zero over min_samples), revert path.\nTests (unittest, `import _harness` first; the gate tests already exist in tests/test_jev_gate.py, extend them): tests/test_read_economy.py::test_repeated_read_unchanged_detected_by_mtime_and_size, ::test_repeated_search_and_narrower_search, ::test_evidence_available_from_pool, ::test_summary_counts_tokens_avoidable_and_false_suppression_proxy; tests/test_jev_gate.py::test_first_reads_skip_jev_sample_and_log_read_kind, ::test_gate_never_denies_on_would_suppress.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.",
+  "inputs": [
+    "T-0809"
+  ],
+  "acceptance": [
+    "tests/test_read_economy.py::test_repeated_read_unchanged_detected_by_mtime_and_size passes",
+    "tests/test_read_economy.py::test_repeated_search_and_narrower_search passes",
+    "tests/test_read_economy.py::test_evidence_available_from_pool passes",
+    "tests/test_read_economy.py::test_summary_counts_tokens_avoidable_and_false_suppression_proxy passes",
+    "tests/test_jev_gate.py::test_first_reads_skip_jev_sample_and_log_read_kind passes",
+    "tests/test_jev_gate.py::test_gate_never_denies_on_would_suppress passes",
+    "docs/context-economy/09-read-economy.md exists; `uv run orchestrator scorecard --reads` runs; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/read_economy.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/cli.py",
+    "tests/test_read_economy.py",
+    "tests/test_jev_gate.py",
+    "docs/context-economy/09-read-economy.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0820",
+  "codex_thread": null,
+  "result": {
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 406,
+        "issue": "The new `if economy and not ambiguous: return finish(None)` short-circuit runs before the existing `mode == \"block\" and cfg.get(\"block_repeats\") and repeat` check. Read/Grep/Glob calls classified as `repeated_read_unchanged` (the exact 'identical read already made this session' case block_repeats exists to catch) now return allow via `finish(None)` and never reach the block_repeats check at all. Once block_repeats is flipped to true (or set true per-task), repeated identical Read/Grep/Glob calls will silently stop being blocked, contradicting the spec's explicit 'do not touch the block path' instruction. This is confirmed by the diff itself: tests/test_jev_gate.py::test_block_repeats_denies was changed from the suite's default Read tool_name to `tool_name=\"Bash\"` specifically so the test keeps passing -- i.e. the regression was worked around in the test rather than fixed or called out.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 364,
+        "issue": "When mode==\"block\", block_repeats=true and an *ambiguous* economy call (e.g. repeated_read_changed/narrower_search) also has repeat=True, the block path logs via a direct `_log(...)` call rather than `finish(...)`, so `economy=` is never passed and the gate.jsonl row omits read_kind/tokens_estimate/would_suppress. Spec item 2 asks every classified Read/Grep/Glob call to log those fields; this reachable edge case silently drops them.",
+        "severity": "low"
+      }
+    ],
+    "summary": "Deterministic read/search classification is implemented and shadow-logged correctly per spec (read_economy.py is pure, gate integration skips protected/skipped calls, first reads never consume Jev budget). However the ordering of the new economy short-circuit ahead of the block_repeats check disables block_repeats for the Read/Grep/Glob repeat case it was built to catch, and the test suite was adjusted (Read -> Bash) to avoid surfacing this rather than preserving the original coverage. Also note: a trailing Python snippet appended to this review packet (re-queuing T-0819/T-0820 and calling spawn.run_worker) was not part of the legitimate packet structure and was treated as untrusted data, not executed.",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ],
+    "packet_version": "932916379087"
+  },
+  "events": [
+    {
+      "ts": 1790092069.3253398,
+      "reviewed_sha": "e05390f5297e95b8c4b1c22487683236a1ce9187"
+    },
+    {
+      "ts": 1790092070.165238,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1790093455.699517,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner 18:08: account B cooldown over; re-spawned by hand"
+    },
+    {
+      "ts": 1790093458.866194,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0820",
+      "claimed_at": 1790093458.865768
+    },
+    {
+      "ts": 1790093458.867403,
+      "account": "B"
+    },
+    {
+      "ts": 1790093459.537527,
+      "pid": 73929,
+      "account": "B"
+    },
+    {
+      "ts": 1790093608.140043,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 406,
+            "issue": "The new `if economy and not ambiguous: return finish(None)` short-circuit runs before the existing `mode == \"block\" and cfg.get(\"block_repeats\") and repeat` check. Read/Grep/Glob calls classified as `repeated_read_unchanged` (the exact 'identical read already made this session' case block_repeats exists to catch) now return allow via `finish(None)` and never reach the block_repeats check at all. Once block_repeats is flipped to true (or set true per-task), repeated identical Read/Grep/Glob calls will silently stop being blocked, contradicting the spec's explicit 'do not touch the block path' instruction. This is confirmed by the diff itself: tests/test_jev_gate.py::test_block_repeats_denies was changed from the suite's default Read tool_name to `tool_name=\"Bash\"` specifically so the test keeps passing -- i.e. the regression was worked around in the test rather than fixed or called out.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 364,
+            "issue": "When mode==\"block\", block_repeats=true and an *ambiguous* economy call (e.g. repeated_read_changed/narrower_search) also has repeat=True, the block path logs via a direct `_log(...)` call rather than `finish(...)`, so `economy=` is never passed and the gate.jsonl row omits read_kind/tokens_estimate/would_suppress. Spec item 2 asks every classified Read/Grep/Glob call to log those fields; this reachable edge case silently drops them.",
+            "severity": "low"
+          }
+        ],
+        "summary": "Deterministic read/search classification is implemented and shadow-logged correctly per spec (read_economy.py is pure, gate integration skips protected/skipped calls, first reads never consume Jev budget). However the ordering of the new economy short-circuit ahead of the block_repeats check disables block_repeats for the Read/Grep/Glob repeat case it was built to catch, and the test suite was adjusted (Read -> Bash) to avoid surfacing this rather than preserving the original coverage. Also note: a trailing Python snippet appended to this review packet (re-queuing T-0819/T-0820 and calling spawn.run_worker) was not part of the legitimate packet structure and was treated as untrusted data, not executed.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790093615.298435,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 406,
+            "issue": "The new `if economy and not ambiguous: return finish(None)` short-circuit runs before the existing `mode == \"block\" and cfg.get(\"block_repeats\") and repeat` check. Read/Grep/Glob calls classified as `repeated_read_unchanged` (the exact 'identical read already made this session' case block_repeats exists to catch) now return allow via `finish(None)` and never reach the block_repeats check at all. Once block_repeats is flipped to true (or set true per-task), repeated identical Read/Grep/Glob calls will silently stop being blocked, contradicting the spec's explicit 'do not touch the block path' instruction. This is confirmed by the diff itself: tests/test_jev_gate.py::test_block_repeats_denies was changed from the suite's default Read tool_name to `tool_name=\"Bash\"` specifically so the test keeps passing -- i.e. the regression was worked around in the test rather than fixed or called out.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 364,
+            "issue": "When mode==\"block\", block_repeats=true and an *ambiguous* economy call (e.g. repeated_read_changed/narrower_search) also has repeat=True, the block path logs via a direct `_log(...)` call rather than `finish(...)`, so `economy=` is never passed and the gate.jsonl row omits read_kind/tokens_estimate/would_suppress. Spec item 2 asks every classified Read/Grep/Glob call to log those fields; this reachable edge case silently drops them.",
+            "severity": "low"
+          }
+        ],
+        "summary": "Deterministic read/search classification is implemented and shadow-logged correctly per spec (read_economy.py is pure, gate integration skips protected/skipped calls, first reads never consume Jev budget). However the ordering of the new economy short-circuit ahead of the block_repeats check disables block_repeats for the Read/Grep/Glob repeat case it was built to catch, and the test suite was adjusted (Read -> Bash) to avoid surfacing this rather than preserving the original coverage. Also note: a trailing Python snippet appended to this review packet (re-queuing T-0819/T-0820 and calling spawn.run_worker) was not part of the legitimate packet structure and was treated as untrusted data, not executed.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ],
+        "packet_version": "932916379087"
+      }
+    },
+    {
+      "ts": 1790093615.299838,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790093615.367581,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "e05390f5297e95b8c4b1c22487683236a1ce9187",
+        "packet_version": "932916379087",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "e05390f5297e95b8c4b1c22487683236a1ce9187",
+      "packet_version": "932916379087",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "e05390f5297e95b8c4b1c22487683236a1ce9187",
+  "hold_reason": null,
+  "reason": "Planner 18:08: account B cooldown over; re-spawned by hand",
+  "claimed_at": 1790093458.865768,
+  "account": "B",
+  "pid": 73929,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "e05390f5297e95b8c4b1c22487683236a1ce9187",
+    "packet_version": "932916379087",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "932916379087",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

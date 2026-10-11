@@ -1,0 +1,102 @@
+{
+  "id": "T-0071",
+  "parent": "T-0065",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "review: Add `orchestrator install <target>`: scaffold a target repo with the committed .orchestrator and .claude files and a .mcp.json rooted at ORCH_ROOT=target",
+  "spec": "Why: ROOT is ORCH_ROOT or this repo (orchestrator/__init__.py:5); worktrees (spawn.py:57 ensure_worktree), hooks (.claude/hooks via _lib.sh orch_root), prompts (STATE/prompts), bus and merge all hang off it, and `git worktree add` only carries committed files. To run goals on another repo (first: /Users/k3ntaw/code/kgpt) that repo needs a committed scaffold. Implement `orchestrator/install.py` with `install(target: Path, orch_repo: Path = REPO_OF_THIS_PACKAGE) -> list[str]` (lines \"created ...\", \"kept ...\", \"updated ...\") and wire `install <target>` into cli.py (argparse, next to merge).\nBehaviour: target must be a git toplevel, else exit 2 with a message. Create/refresh: `.orchestrator/pool.toml` (copy, kept if present), `.orchestrator/prompts/*` (copy, always updated), `.orchestrator/protected-paths.txt` (copy; rewrite the three lines under \"the guardrails themselves\" to the target's own .claude/hooks, .claude/settings.json and protected-paths.txt paths), `.orchestrator/memory/{decisions,gotchas,model-notes,architecture}.md` (header-only files, kept if present), `.orchestrator/plan.md` (empty checkpoint template, kept), `.orchestrator/tasks/.gitkeep`, `.claude/hooks/*` (copy, executable bits preserved, always updated), `.claude/settings.json` (copy; if the target already has one, write `.claude/settings.orchestrator.json` instead and print a note), `.claude/skills/**` and `skills/**` (copy, always updated), every `.mcp*.json` of the orchestrator rewritten so each `uv run` command becomes `uv run --project <orch_repo> ...` and gets `\"env\": {\"ORCH_ROOT\": \"<target>\"}` (github server entry copied unchanged), and append the missing lines of this repo's .gitignore ignore set (wt/, .orchestrator/bus.sqlite*, .orchestrator/runs/, .orchestrator/pool_state.json, .orchestrator/merge.lock, .orchestrator/bus.lock, .orchestrator/daemon.lock, graphify-out/, .mcp.json) to the target .gitignore without duplicating existing lines. If the target has a Makefile with `test:`, `lint:` and `typecheck:` targets, write an executable `.orchestrator/tests.sh` (kept if present) that runs `set -euo pipefail; make lint; make typecheck; make test` and, when clients/web/package.json has a typecheck script, `(cd clients/web && npm run typecheck)`. Idempotent: a second run reports only \"kept\"/\"updated\", never overwrites plan.md, memory, pool.toml, tests.sh or an existing settings.json. Print the list and finish with the two next steps for the human: commit the scaffold in the target, and start the Planner with ORCH_ROOT=<target>. Document the command in README.md \"Use on a project\" (replace the current two-sentence paragraph). No new dependencies.",
+  "inputs": [
+    "T-0070"
+  ],
+  "acceptance": [
+    "tests/test_install.py: installing into a scratch_repo target creates .orchestrator/{pool.toml,prompts,protected-paths.txt,memory,plan.md,tasks}, .claude/hooks (executable), .claude/settings.json, .claude/skills, skills, and a .mcp.json whose orchestrator and bus entries use `uv run --project <orch_repo>` and env ORCH_ROOT equal to the target",
+    "tests/test_install.py: a target with a Makefile containing test/lint/typecheck targets gets an executable .orchestrator/tests.sh; one without gets none; a target with an existing .claude/settings.json keeps it and gets .claude/settings.orchestrator.json",
+    "tests/test_install.py: a second install run leaves plan.md, pool.toml and memory contents byte-identical and its report contains no 'created' line; protected-paths.txt in the target names the target's own hooks path; .gitignore gains the ignore lines exactly once",
+    "`uv run orchestrator install /nonexistent` and installing into a non-git directory exit non-zero with a one-line message",
+    "`uv run python -m unittest discover -q tests` is green"
+  ],
+  "scope": [
+    "orchestrator/install.py",
+    "orchestrator/cli.py",
+    "tests/test_install.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0071",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/install.py",
+        "line": 106,
+        "issue": "copy_tree_always uses os.walk(..., followlinks=True) with no cycle protection; a symlink loop inside any copied tree (.orchestrator/prompts, .claude/hooks, .claude/skills, skills) would hang/crash install. Not triggered by current repo contents or tests, low severity, not blocking.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789730339.471024,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0071",
+      "claimed_at": 1789730339.4707289
+    },
+    {
+      "ts": 1789730339.5106502,
+      "pid": 53451,
+      "account": "A"
+    },
+    {
+      "ts": 1789730446.429908,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/install.py",
+            "line": 106,
+            "issue": "copy_tree_always uses os.walk(..., followlinks=True) with no cycle protection; a symlink loop inside any copied tree (.orchestrator/prompts, .claude/hooks, .claude/skills, skills) would hang/crash install. Not triggered by current repo contents or tests, low severity, not blocking.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789730446.43292,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789730459.340968,
+      "pipeline": {
+        "merged_at": 1789730459.340906
+      }
+    }
+  ],
+  "claimed_at": 1789730339.4707289,
+  "pid": 53451,
+  "account": "A",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789730459.340906
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "id": "T-0017",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "B2: executor.py routes through Pool.pick_executor; per-executor -m, cooldowns via quota_group; log_run gains executor + complexity; token field normalized",
+  "spec": "Why: after B1 (T-0016) the pool knows several codex executors, but executor.py still reads pool.cfg[\"codex\"][\"model\"] (executor.py:81) and cools a single Codex singleton (executor.py:55). Scouts T-0012/T-0013 mapped the call sites. Depends on B1 being merged into goal/T-0005 (this task's worktree is created from that branch).\n\nWhat (\u22644 files: orchestrator/executor.py, orchestrator/spawn.py, orchestrator/bus.py, tests/test_orchestrator.py):\n1. executor.start(task_id, prompt): `ex = pool.pick_executor(\"execute\", t[\"complexity\"], scores=pool.scores())` where `Pool.scores()` returns {} if not defined yet (use getattr with a default so B3 can add it); if ex is None \u2192 existing _exhausted path. Record `bus.update(task_id, executor=ex.id, tier=ex.id)`; increment ex.running/day_tasks instead of pool.codex.*; pass `-m ex.model`. executor.reply must reuse `t[\"executor\"]` (same thread, same model) \u2014 never re-pick mid-task.\n2. executor._run: on a usage-limit error call `pool.cooldown_executor(ex.id, secs, reason)` (cools the quota_group) instead of setting pool.codex.cooldown_until; keep the legacy pool.codex fields updated too so status()[\"codex\"] stays meaningful. bus.log_run everywhere in executor.py and spawn.py gains `executor=<id or \"claude:\"+tier>` and `complexity=t[\"complexity\"]`. Normalize the Codex token key: write `cache_read_input_tokens` (from Codex's cached_input_tokens) so cli cost aggregation is uniform; keep the old key too for one release.\n3. spawn.run_worker execute path (Claude fallback): bus.update(task_id, executor=f\"claude:{tier}\") and the same log fields.\n4. tests: (a) with the TMP pool.toml, `executor.start` on a complexity-3 task uses a codex executor whose model is one of the four ids \u2014 monkeypatch `executor._run` to capture args and assert \"-m\" is followed by that model; (b) a fake usage-limit result (patch _run to return the held shape / or call the cooldown path directly) cools all chatgpt-group executors and `pool.codex_available()` becomes False; (c) run log line contains executor and complexity. Keep the existing Executor tests green (adapt only if they assert the singleton).\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"executor: route via pick_executor, per-executor -m and quota-group cooldowns, executor+complexity in run logs\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the three new executor tests",
+    "grep shows no remaining read of pool.cfg[\"codex\"][\"model\"] in executor.py",
+    "a usage-limit hit on one codex executor cools every executor in its quota_group (test b)",
+    "runs jsonl entries written by executor.py and spawn.py contain executor and complexity",
+    "git diff --stat limited to orchestrator/executor.py, orchestrator/spawn.py, orchestrator/bus.py, tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0017",
+  "codex_thread": null,
+  "result": {
+    "summary": "Done. Committed as `a01dc3c` on `task/T-0017`.\n\n## Summary\n\n- `executor.start` picks its row with `pool.pick_executor(\"execute\", t[\"complexity\"], scores=getattr(pool, \"scores\", dict)())` and passes `-m ex.model`. `ex is None` (or a non-codex provider) falls through to the existing `_exhausted` path. It records `executor=ex.id, tier=ex.id` on the bus and bumps `ex.day_tasks` / `ex.running`, with `pool.codex.*` still mirrored so `status()[\"codex\"]` stays meaningful until B3 drops it.\n- `executor.reply` reuses `t[\"executor\"]` (falling back to `pool._legacy_executor()` for tasks created before this change) \u2014 same thread, same model, no re-pick mid-task.\n- `_run` on a usage-limit error calls `pool.cooldown_executor(ex.id, secs, \"codex usage limit\")`, which cools every enabled member of the quota group, and still sets the legacy `pool.codex.cooldown_until`.\n- All `bus.log_run` calls in `executor.py` and `spawn.py` carry `executor` and `complexity`; `tier` on Codex runs is now the executor id instead of the hardcoded `\"astra\"`. New `_tokens()` writes `cache_read_input_tokens` alongside Codex's `cached_input_tokens` so `cli.cost` sums one key across providers.\n- `spawn.run_worker`'s execute path sets `executor=\"claude:<tier>\"` before rendering the prompt, so the fallback run's log lines say which tier took it.\n\nAcceptance checks: no remaining read of `pool.cfg[\"codex\"][\"model\"]` in `executor.py` (the two `cfg[\"codex\"]` hits are `dangerous_full_access` and `on_exhausted`); `git diff --stat` limited to the four scoped files.\n\n## Files changed\n`orchestrator/executor.py`, `orchestrator/spawn.py`, `orchestrator/bus.py` (docstrings for the new `update`/`log_run` fields), `tests/test_orchestrator.py`.\n\n## Tests\n`uv run python -m unittest tests/test_orchestrator.py` \u2014 33 tests, OK, no failures (ran twice; state is clean across runs). `.claude/hooks/tests-green.sh` exits 0. Three new tests in `Executor`: `test_start_routes_through_pick_executor`, `test_usage_limit_cools_the_whole_quota_group`, `test_run_log_carries_executor_and_complexity`. Existing Executor tests needed no changes.\n\nOne note: the spec said to run `scripts/tests_green.sh`, which doesn't exist in this repo \u2014 the equivalent is `.claude/hooks/tests-green.sh`, which I ran.",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789658630.279548,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789658630.2856052,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0017",
+      "claimed_at": 1789658630.285496
+    },
+    {
+      "ts": 1789658630.293995,
+      "pid": 30004,
+      "account": "A"
+    },
+    {
+      "ts": 1789658860.617588,
+      "status": "done",
+      "result": {
+        "summary": "Done. Committed as `a01dc3c` on `task/T-0017`.\n\n## Summary\n\n- `executor.start` picks its row with `pool.pick_executor(\"execute\", t[\"complexity\"], scores=getattr(pool, \"scores\", dict)())` and passes `-m ex.model`. `ex is None` (or a non-codex provider) falls through to the existing `_exhausted` path. It records `executor=ex.id, tier=ex.id` on the bus and bumps `ex.day_tasks` / `ex.running`, with `pool.codex.*` still mirrored so `status()[\"codex\"]` stays meaningful until B3 drops it.\n- `executor.reply` reuses `t[\"executor\"]` (falling back to `pool._legacy_executor()` for tasks created before this change) \u2014 same thread, same model, no re-pick mid-task.\n- `_run` on a usage-limit error calls `pool.cooldown_executor(ex.id, secs, \"codex usage limit\")`, which cools every enabled member of the quota group, and still sets the legacy `pool.codex.cooldown_until`.\n- All `bus.log_run` calls in `executor.py` and `spawn.py` carry `executor` and `complexity`; `tier` on Codex runs is now the executor id instead of the hardcoded `\"astra\"`. New `_tokens()` writes `cache_read_input_tokens` alongside Codex's `cached_input_tokens` so `cli.cost` sums one key across providers.\n- `spawn.run_worker`'s execute path sets `executor=\"claude:<tier>\"` before rendering the prompt, so the fallback run's log lines say which tier took it.\n\nAcceptance checks: no remaining read of `pool.cfg[\"codex\"][\"model\"]` in `executor.py` (the two `cfg[\"codex\"]` hits are `dangerous_full_access` and `on_exhausted`); `git diff --stat` limited to the four scoped files.\n\n## Files changed\n`orchestrator/executor.py`, `orchestrator/spawn.py`, `orchestrator/bus.py` (docstrings for the new `update`/`log_run` fields), `tests/test_orchestrator.py`.\n\n## Tests\n`uv run python -m unittest tests/test_orchestrator.py` \u2014 33 tests, OK, no failures (ran twice; state is clean across runs). `.claude/hooks/tests-green.sh` exits 0. Three new tests in `Executor`: `test_start_routes_through_pick_executor`, `test_usage_limit_cools_the_whole_quota_group`, `test_run_log_carries_executor_and_complexity`. Existing Executor tests needed no changes.\n\nOne note: the spec said to run `scripts/tests_green.sh`, which doesn't exist in this repo \u2014 the equivalent is `.claude/hooks/tests-green.sh`, which I ran.",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789659422.414847,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "a01dc3c64cd0475ba426917d298bf3c8989f6c94"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789658630.285496,
+  "pid": 30004,
+  "account": "A",
+  "merged_into": "goal/T-0005",
+  "sha": "a01dc3c64cd0475ba426917d298bf3c8989f6c94"
+}

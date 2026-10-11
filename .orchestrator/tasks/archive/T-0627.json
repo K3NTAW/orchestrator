@@ -1,0 +1,171 @@
+{
+  "id": "T-0627",
+  "created_at": 1789976370.9161868,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R9 v2: orchestrator/allocation.py \u2014 critical-path-aware executor allocation by expected value with class-scoped economics, pinned input shapes, hard eligibility and evidence thresholds (AP P16)",
+  "spec": "Why: pool.pick_executor (orchestrator/pool.py:538-559) picks the cheapest proven-safe executor by class economics and ignores scheduling importance; AP P16 / brief P11 want executor choice that weighs expected accepted-task cost, first-pass success, fix-round cost, duration and critical-path importance, never \"critical path = strongest model\". v2 after spec review T-0617: economics must be class-scoped and every input shape pinned.\nWhat: new pure module orchestrator/allocation.py; the hook into executor.start is a later integration task. Tests are unittest.TestCase methods.\n- cfg [allocation]: mode off|shadow|active (default shadow; unknown -> shadow), min_samples 5, latency_weight_usd_per_hour 2.0, critical_factor 1.0, non_critical_factor 0.25.\n- evidence_for(executor_ids, task_class, *, economics=None, root=STATE) -> {executor_id: {\"cost_to_accepted_usd\", \"first_pass_p\", \"fix_round_cost_usd\", \"n\"}}: economics defaults to scorecard.executor_economics(root=root, by=\"class\"), whose rows are keyed by the tuple (executor_id, task_class) (scorecard.py: key = (executor_id, root_row[by])); for each id read the row for (id, task_class): cost_to_accepted_usd = row[\"cost_to_accepted\"], first_pass_p = 1 - row[\"fix_round_probability\"] (deliberately not first_pass_green_rate: fix_round_probability is defined over every resolved lineage and so has broader coverage; state this in the docstring), fix_round_cost_usd = row.get(\"fix_round_usd\") or (row[\"cost_to_accepted\"] - row[\"initial_usd\"]) when both exist else None, n = row[\"n_tasks\"]; a missing tuple key yields all None and n 0.\n- choose(task, eligible_ids, *, baseline, priority, ready_priorities, evidence, durations=None, cfg=None) -> {\"executor\", \"mode\", \"reason\", \"candidates\": [{id, score_usd, cost_to_accepted_usd, first_pass_p, est_duration_s, n, measured}], \"rejected\": {id: reason}, \"baseline\", \"would_pick\"}. Shapes: priority = critical_path.explain dict for this task; ready_priorities = list[float] of critical_path_s values of every ready task (this task included); durations = dict[executor_id, float] of this task's estimated seconds under each executor, precomputed by the caller, optional; est_duration_s falls back to critical_path.est_duration_s(task). factor = critical_factor when priority[\"critical_path_s\"] >= max(ready_priorities) else non_critical_factor. score_usd = cost_to_accepted_usd + latency_weight_usd_per_hour x est_duration_s / 3600 x factor. measured = n >= min_samples and cost_to_accepted_usd is not None. Fewer than two measured candidates -> executor = baseline, reason \"sparse_evidence\". Ties within 5 percent of score -> lower cost_to_accepted_usd, then baseline, then id. Never returns an id outside eligible_ids; eligible_ids empty -> None with reason \"no_eligible\"; baseline not in eligible_ids -> ValueError. mode off -> baseline, reason mode_off, would_pick None; shadow -> executor = baseline, would_pick = EV choice; active -> executor = EV choice.\n- record(task_id, result) -> decision_log.record(kind=\"allocation\", subject=task_id, candidates=ids, hard_constraints=[\"eligibility\", \"capacity\", \"budget\"], deterministic={\"baseline\": baseline}, historical=evidence, selected=result[\"executor\"], rejected=result[\"rejected\"], reason=result[\"reason\"], n=min n over measured, mode).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_allocation.py::test_evidence_for_is_scoped_to_the_task_class \u2014 economics rows keyed (executor, class) for two classes yield per-executor evidence from the requested class only, a missing tuple gives None values and n 0, and first_pass_p equals 1 - fix_round_probability",
+    "tests/test_allocation.py::test_cheap_executor_preferred_when_outcomes_equivalent \u2014 two measured executors with equal first-pass and duration but costs 0.5 and 1.5 USD: active mode picks the cheaper one",
+    "tests/test_allocation.py::test_stronger_executor_only_when_downstream_value_justifies \u2014 on a critical-path task the executor with duration 600 s and cost 1.2 beats duration 2400 s and cost 0.8; on a non-critical task with non_critical_factor the cheaper one wins",
+    "tests/test_allocation.py::test_hard_eligibility_always_wins \u2014 the best-scoring executor absent from eligible_ids is never returned; empty eligible_ids returns None with reason no_eligible",
+    "tests/test_allocation.py::test_sparse_evidence_falls_back_to_baseline \u2014 only one candidate meets min_samples: executor is baseline with reason sparse_evidence",
+    "tests/test_allocation.py::test_modes_and_decision_row \u2014 off returns baseline with mode_off; shadow returns baseline and would_pick; record writes an allocation decision row with candidates, selected and rejected"
+  ],
+  "scope": [
+    "orchestrator/allocation.py",
+    "tests/test_allocation.py"
+  ],
+  "depends_on": [
+    "T-0570",
+    "T-0564"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/executor.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/critical_path.py",
+      "orchestrator/duration.py",
+      "orchestrator/decision_log.py",
+      "tests/test_pool.py",
+      "tests/test_scorecard.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "evidence_for(executor_ids, task_class, *, economics=None, root=STATE) -> {id: {cost_to_accepted_usd, first_pass_p, fix_round_cost_usd, n}} from executor_economics(by='class') tuple keys; choose(task, eligible_ids, *, baseline, priority, ready_priorities: list[float], evidence, durations: dict[executor_id, float]|None = None, cfg=None) -> {executor, mode, reason, candidates, rejected, baseline, would_pick}; record(task_id, result) writes decision_log kind allocation; config [allocation] mode off|shadow|active default shadow, min_samples 5, latency_weight_usd_per_hour 2.0, critical_factor 1.0, non_critical_factor 0.25; must not import daemon or executor"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R9 v3 after spec review T-0628 (fix_round_cost_usd replaced by expected_rework_usd = cost_to_accepted x fix_round_probability; hard_constraints narrowed to eligibility)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789976462.0688288,
+      "pipeline": {
+        "first_ready_at": 1789976462.06877
+      }
+    },
+    {
+      "ts": 1789976462.120138,
+      "pipeline": {
+        "first_ready_at": 1789976462.06877,
+        "spec_review_at": 1789976462.1200929,
+        "spec_review_at_lease": 1789977362.1200929
+      }
+    },
+    {
+      "ts": 1789976462.125386,
+      "pipeline": {
+        "first_ready_at": 1789976462.06877,
+        "spec_review_at": 1789976462.1200929,
+        "spec_review_at_lease": 1789977362.1200929,
+        "spec_review_at_done": 1789976462.125259
+      }
+    },
+    {
+      "ts": 1789976582.051687,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/allocation.py",
+          "issue": "evidence_for's fix_round_cost_usd is defined as row.get(\"fix_round_usd\") or (row[\"cost_to_accepted\"] - row[\"initial_usd\"]) when both exist. Neither \"fix_round_usd\" nor \"initial_usd\" is ever produced by scorecard.executor_economics() (verified: scorecard.py:1333-1348 lists the full row shape, and a repo-wide grep for both key names returns zero hits). fix_round_cost_usd will therefore always be None (or KeyError on a literal implementation), and the acceptance test for evidence_for doesn't check this field, so the defect ships silently.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/allocation.py",
+          "issue": "record()'s hard_constraints=[\"eligibility\",\"capacity\",\"budget\"] names constraints that choose() never enforces or evidences -- choose() only checks eligible_ids membership (eligibility). Capacity and budget checks live in pool.eligible_executors, outside this module's scope, so logging them here as if this module verified them misrepresents the decision_log row's provenance.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789977140.284161,
+      "pipeline": {
+        "first_ready_at": 1789976462.06877,
+        "spec_review_at": 1789976462.1200929,
+        "spec_review_at_lease": 1789977362.1200929,
+        "spec_review_at_done": 1789976462.125259,
+        "spec_review_held_at": 1789977140.284085
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789977142.2421849,
+      "pipeline": {
+        "first_ready_at": 1789976462.06877,
+        "spec_review_at": 1789976462.1200929,
+        "spec_review_at_lease": 1789977362.1200929,
+        "spec_review_at_done": 1789976462.125259,
+        "spec_review_held_at": 1789977140.284085,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789977142.296458,
+      "pipeline": {
+        "first_ready_at": 1789976462.06877,
+        "spec_review_at": 1789976462.1200929,
+        "spec_review_at_lease": 1789977362.1200929,
+        "spec_review_at_done": 1789976462.125259,
+        "spec_review_held_at": 1789977140.284085,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789977140.284161": true
+        }
+      }
+    },
+    {
+      "ts": 1789977155.914731,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R9 v3 after spec review T-0628 (fix_round_cost_usd replaced by expected_rework_usd = cost_to_accepted x fix_round_probability; hard_constraints narrowed to eligibility)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789976462.06877,
+    "spec_review_at": 1789976462.1200929,
+    "spec_review_at_lease": 1789977362.1200929,
+    "spec_review_at_done": 1789976462.125259,
+    "spec_review_held_at": 1789977140.284085,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789977140.284161": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/allocation.py",
+      "issue": "evidence_for's fix_round_cost_usd is defined as row.get(\"fix_round_usd\") or (row[\"cost_to_accepted\"] - row[\"initial_usd\"]) when both exist. Neither \"fix_round_usd\" nor \"initial_usd\" is ever produced by scorecard.executor_economics() (verified: scorecard.py:1333-1348 lists the full row shape, and a repo-wide grep for both key names returns zero hits). fix_round_cost_usd will therefore always be None (or KeyError on a literal implementation), and the acceptance test for evidence_for doesn't check this field, so the defect ships silently.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/allocation.py",
+      "issue": "record()'s hard_constraints=[\"eligibility\",\"capacity\",\"budget\"] names constraints that choose() never enforces or evidences -- choose() only checks eligible_ids membership (eligibility). Capacity and budget checks live in pool.eligible_executors, outside this module's scope, so logging them here as if this module verified them misrepresents the decision_log row's provenance.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

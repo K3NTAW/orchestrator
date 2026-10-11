@@ -1,0 +1,252 @@
+{
+  "id": "T-1320",
+  "created_at": 1790181552.7783191,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S3e promotion framework, hermes-eval suite and success metrics: features cache_aware_context, steering_policy, stale_steering, fast_path, memory_tiers with self-refusing criteria; deterministic P34 evals; scorecard --hermes (P33, P34, P35)",
+  "spec": "orchestrator/promotion.py: ensure FEATURES holds cache_aware_context (context_router cache_mode plus tool and skill cache_mode as one feature with three config keys), steering_policy, stale_steering, fast_path and memory_tiers, each with criteria expressed like the existing entries: minimum shadow sample size (30 rows, or 20 for steering kinds), non-inferior quality (first-pass rate and fix-round rate of affected tasks not worse than the shadow baseline), improved accepted-goal economics (effective tokens or usd per accepted goal lower), plus a fresh passing hermes-eval within 7 days; demotion when a regression of the same metrics persists over 10 tasks. Create orchestrator/hermes_eval.py with deterministic cases over temp fixtures: memory (delegate to memory_eval), cache (stable prefix identical across two tasks of one role and goal; dynamic suffix differs; telemetry normalize and effective cost correct; stable tool catalog unchanged between two tasks), worker control (inspect lists a fake running worker; steer records before delivery; cancel releases pool capacity and retains the partial; replacement packet carries prior_worker facts), security (a malicious external skill fixture is high risk and cannot move to testing; a malicious agents file scans blocked; fake authority escalation blocked; a secret exfiltration instruction blocked; a harmless security document is not blocked), fast path (a trivial fixture task is level 0 or 1 with the skip list; a security-path task never below 4; an architectural task 4; a fast-path task with two fix rounds triggers the demotion rule). run(root) persists .orchestrator/hermes_eval.json; CLI `orchestrator hermes-eval [--json]`. orchestrator/scorecard.py: `orchestrator scorecard --hermes` prints the P35 metrics in one table from the existing scorecards and the new modules: accepted-goal success, first-pass, fix-round rate, tokens and effective uncached tokens and usd and latency per accepted goal; HOT memory tokens, retrieval precision and usefulness, compaction count; cache hit ratio, cache-read, uncached, invalidations, effective context cost; steering rate and success, cancellations, partial-result reuse, fix rounds avoided; suspicious context detected, false-positive rate (suspicious later marked safe by a human transition reason), blocked imports; orchestration amplification, cost share, latency share. Docs: docs/hermes-hardening/19-promotion-and-evals.md.\nSpec review T-1319 folded in: (1) No multi-key entry: register three single-key features context_cache ([context_router].cache_mode), tool_cache ([tool_disclosure].cache_mode) and skill_cache ([skills].cache_mode); the docs group them as cache-aware disclosure. (2) Refusal lives in promotion.evaluate: it returns stay with reason hermes_eval_missing_or_stale when .orchestrator/hermes_eval.json is missing, malformed, future-dated, older than 7 days or not passed; the self-refusal callers that already consult evaluate before running active (skill routing, fast_path, steering_policy) therefore refuse; evaluate never changes config. (3) stale_steering = the stale-severity trigger of steering policy shipped by T-1316: table [steering], key stale_mode (T-1316 adds it, default shadow), evidence = steering rows with trigger stale_severity; this task depends on T-1316. (4) The new criteria are ADDITIVE and apply only to the five new features (context_cache, tool_cache, skill_cache, steering_policy's stale trigger, memory_tiers); existing bespoke branches (fast_path min 20 and its two-fix-round demote, steering_policy min 20) are unchanged and their tests stay green. (5) Demotion is stateless: computed on every call from the last 10 task rows of the feature; economics 'improved' with a None metric means stay (missing data never promotes); shadow and active cohorts are disjoint sets of task ids. (6) hermes_eval.json records ran_at (ISO, Europe/Zurich), cases [{name, passed, detail}] and passed; run(root, now=None) and the freshness check take an injectable now and read the file from the explicit root argument, never STATE. (7) Every eval case runs against an explicit temp root and public APIs: memory_eval.run(root), cache_telemetry.normalize/effective_cost and tool_catalog.cache_view, worker_control.cancel/steer with the injectable process seams (sleep, alive, signal_fn) and a fake pool, context_scanner.scan, skill_discovery.inspect plus skills_registry.transition, harness_depth.level, evidence.make; no case touches STATE or the real bus.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Task worktrees carry no .orchestrator runs, tasks or decision_log state: tests use synthetic fixtures; for any measured numbers in docs run read-only against /Users/k3ntaw/code/orchestrator/.orchestrator via an explicit root argument. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Contracts of the earlier modules: .orchestrator/plan.md (section GOAL T-0991) and docs/hermes-hardening/*.md on this branch; read the merged modules before building on them.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_promotion.py::test_hermes_features_registered_with_sample_quality_economics_and_eval_criteria",
+    "tests/test_promotion.py::test_activation_refused_without_fresh_hermes_eval",
+    "tests/test_hermes_eval.py::test_all_cases_pass_on_fixtures (every P34 case listed by name)",
+    "tests/test_scorecard.py::test_scorecard_hermes_table_has_every_p35_metric",
+    "tests/test_cli.py::test_hermes_eval_and_scorecard_hermes_cli",
+    "tests/test_promotion.py::test_new_criteria_additive_existing_features_unchanged_and_stateless_demotion",
+    "tests/test_hermes_eval.py::test_freshness_uses_injected_now_and_failed_or_malformed_file_never_passes",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/promotion.py",
+    "orchestrator/hermes_eval.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_promotion.py",
+    "tests/test_hermes_eval.py",
+    "tests/test_scorecard.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/19-promotion-and-evals.md"
+  ],
+  "depends_on": [
+    "T-1194",
+    "T-1310",
+    "T-1184",
+    "T-1096",
+    "T-1233",
+    "T-1146",
+    "T-1274",
+    "T-1316"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790182304.002147,
+      "pipeline": {
+        "first_ready_at": 1790182304.00211
+      }
+    },
+    {
+      "ts": 1790182304.1130319,
+      "pipeline": {
+        "first_ready_at": 1790182304.00211,
+        "spec_review_at": 1790182304.112986,
+        "spec_review_at_lease": 1790183204.112986
+      }
+    },
+    {
+      "ts": 1790182304.120826,
+      "pipeline": {
+        "first_ready_at": 1790182304.00211,
+        "spec_review_at": 1790182304.112986,
+        "spec_review_at_lease": 1790183204.112986,
+        "spec_review_at_done": 1790182304.120631
+      }
+    },
+    {
+      "ts": 1790182355.087043,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "Spec items 2 and 7 conflict. evaluate(feature, evidence, cfg) has no root argument, so a refusal check inside it can only read .orchestrator/hermes_eval.json through STATE. The spec forbids reading STATE. Applying the refusal to every feature would also break the existing evaluate tests, which run with no eval file. The spec must say which features the eval gate covers and how root reaches evaluate. Options are a new optional kwarg or a root/now key carried in the evidence dict.",
+          "severity": "high",
+          "line": 110
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "Item 2 names skill routing as a self-refusal caller that already consults evaluate. It does not. Only harness_depth.py:81 (fast_path) and daemon.py:1699 (steering_policy) call evaluate. skill_router.py has no promotion call. Either the spec adds a new guard in skill_router.py, which is outside scope, or the claim has to be dropped. The new cache features (context_cache, tool_cache, skill_cache) are read directly via context_router.cache_mode in spawn.py, not through evaluate. The refusal therefore cannot stop those from going active, and 'activation refused' cannot be verified for them.",
+          "severity": "high",
+          "line": 110
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "Item 4 says the new criteria apply to steering_policy's stale trigger and memory_tiers. Both already exist in FEATURES. steering_policy has an early-return bespoke branch with min 20 that must stay unchanged. memory_tiers goes through the generic path, which has its own min_samples and fix_rounds_delta check. Making memory_tiers 'additive' (30 rows, effective-cost economics, 10-task demotion) changes its existing behaviour and may break its tests. The spec should say whether memory_tiers keeps its current entry and only gains the eval gate and demotion, and it should list exactly which existing tests must stay green.",
+          "severity": "med",
+          "line": 16
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "stale_steering depends on a [steering] stale_mode key that T-1316 adds. The base tree has no stale_mode in code or pool.toml. FEATURES needs this key, and steering_policy.py already emits trigger stale_severity. The spec should pin the exact rows to count (decision_log kind steering, trigger stale_severity, mode shadow or active). It should also say what happens if T-1316 is not merged, with no silent fallback: an invalid or missing key currently falls back to the default 'shadow'.",
+          "severity": "med",
+          "line": 12
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "Item 5 says demotion is computed from the last 10 task rows and that shadow and active cohorts are disjoint task-id sets. It does not say where a task's cohort comes from (decision_log mode) or how first-pass and fix-round rates are derived. It also does not say what happens when the active cohort has fewer than 10 tasks. 'Regression persists over 10 tasks' is ambiguous between all 10 worse and the mean over 10 worse. collect() also needs new branches for context_cache, tool_cache, skill_cache and stale_steering. Tests need a synthetic decision_log and tasks fixture per feature.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/hermes_eval.py",
+          "issue": "Freshness and malformed-file handling needs exact rules. Future-dated means ran_at later than now, with a tolerance if any. A missing or naive timezone should count as malformed. 'passed' must be recomputed as all cases passed, not trusted from the file. Otherwise a hand-edited file with passed true and a failed case would pass. The spec also does not say how a case that raises is recorded (passed false with detail, not a crash).",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/scorecard.py",
+          "issue": "`scorecard --hermes` is dispatched in cli.py, where the scorecard branch uses `a.root or scorecard.STATE`, and cli.py has many existing scorecard flags. The spec does not say how --hermes interacts with --json or --days. Several P35 metrics have no defined source or formula: false-positive rate ('suspicious later marked safe by a human transition reason'), orchestration amplification, cost share and latency share. Missing data should render as n/a, never 0. Otherwise the test cannot show that every metric row is truthful.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/hermes_eval.py",
+          "issue": "The eval cases call many modules (worker_control seams, fake pool, skill_discovery, skills_registry.transition, context_scanner, tool_catalog.cache_view, memory_eval). Their signatures are not given, and several are not in the depends_on list. The security cases in particular need the scanner and registry API from earlier tasks. This hidden coupling means the sonnet executor could go beyond scope if a public seam is missing. The spec should require that any missing seam is reported as held, and that no edits are made to modules outside scope.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "There is no rollback. The refusal gate blocks activation of active features if the eval file goes stale, and nothing describes how to revert or bypass it. The spec should say that evaluate stays advisory. It should also add that a config `[promotion]` override or a decisions.md revert path exists, as CLAUDE.md requires for changes that affect behaviour.",
+          "severity": "low",
+          "line": 110
+        }
+      ]
+    },
+    {
+      "ts": 1790182378.878448,
+      "pipeline": {
+        "first_ready_at": 1790182304.00211,
+        "spec_review_at": 1790182304.112986,
+        "spec_review_at_lease": 1790183204.112986,
+        "spec_review_at_done": 1790182304.120631,
+        "spec_review_held_at": 1790182378.878388
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790182380.040915,
+      "pipeline": {
+        "first_ready_at": 1790182304.00211,
+        "spec_review_at": 1790182304.112986,
+        "spec_review_at_lease": 1790183204.112986,
+        "spec_review_at_done": 1790182304.120631,
+        "spec_review_held_at": 1790182378.878388,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790182380.151205,
+      "pipeline": {
+        "first_ready_at": 1790182304.00211,
+        "spec_review_at": 1790182304.112986,
+        "spec_review_at_lease": 1790183204.112986,
+        "spec_review_at_done": 1790182304.120631,
+        "spec_review_held_at": 1790182378.878388,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790182378.878448": true
+        }
+      }
+    },
+    {
+      "ts": 1790182414.692956,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner: spec review T-1324 folded into T-1325"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790182304.00211,
+    "spec_review_at": 1790182304.112986,
+    "spec_review_at_lease": 1790183204.112986,
+    "spec_review_at_done": 1790182304.120631,
+    "spec_review_held_at": 1790182378.878388,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790182378.878448": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "Spec items 2 and 7 conflict. evaluate(feature, evidence, cfg) has no root argument, so a refusal check inside it can only read .orchestrator/hermes_eval.json through STATE. The spec forbids reading STATE. Applying the refusal to every feature would also break the existing evaluate tests, which run with no eval file. The spec must say which features the eval gate covers and how root reaches evaluate. Options are a new optional kwarg or a root/now key carried in the evidence dict.",
+      "severity": "high",
+      "line": 110
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "Item 2 names skill routing as a self-refusal caller that already consults evaluate. It does not. Only harness_depth.py:81 (fast_path) and daemon.py:1699 (steering_policy) call evaluate. skill_router.py has no promotion call. Either the spec adds a new guard in skill_router.py, which is outside scope, or the claim has to be dropped. The new cache features (context_cache, tool_cache, skill_cache) are read directly via context_router.cache_mode in spawn.py, not through evaluate. The refusal therefore cannot stop those from going active, and 'activation refused' cannot be verified for them.",
+      "severity": "high",
+      "line": 110
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "Item 4 says the new criteria apply to steering_policy's stale trigger and memory_tiers. Both already exist in FEATURES. steering_policy has an early-return bespoke branch with min 20 that must stay unchanged. memory_tiers goes through the generic path, which has its own min_samples and fix_rounds_delta check. Making memory_tiers 'additive' (30 rows, effective-cost economics, 10-task demotion) changes its existing behaviour and may break its tests. The spec should say whether memory_tiers keeps its current entry and only gains the eval gate and demotion, and it should list exactly which existing tests must stay green.",
+      "severity": "med",
+      "line": 16
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "stale_steering depends on a [steering] stale_mode key that T-1316 adds. The base tree has no stale_mode in code or pool.toml. FEATURES needs this key, and steering_policy.py already emits trigger stale_severity. The spec should pin the exact rows to count (decision_log kind steering, trigger stale_severity, mode shadow or active). It should also say what happens if T-1316 is not merged, with no silent fallback: an invalid or missing key currently falls back to the default 'shadow'.",
+      "severity": "med",
+      "line": 12
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "Item 5 says demotion is computed from the last 10 task rows and that shadow and active cohorts are disjoint task-id sets. It does not say where a task's cohort comes from (decision_log mode) or how first-pass and fix-round rates are derived. It also does not say what happens when the active cohort has fewer than 10 tasks. 'Regression persists over 10 tasks' is ambiguous between all 10 worse and the mean over 10 worse. collect() also needs new branches for context_cache, tool_cache, skill_cache and stale_steering. Tests need a synthetic decision_log and tasks fixture per feature.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/hermes_eval.py",
+      "issue": "Freshness and malformed-file handling needs exact rules. Future-dated means ran_at later than now, with a tolerance if any. A missing or naive timezone should count as malformed. 'passed' must be recomputed as all cases passed, not trusted from the file. Otherwise a hand-edited file with passed true and a failed case would pass. The spec also does not say how a case that raises is recorded (passed false with detail, not a crash).",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/scorecard.py",
+      "issue": "`scorecard --hermes` is dispatched in cli.py, where the scorecard branch uses `a.root or scorecard.STATE`, and cli.py has many existing scorecard flags. The spec does not say how --hermes interacts with --json or --days. Several P35 metrics have no defined source or formula: false-positive rate ('suspicious later marked safe by a human transition reason'), orchestration amplification, cost share and latency share. Missing data should render as n/a, never 0. Otherwise the test cannot show that every metric row is truthful.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/hermes_eval.py",
+      "issue": "The eval cases call many modules (worker_control seams, fake pool, skill_discovery, skills_registry.transition, context_scanner, tool_catalog.cache_view, memory_eval). Their signatures are not given, and several are not in the depends_on list. The security cases in particular need the scanner and registry API from earlier tasks. This hidden coupling means the sonnet executor could go beyond scope if a public seam is missing. The spec should require that any missing seam is reported as held, and that no edits are made to modules outside scope.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "There is no rollback. The refusal gate blocks activation of active features if the eval file goes stale, and nothing describes how to revert or bypass it. The spec should say that evaluate stays advisory. It should also add that a config `[promotion]` override or a decisions.md revert path exists, as CLAUDE.md requires for changes that affect behaviour.",
+      "severity": "low",
+      "line": 110
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner: spec review T-1324 folded into T-1325"
+}

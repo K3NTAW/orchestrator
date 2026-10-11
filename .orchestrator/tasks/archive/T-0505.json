@@ -1,0 +1,308 @@
+{
+  "id": "T-0505",
+  "created_at": 1789945567.622198,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 5,
+  "title": "S0b: scorecard --parallelism \u2014 per-goal concurrency, waits, critical path, conflicts, stale events and dispatch-skip reasons; baseline carries the block",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P0 (measure before changing scheduling). Base goal/T-0503. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nVerified facts: tasks carry created_at, claimed_at, pipeline.dispatched_at, gated_at, first_green_at, merged_at, accepted_at, gate_attempts, gate_reds, lineage_fix_rounds, last_merge, failure_kind, reason (rebase_conflict on merge conflicts, merge.py:45), constraints.fix_round_for; run rows in runs/<date>.jsonl carry ts, duration_s, role, task, account, executor (scorecard._efficiency_rows scorecard.py:754 shows the tolerant reader; _stamp at 789 parses stamps). A parallel task S0a writes runs/sched/dispatch.jsonl rows {\"ts\",\"free_slots\",\"fallback\",\"running_execute\",\"running_claude\",\"considered\":[{\"task\",\"goal_id\",\"ready\",\"action\",\"reason\",\"executor\"}]} and stamps pipeline.first_ready_at; later tasks write runs/sched/waves.jsonl ({\"ts\",\"mode\",\"wave\",\"deferred\",\"applied\",...}) and runs/sched/stale.jsonl ({\"ts\",\"task\",\"goal_id\",\"risk\",\"action\",...}). Read these files by path with the same tolerant parsing; do not import a schedlog module (not merged yet); absent files mean zero rows.\n1. scorecard.parallelism(root=STATE, goal=None) -> card {\"goals\": {goal_id: metrics}, \"totals\": metrics over all goals, \"skip_reasons\": {reason: count} (per goal and total), \"waves\": {\"rows\", \"applied\"}, \"malformed\"}. Per goal (tasks whose parent is the goal): wall_clock_s (goal created_at to the goal's done event or last merged_at; undefined when missing); execute intervals = claimed_at..(gated_at or done event ts) of execute tasks -> max_concurrent_executors and avg_concurrent_executors (time-weighted over the union of busy time); Claude worker intervals from run rows with account != \"codex\" (ts - duration_s .. ts) -> max/avg_concurrent_claude_workers; medians and totals of queue_wait_s (dispatched_at - first_ready_at, fallback created_at), dependency_wait_s (first_ready_at - created_at), execution_s (gated_at - claimed_at, fallback run duration_s), review_s (review task done ts - created_at), merge_wait_s (merged_at - first_green_at); critical_path_s = longest path over the goal's execute DAG (depends_on edges) weighted by execution_s, undefined when any task on it lacks stamps; merge_conflicts (reason == rebase_conflict or last_merge.status == conflict), rebase_failures (failure_kind naming rebase), stale_work_events (stale.jsonl rows with risk high, or pipeline.stale_check.risk == high), fix_rounds, fix_rounds_after_concurrent_merge (a fix round whose parent saw another task of the same goal merge between the parent's claimed_at and gated_at). Undefined values render as \"undefined\", never 0 (Phase H rule).\n2. format_parallelism(card) table; cli `orchestrator scorecard --parallelism [--goal ID]` alongside the existing --efficiency/--economics/--routing/--reviews flags with the same conflict handling; baseline.save stores card[\"totals\"], skip_reasons and waves under \"parallelism\", baseline compare prints deltas for its numeric fields and tolerates baselines without the block (sched-pre.json lacks it). README scorecard section: one paragraph.\n3. Tests: tests/test_scorecard.py test_parallelism_concurrency_sweep_and_waits, test_parallelism_critical_path_over_dag, test_parallelism_skip_reasons_from_sched_log, test_parallelism_missing_files_are_zero; tests/test_baseline.py test_baseline_carries_parallelism_block; tests/test_cli.py test_scorecard_parallelism_flag. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "orchestrator scorecard --parallelism prints per-goal and total max/avg concurrent executors and Claude workers, median queue, dependency, execution, review and merge waits, wall clock, critical path, merge conflicts, rebase failures, stale-work events, fix rounds and dispatch-skip reason counts; missing stamps show undefined and missing sched files count as zero",
+    "baseline save writes a parallelism block and baseline compare prints its deltas, tolerating an older baseline without the block",
+    "tests test_parallelism_concurrency_sweep_and_waits, test_parallelism_critical_path_over_dag, test_parallelism_skip_reasons_from_sched_log, test_parallelism_missing_files_are_zero, test_baseline_carries_parallelism_block, test_scorecard_parallelism_flag pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "orchestrator/baseline.py",
+    "orchestrator/cli.py",
+    "README.md",
+    "tests/test_scorecard.py",
+    "tests/test_baseline.py",
+    "tests/test_cli.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 1800,
+    "task_class": "telemetry",
+    "read_scope": [
+      "orchestrator/bus.py",
+      "orchestrator/daemon.py",
+      "orchestrator/merge.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "scorecard.parallelism(root, goal=None) -> card; format_parallelism(card); reads runs/sched/dispatch.jsonl, waves.jsonl, stale.jsonl by path (shapes in the spec); baseline block key 'parallelism'"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0505",
+  "codex_thread": "01a0c112-16b5-7771-9eb6-b9104e0484b2",
+  "result": {
+    "summary": "Implemented parallelism telemetry, CLI support, baseline deltas, documentation, and tests.\n\nChanged: `orchestrator/{scorecard,baseline,cli}.py`, `tests/test_{scorecard,baseline,cli}.py`, `README.md`.\n\nGate: exit 0, 760 tests passed. Working tree clean.\nCommit: `e96d6927e91610cd24706fbba90c6944c5567aaf`\nFailures-only output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c112-16b5-7771-9eb6-b9104e0484b2",
+    "usage": {
+      "input_tokens": 818228,
+      "cached_input_tokens": 755456,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7697,
+      "reasoning_output_tokens": 239,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789945571.089788,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677
+      }
+    },
+    {
+      "ts": 1789945572.791187,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157
+      }
+    },
+    {
+      "ts": 1789945583.011279,
+      "packet_meta": {
+        "chars": 2066,
+        "est_tokens": 516,
+        "hash": "050ce68210f6",
+        "version": "050ce68210f6",
+        "base": "8fd67c8dd0ad",
+        "sources": "pool.toml@58c877fd1717 gotchas@0ef0ee572690 memory@notes",
+        "policy_version": "58c877fd1717",
+        "gotchas": "0ef0ee572690"
+      }
+    },
+    {
+      "ts": 1789945583.014799,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0505",
+      "claimed_at": 1789945583.014535
+    },
+    {
+      "ts": 1789945583.0158641,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789945935.503457,
+      "codex_thread": "01a0c112-16b5-7771-9eb6-b9104e0484b2",
+      "codex_thread_head": "e96d6927e91610cd24706fbba90c6944c5567aaf"
+    },
+    {
+      "ts": 1789945935.506953,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        }
+      }
+    },
+    {
+      "ts": 1789945935.508984,
+      "status": "done",
+      "result": {
+        "summary": "Implemented parallelism telemetry, CLI support, baseline deltas, documentation, and tests.\n\nChanged: `orchestrator/{scorecard,baseline,cli}.py`, `tests/test_{scorecard,baseline,cli}.py`, `README.md`.\n\nGate: exit 0, 760 tests passed. Working tree clean.\nCommit: `e96d6927e91610cd24706fbba90c6944c5567aaf`\nFailures-only output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c112-16b5-7771-9eb6-b9104e0484b2",
+        "usage": {
+          "input_tokens": 818228,
+          "cached_input_tokens": 755456,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7697,
+          "reasoning_output_tokens": 239,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789946026.2624671,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789946110.8951192,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946110.89502,
+        "gated_at_lease": 1789947010.89502,
+        "first_green_at": 1789946110.894272,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789946111.058918,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946110.89502,
+        "gated_at_lease": 1789947010.89502,
+        "first_green_at": 1789946110.894272,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "e96d6927e91610cd24706fbba90c6944c5567aaf"
+      }
+    },
+    {
+      "ts": 1789946111.063596,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946110.89502,
+        "gated_at_lease": 1789947010.89502,
+        "first_green_at": 1789946110.894272,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "e96d6927e91610cd24706fbba90c6944c5567aaf",
+        "gated_at_done": 1789946111.063521
+      }
+    },
+    {
+      "ts": 1789946267.9632561,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789946477.289454,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946110.89502,
+        "gated_at_lease": 1789947010.89502,
+        "first_green_at": 1789946110.894272,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "3b74ce7d9d1a51674635971f35244421c2ffb66a",
+        "gated_at_done": 1789946111.063521
+      },
+      "status": "done"
+    },
+    {
+      "ts": 1789946477.328614,
+      "pipeline": {
+        "dispatched_at": 1789945571.089677,
+        "dispatched_at_lease": 1789946471.089677,
+        "dispatched_at_done": 1789945572.790157,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946110.89502,
+        "gated_at_lease": 1789947010.89502,
+        "first_green_at": 1789946110.894272,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "3b74ce7d9d1a51674635971f35244421c2ffb66a",
+        "gated_at_done": 1789946111.063521
+      }
+    },
+    {
+      "ts": 1789946544.8348129,
+      "status": "done",
+      "merged_into": "goal/T-0503",
+      "sha": "3b74ce7d9d1a51674635971f35244421c2ffb66a"
+    },
+    {
+      "ts": 1789946707.4308438,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789945571.089677,
+    "dispatched_at_lease": 1789946471.089677,
+    "dispatched_at_done": 1789945572.790157,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "sol",
+      "key": "c39969e38c4af8b537b1d487bedb5cba335d74ce"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789946110.89502,
+    "gated_at_lease": 1789947010.89502,
+    "first_green_at": 1789946110.894272,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "reviewed_sha": "3b74ce7d9d1a51674635971f35244421c2ffb66a",
+    "gated_at_done": 1789946111.063521
+  },
+  "packet_meta": {
+    "chars": 2066,
+    "est_tokens": 516,
+    "hash": "050ce68210f6",
+    "version": "050ce68210f6",
+    "base": "8fd67c8dd0ad",
+    "sources": "pool.toml@58c877fd1717 gotchas@0ef0ee572690 memory@notes",
+    "policy_version": "58c877fd1717",
+    "gotchas": "0ef0ee572690"
+  },
+  "claimed_at": 1789945583.014535,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "e96d6927e91610cd24706fbba90c6944c5567aaf",
+  "review_verdict": "request_changes",
+  "merged_into": "goal/T-0503",
+  "sha": "3b74ce7d9d1a51674635971f35244421c2ffb66a"
+}

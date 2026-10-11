@@ -1,0 +1,685 @@
+{
+  "id": "T-1538",
+  "created_at": 1790927413.079936,
+  "parent": "T-1403",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout (trace): B2b v4 facts: dispatch() clock reads, executor.start row selection, in-flight per-row tally, decision-row ordering, bus.update pipeline semantics",
+  "spec": "Read-only scout for goal T-1403 wave 2, plan label B2b. Spec review T-1537 rejected B2b v3 (T-1533) because the spec guessed at mechanics in orchestrator/daemon.py and orchestrator/executor.py. Answer the questions below from the code on branch goal/T-1403 (run `git show goal/T-1403:orchestrator/daemon.py` etc., or read the checkout if it is on that branch; state which you read). Cite every fact as path:symbol (function or class name) with the line number. Provenance repo. Do not propose designs beyond what each question asks; do not edit anything.\n\nQ1 Clock reads in dispatch. List every call to time.time() (or any other clock) reachable from daemon.dispatch() in daemon.py itself: the enclosing function, what the value is used for (row ts, first_ready_at, stale check, cooling check, backoff). Also say whether daemon.py already has a clock seam (a module-level `_now`, `now()` or similar) and whether `from . import executor` or `from .executor import ...` style imports are used. Then list which helpers OUTSIDE daemon.py that dispatch() calls read the clock internally: bus.update / bus.get / bus.read stamps, decision_log.record (or whatever the decision-row writer is called), pool.pick, Pool.claude_has_headroom, executor.claude_row_free, executor.fallback_mode, Pool.row_covers. For each: module, function, and whether it reads `time.time` via `import time` (module attribute) or `from time import time`. Goal: a test must be able to count the daemon's own clock reads without catching the bus's.\n\nQ2 Executor row selection. Give the full signature of executor.start (and of whatever dispatch() calls to launch a task, if that is a different function), and describe how it picks the executor row for a task: which function (pool.pick_executor? allocation?), what inputs (complexity, task_class, task['executor'], constraints), and what it records on the task (t['executor'], pipeline keys) and in the run row. State whether any existing parameter or task field lets the caller force a specific row id (for example task['executor'] = 'claude:opus' or constraints.executor) and what start() does when that field is already set. If nothing lets the caller pin a row, say so and name the smallest change (parameter name, where it is consumed) that would.\n\nQ3 In-flight dispatches. Show daemon.inflight_claude_dispatches() (or the function that counts dispatched-but-unclaimed tasks): how it identifies in-flight tasks (pipeline.dispatched_at without gated_at / claimed_at?), whether a dispatched task already carries its bound row (t['executor'] or pipeline.executor) at that moment, and therefore whether a per-row in-flight tally is possible from bus data alone. Also show executor.claude_row_free (B2a, merged) and what it subtracts.\n\nQ4 Decision row and capacity_reason order. In dispatch(): where is capacity_reason computed, where is the tick decision row built and written (function name), and where is the dispatch loop, in source order. Does the decision row get written before or after tasks are started? Can it be updated after the loop (is there a second write, or is the row built from locals at the end)?\n\nQ5 Fallback semantics. Quote daemon._fallback_mode and daemon._codex_available as they are now, and executor.fallback_mode and executor.codex_rows (B2a). State precisely how they differ for a pool with enabled Claude rows plus cooling codex rows, and for a pool with codex rows disabled. Also quote the hold_reason strings executor._exhausted writes (the 'no executor row covers' and 'claude_capacity:' texts) and whether _exhausted or dispatch() currently owns the 'uncovered' hold.\n\nQ6 bus.update semantics. Does bus.update(task_id, pipeline={...}) merge into the existing pipeline dict or replace it? How is a pipeline key removed today (grep for `pipeline.pop` or read-modify-write patterns in daemon.py/executor.py)? Cite the bus.update code.\n\nQ7 Decision-row readers. Which code reads the tick decision rows or `capacity_reason` (grep mcp.py, scorecard.py, spawn.py, cli.py, decision_log.py, tests): do they index known keys only (tolerate additive keys) or iterate/validate the key set?\n\nPost the result via bus_post_result with summary (<= 1500 tokens), findings as a list of {q, fact, path, symbol, line, confidence}, provenance 'repo'. Confidence < 0.7 on any answer must say what is uncertain.",
+  "inputs": [],
+  "acceptance": [
+    "Result posted via bus_post_result with status done, provenance repo, every Q1-Q7 answered with path:symbol:line citations from branch goal/T-1403",
+    "Q1 lists every daemon.py clock read reachable from dispatch() and states for each external helper whether it reads time.time via module attribute",
+    "Q2 states whether a caller can force an executor row and names the smallest change if not",
+    "Q6 states whether bus.update merges or replaces pipeline, with the cited code"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "orchestrator/bus.py",
+    "orchestrator/pool.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/capacity.py",
+    "orchestrator/mcp.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 40,
+    "timeout_s": 1500,
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B2b-scout"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1538",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Q1: Every clock read uses `import time` and `time.time()`: daemon.py, bus, pool, decision_log and schedlog. Patching `daemon.time.time` therefore also catches the bus and pool reads. daemon.py has no clock seam such as `_now`. It imports `executor` via `from . import`.",
+        "evidence": [
+          "orchestrator/daemon.py:dispatch:773",
+          "orchestrator/daemon.py:stamp:306",
+          "orchestrator/bus.py:update:183"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q2: `executor.start(task_id, prompt, executor_id=None, packet_meta=None)` already honours `executor_id`, but the daemon always passes None. `t['executor']` and constraints are ignored when picking a row. Smallest pin: pass the row id as the third argument of `spawn_async(_dispatch_worker, ...)` in `dispatch()`. That branch skips the eligibility checks.",
+        "evidence": [
+          "orchestrator/executor.py:start:395",
+          "orchestrator/daemon.py:_dispatch_worker:544"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q3: `inflight_claude_dispatches` counts queued execute tasks with `dispatched_at` and no `gated_at`. A dispatched task has no executor yet, so a per-row tally from bus data alone is not possible. `claude_row_free` subtracts only `row.running`, not in-flight dispatches.",
+        "evidence": [
+          "orchestrator/daemon.py:inflight_claude_dispatches:481",
+          "orchestrator/executor.py:claude_row_free:38"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q4: `capacity_reason` is computed at lines 776-779, then the dispatch loop runs. The tick row is written once by `schedlog.append('dispatch', row)` after the loop, with no second write.",
+        "evidence": [
+          "orchestrator/daemon.py:dispatch:767-1036"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q5: `daemon._fallback_mode` counts all enabled execute rows, so an enabled Claude row that isn't cooling makes it False. `executor.fallback_mode` looks at codex rows only. With cooling codex rows plus enabled Claude rows, daemon gives False and executor gives True. `_exhausted` owns the 'no executor row covers complexity N' hold.",
+        "evidence": [
+          "orchestrator/daemon.py:_fallback_mode:467",
+          "orchestrator/executor.py:fallback_mode:30",
+          "orchestrator/executor.py:_exhausted:597"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q6: `bus.update` replaces `pipeline` (`t[k]=v`), it does not merge. A key is removed by read-modify-write under `bus.locked()`: copy the dict, pop the key, then `bus.update(pipeline=...)`.",
+        "evidence": [
+          "orchestrator/bus.py:update:146-185"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Q7: `scorecard.py` reads `considered` entries with `.get`, so additive keys are tolerated. `test_dispatch_off_mode_is_unchanged` asserts exact equality of the whole dispatch row, so any new key on the off-mode path breaks it. I did not read the mcp, spawn, cli or decision_log bodies in full.",
+        "evidence": [
+          "tests/test_daemon.py:test_dispatch_off_mode_is_unchanged:463",
+          "orchestrator/scorecard.py:1582"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Some executor.py and dispatch line numbers are approximate (+-3).",
+      "I found no consumer of claude_capacity_until outside executor.py."
+    ],
+    "suggested_next": [],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790927454.779872,
+      "packet_meta": {
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13608,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790927454.79444,
+      "packet_meta": {
+        "chars": 12869,
+        "est_tokens": 3217,
+        "presented_tokens": 3217,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "af077b124c5761a65da72ad6d039dbccce253c6981880da96c552f5cff47a410"
+          },
+          "question": {
+            "chars": 4350,
+            "est_tokens": 1087,
+            "sha256": "895a1a7bdbe3ce2005dd3b0c5693b0268a783425b22887ce019687c5d70a9238"
+          },
+          "expected output": {
+            "chars": 487,
+            "est_tokens": 121,
+            "sha256": "515300b7575d125c8e739179e9eda0c5f2f90648c897935e799baa055f508f1c"
+          },
+          "scope tree": {
+            "chars": 1737,
+            "est_tokens": 434,
+            "sha256": "62458e616751c3a89f6c28ed0086c03b1e7fc9798281240a26641a48917768b3"
+          },
+          "memory titles": {
+            "chars": 6090,
+            "est_tokens": 1522,
+            "sha256": "6578571fde508c2df8d206aa32b25569f62167c951d1cb4d82cb84f80855b9f0"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "0d9f942a85d4",
+        "version": "0d9f942a85d4",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1538 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13608,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3186,
+        "tool_tokens_minimal": 2186,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "scout/repo-map"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 72,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790927455.082968,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1538",
+      "claimed_at": 1790927455.082431
+    },
+    {
+      "ts": 1790927455.086563,
+      "account": "A"
+    },
+    {
+      "ts": 1790927460.3939788,
+      "pid": 40406,
+      "account": "A"
+    },
+    {
+      "ts": 1790927560.838777,
+      "status": "done",
+      "result": {
+        "summary": "Read via git show goal/T-1403 (=5c4ba3d). All clock reads everywhere use `import time` module attribute, so patching daemon.time.time hits bus/pool/schedlog too. bus.update REPLACES pipeline. Nothing in the daemon pins an executor row (executor_id param exists, daemon passes None). Tick row written once after the loop.",
+        "provenance": "repo",
+        "findings": [
+          {
+            "q": "Q1",
+            "fact": "daemon.py clock reads: dispatch row ts; first_ready_at in loop; stamp() pipeline[stage]=now (+lease); complete() <stage>_done; review-respawn tail now=time.time(). No daemon-level seam (_now); imports `import time` and `from . import executor`. External: bus.update/claim/_event, pool cooling()/pick, decision_log._append, schedlog.append all `import time` + time.time(); executor.fallback_mode and claude_row_free take now=None default time.time(); Pool.row_covers has no clock.",
+            "path": "orchestrator/daemon.py",
+            "symbol": "dispatch/stamp/complete",
+            "line": "773,899,306,321,1044",
+            "confidence": 0.85
+          },
+          {
+            "q": "Q2",
+            "fact": "start(task_id, prompt, executor_id=None, packet_meta=None). daemon calls spawn_async(_dispatch_worker, id, prompt, None, meta); executor_id=None always. start uses executor_id if in pool.executors, else pool.pick_executor('execute', complexity, scores, task) plus allocation (active replaces). t['executor'] and constraints are ignored. Codex branch writes executor=ex.id, tier=ex.id at claim; Claude branch -> _exhausted(tier=) and spawn.run_worker sets executor=claude:<tier> (spawn.py:1564). Smallest pin: pass the row id as 3rd arg of spawn_async in dispatch(); start already honours it (skips eligibility checks).",
+            "path": "orchestrator/executor.py",
+            "symbol": "start",
+            "line": "395-413, 538-584",
+            "confidence": 0.8
+          },
+          {
+            "q": "Q3",
+            "fact": "inflight_claude_dispatches counts queued execute tasks with pipeline.dispatched_at and no gated_at; not row-specific, and the task has no executor yet at that point, so per-row tally from bus data is impossible without stamping the row at dispatch. claude_row_free(pool,row,now,headroom): 0 if disabled/cooling, 0 if max_parallel-running<=0, 0 if daily budget hit, 0 if headroom False, else max_parallel-running; subtracts only row.running, not in-flight.",
+            "path": "orchestrator/daemon.py; executor.py",
+            "symbol": "inflight_claude_dispatches; claude_row_free",
+            "line": "481-485; 38-53",
+            "confidence": 0.85
+          },
+          {
+            "q": "Q4",
+            "fact": "Order in dispatch(): row dict from locals (773) -> capacity_reason (776-779) -> scheduler block -> dispatch loop (~877) -> wave decision_log.record -> schedlog.append('dispatch', row) once after loop. Row written after tasks start; no second write; considered entries mutated in loop. capacity_reason not stored in row.",
+            "path": "orchestrator/daemon.py",
+            "symbol": "dispatch",
+            "line": "767-1036",
+            "confidence": 0.85
+          },
+          {
+            "q": "Q5",
+            "fact": "daemon._codex_available = any enabled execute row (any provider) not cooling; _fallback_mode = not that and on_exhausted=='fallback_claude'. executor.codex_rows = enabled execute rows provider=='codex'; executor.fallback_mode = bool(rows) and all codex rows cooling and policy fallback_claude. Pool with enabled Claude rows + cooling codex: daemon False, executor True. Codex rows disabled: executor False; daemon False if any Claude row not cooling, True if all cooling or none enabled. _exhausted holds: 'no executor row covers complexity N' and 'claude_capacity: no Claude row free after N requeues'; _exhausted owns 'uncovered'; dispatch only skips fallback_no_tier.",
+            "path": "orchestrator/daemon.py; executor.py",
+            "symbol": "_codex_available/_fallback_mode/codex_rows/fallback_mode/_exhausted",
+            "line": "459-472; 24-35; 597-632",
+            "confidence": 0.85
+          },
+          {
+            "q": "Q6",
+            "fact": "bus.update does t[k]=v per field: pipeline replaced, not merged. Removal is read-modify-write under bus.locked(): dict copy, pipeline.pop(key), bus.update(pipeline=...).",
+            "path": "orchestrator/bus.py",
+            "symbol": "update",
+            "line": "146-185",
+            "confidence": 0.95
+          },
+          {
+            "q": "Q7",
+            "fact": "scorecard.py reads considered entries with .get (tolerant). tests/test_daemon.py:463 test_dispatch_off_mode_is_unchanged asserts exact equality of the whole dispatch row and entries, so new keys break it. capacity_reason read only inside daemon.py. mcp/spawn/cli/decision_log: no dispatch-row consumers found by grep (bodies not fully read, confidence 0.7).",
+            "path": "tests/test_daemon.py; scorecard.py",
+            "symbol": "test_dispatch_off_mode_is_unchanged",
+            "line": "463; scorecard 1582-1590",
+            "confidence": 0.75
+          }
+        ],
+        "open_questions": [
+          "Some executor.py/dispatch line numbers approximate (+-3)",
+          "claude_capacity_until consumer not found outside executor.py"
+        ],
+        "suggested_next": [],
+        "blocked": null,
+        "confidence": 0.0
+      }
+    },
+    {
+      "ts": 1790927582.990633,
+      "packet_meta": {
+        "chars": 12869,
+        "est_tokens": 3217,
+        "presented_tokens": 3217,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "af077b124c5761a65da72ad6d039dbccce253c6981880da96c552f5cff47a410"
+          },
+          "question": {
+            "chars": 4350,
+            "est_tokens": 1087,
+            "sha256": "895a1a7bdbe3ce2005dd3b0c5693b0268a783425b22887ce019687c5d70a9238"
+          },
+          "expected output": {
+            "chars": 487,
+            "est_tokens": 121,
+            "sha256": "515300b7575d125c8e739179e9eda0c5f2f90648c897935e799baa055f508f1c"
+          },
+          "scope tree": {
+            "chars": 1737,
+            "est_tokens": 434,
+            "sha256": "62458e616751c3a89f6c28ed0086c03b1e7fc9798281240a26641a48917768b3"
+          },
+          "memory titles": {
+            "chars": 6090,
+            "est_tokens": 1522,
+            "sha256": "6578571fde508c2df8d206aa32b25569f62167c951d1cb4d82cb84f80855b9f0"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "0d9f942a85d4",
+        "version": "0d9f942a85d4",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1538 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13608,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3186,
+        "tool_tokens_minimal": 2186,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "scout/repo-map"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 72,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "dfcb7f2f-b44b-4c45-84e8-637479209bef"
+      }
+    },
+    {
+      "ts": 1790927583.015598,
+      "packet_meta": {
+        "chars": 12869,
+        "est_tokens": 3217,
+        "presented_tokens": 3217,
+        "sections": {
+          "_preamble": {
+            "chars": 82,
+            "est_tokens": 20,
+            "sha256": "af077b124c5761a65da72ad6d039dbccce253c6981880da96c552f5cff47a410"
+          },
+          "question": {
+            "chars": 4350,
+            "est_tokens": 1087,
+            "sha256": "895a1a7bdbe3ce2005dd3b0c5693b0268a783425b22887ce019687c5d70a9238"
+          },
+          "expected output": {
+            "chars": 487,
+            "est_tokens": 121,
+            "sha256": "515300b7575d125c8e739179e9eda0c5f2f90648c897935e799baa055f508f1c"
+          },
+          "scope tree": {
+            "chars": 1737,
+            "est_tokens": 434,
+            "sha256": "62458e616751c3a89f6c28ed0086c03b1e7fc9798281240a26641a48917768b3"
+          },
+          "memory titles": {
+            "chars": 6090,
+            "est_tokens": 1522,
+            "sha256": "6578571fde508c2df8d206aa32b25569f62167c951d1cb4d82cb84f80855b9f0"
+          },
+          "result contract": {
+            "chars": 123,
+            "est_tokens": 30,
+            "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+          }
+        },
+        "hash": "0d9f942a85d4",
+        "version": "0d9f942a85d4",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1538 tree@HEAD memory@notes",
+        "prefix_sha": "a24bf5bb2eee",
+        "prefix_chars": 648,
+        "suffix_chars": 13608,
+        "dynamic_sections": [
+          "question",
+          "expected output",
+          "scope tree",
+          "memory titles",
+          "result contract",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 347,
+        "instruction_tokens_modular": 347,
+        "role": "scout",
+        "tool_tokens_disclosed": 3186,
+        "tool_tokens_minimal": 2186,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "scout/repo-map"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 72,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "dfcb7f2f-b44b-4c45-84e8-637479209bef",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790927583.634573,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Q1: Every clock read uses `import time` and `time.time()`: daemon.py, bus, pool, decision_log and schedlog. Patching `daemon.time.time` therefore also catches the bus and pool reads. daemon.py has no clock seam such as `_now`. It imports `executor` via `from . import`.",
+            "evidence": [
+              "orchestrator/daemon.py:dispatch:773",
+              "orchestrator/daemon.py:stamp:306",
+              "orchestrator/bus.py:update:183"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q2: `executor.start(task_id, prompt, executor_id=None, packet_meta=None)` already honours `executor_id`, but the daemon always passes None. `t['executor']` and constraints are ignored when picking a row. Smallest pin: pass the row id as the third argument of `spawn_async(_dispatch_worker, ...)` in `dispatch()`. That branch skips the eligibility checks.",
+            "evidence": [
+              "orchestrator/executor.py:start:395",
+              "orchestrator/daemon.py:_dispatch_worker:544"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q3: `inflight_claude_dispatches` counts queued execute tasks with `dispatched_at` and no `gated_at`. A dispatched task has no executor yet, so a per-row tally from bus data alone is not possible. `claude_row_free` subtracts only `row.running`, not in-flight dispatches.",
+            "evidence": [
+              "orchestrator/daemon.py:inflight_claude_dispatches:481",
+              "orchestrator/executor.py:claude_row_free:38"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q4: `capacity_reason` is computed at lines 776-779, then the dispatch loop runs. The tick row is written once by `schedlog.append('dispatch', row)` after the loop, with no second write.",
+            "evidence": [
+              "orchestrator/daemon.py:dispatch:767-1036"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q5: `daemon._fallback_mode` counts all enabled execute rows, so an enabled Claude row that isn't cooling makes it False. `executor.fallback_mode` looks at codex rows only. With cooling codex rows plus enabled Claude rows, daemon gives False and executor gives True. `_exhausted` owns the 'no executor row covers complexity N' hold.",
+            "evidence": [
+              "orchestrator/daemon.py:_fallback_mode:467",
+              "orchestrator/executor.py:fallback_mode:30",
+              "orchestrator/executor.py:_exhausted:597"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q6: `bus.update` replaces `pipeline` (`t[k]=v`), it does not merge. A key is removed by read-modify-write under `bus.locked()`: copy the dict, pop the key, then `bus.update(pipeline=...)`.",
+            "evidence": [
+              "orchestrator/bus.py:update:146-185"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Q7: `scorecard.py` reads `considered` entries with `.get`, so additive keys are tolerated. `test_dispatch_off_mode_is_unchanged` asserts exact equality of the whole dispatch row, so any new key on the off-mode path breaks it. I did not read the mcp, spawn, cli or decision_log bodies in full.",
+            "evidence": [
+              "tests/test_daemon.py:test_dispatch_off_mode_is_unchanged:463",
+              "orchestrator/scorecard.py:1582"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Some executor.py and dispatch line numbers are approximate (+-3).",
+          "I found no consumer of claude_capacity_until outside executor.py."
+        ],
+        "suggested_next": [],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "packet_meta": {
+    "chars": 12869,
+    "est_tokens": 3217,
+    "presented_tokens": 3217,
+    "sections": {
+      "_preamble": {
+        "chars": 82,
+        "est_tokens": 20,
+        "sha256": "af077b124c5761a65da72ad6d039dbccce253c6981880da96c552f5cff47a410"
+      },
+      "question": {
+        "chars": 4350,
+        "est_tokens": 1087,
+        "sha256": "895a1a7bdbe3ce2005dd3b0c5693b0268a783425b22887ce019687c5d70a9238"
+      },
+      "expected output": {
+        "chars": 487,
+        "est_tokens": 121,
+        "sha256": "515300b7575d125c8e739179e9eda0c5f2f90648c897935e799baa055f508f1c"
+      },
+      "scope tree": {
+        "chars": 1737,
+        "est_tokens": 434,
+        "sha256": "62458e616751c3a89f6c28ed0086c03b1e7fc9798281240a26641a48917768b3"
+      },
+      "memory titles": {
+        "chars": 6090,
+        "est_tokens": 1522,
+        "sha256": "6578571fde508c2df8d206aa32b25569f62167c951d1cb4d82cb84f80855b9f0"
+      },
+      "result contract": {
+        "chars": 123,
+        "est_tokens": 30,
+        "sha256": "36a2a681f28b46fcaceedfd44080d36eda42e14100a26f5be086397e6368e29b"
+      }
+    },
+    "hash": "0d9f942a85d4",
+    "version": "0d9f942a85d4",
+    "candidate_known": false,
+    "base": "247723642f7a",
+    "sources": "task@T-1538 tree@HEAD memory@notes",
+    "prefix_sha": "a24bf5bb2eee",
+    "prefix_chars": 648,
+    "suffix_chars": 13608,
+    "dynamic_sections": [
+      "question",
+      "expected output",
+      "scope tree",
+      "memory titles",
+      "result contract",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 347,
+    "instruction_tokens_modular": 347,
+    "role": "scout",
+    "tool_tokens_disclosed": 3186,
+    "tool_tokens_minimal": 2186,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "scout/repo-map"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 72,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "dfcb7f2f-b44b-4c45-84e8-637479209bef",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790927455.082431,
+  "account": "A",
+  "pid": 40406,
+  "pipeline": {
+    "skills_used": []
+  }
+}

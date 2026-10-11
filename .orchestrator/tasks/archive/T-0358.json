@@ -1,0 +1,143 @@
+{
+  "id": "T-0358",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "H5a: executor running counters derived from bus state at Pool load (no persisted increments, legacy codex mirror dropped); codex and codex_reply MCP tools post their result to the bus",
+  "spec": "Build on goal/T-0353. Evidence (gotchas 2026-09-19 23:24 and 23:38): pool_state.json persists executors[*].running and codex.running, incremented in executor.py:83-84 and decremented only in the normal finally path (executor.py:94-95), so every process killed by a session restart leaks a slot; pool._sync_legacy_codex mirrors codex.running onto the legacy executor (astra), and daemon.free_slots then reports zero slots (two ready tasks sat queued five minutes on 2026-09-19). Separately, mcp.py codex and codex_reply return the Codex result dict without posting it, so the task stays running until the Planner posts by hand (T-0326, T-0331, T-0273, T-0277, T-0348).\n1. Pool load computes each executor's running count from bus tasks: status running, role execute, and executor == that id (fall back to tier == id for rows without executor). Remove the persisted running increments and decrements from executor.py and the running key from EXEC_STATE_FIELDS; keep cooldown and day_tasks persisted. Drop the running mirror in _sync_legacy_codex (keep the cooldown and day_tasks bridging). status() and free_slots keep their shapes.\n2. mcp.codex and mcp.codex_reply: when the tool returns a result for a task whose status is running and assigned_to is codex, post it with bus.post_result(task_id, {summary from the final message, commit sha parsed from the message when present else the worktree HEAD, executed_by codex:<executor>, provenance [repo], usage}, \"done\") exactly as executor._dispatch_worker's normal path does (reuse that function; do not duplicate the mapping). A result that already exists is not overwritten. The tool reply says posted: true or false and why.\nTests: tests/test_pool.py::test_running_counts_come_from_bus_not_state_file (state file says 7 running, bus has one running task -> 1), ::test_restart_killed_process_leaks_no_slot; tests/test_mcp.py::test_codex_tool_posts_result_for_running_codex_task, ::test_codex_reply_does_not_overwrite_existing_result. Keep every existing test green (adjust tests that asserted persisted running); .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0354"
+  ],
+  "acceptance": [
+    "tests/test_pool.py::test_running_counts_come_from_bus_not_state_file and ::test_restart_killed_process_leaks_no_slot pass",
+    "tests/test_mcp.py::test_codex_tool_posts_result_for_running_codex_task and ::test_codex_reply_does_not_overwrite_existing_result pass",
+    "grep shows no 'running +=' or 'running -=' in orchestrator/executor.py and 'running' is absent from EXEC_STATE_FIELDS",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_pool.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "task_class": "reliability"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0358",
+  "codex_thread": "01a0be6c-b648-77e2-bf10-58c14445fa1b",
+  "result": {
+    "summary": "Implemented and committed as `2de1126687373a3d292c2fd4cf1b836d8d7fab75`.\n\nSummary:\n- Executor running counts now derive from live bus tasks; persisted slot mutations/mirroring removed.\n- MCP Codex tools post completed results once, including commit, executor, provenance, and usage.\n- Added requested pool and MCP regressions; all 52 scoped/executor tests pass.\n\nFiles changed:\n- `orchestrator/pool.py`\n- `orchestrator/executor.py`\n- `orchestrator/mcp.py`\n- `tests/test_pool.py`\n- `tests/test_mcp.py`\n\nFailures-only output:\n- `scripts/tests_green.sh`: missing from worktree.\n- `.claude/hooks/tests-green.sh`: initially failed before follow-up fixes.\n- Final direct 514-test run: one unrelated `test_memory_skill` failure because its subprocess used Python without `tomllib`.\n- Final scoped run: no failures.",
+    "executed_by": "codex:sol",
+    "thread": "01a0be6c-b648-77e2-bf10-58c14445fa1b",
+    "usage": {
+      "input_tokens": 1351850,
+      "cached_input_tokens": 1280640,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 8909,
+      "reasoning_output_tokens": 3532
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789901189.3125389,
+      "pipeline": {
+        "dispatched_at": 1789901189.312491
+      }
+    },
+    {
+      "ts": 1789901190.677226,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0358",
+      "claimed_at": 1789901190.676805
+    },
+    {
+      "ts": 1789901190.678601,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789901582.249484,
+      "codex_thread": "01a0be6c-b648-77e2-bf10-58c14445fa1b"
+    },
+    {
+      "ts": 1789901582.252564,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed as `2de1126687373a3d292c2fd4cf1b836d8d7fab75`.\n\nSummary:\n- Executor running counts now derive from live bus tasks; persisted slot mutations/mirroring removed.\n- MCP Codex tools post completed results once, including commit, executor, provenance, and usage.\n- Added requested pool and MCP regressions; all 52 scoped/executor tests pass.\n\nFiles changed:\n- `orchestrator/pool.py`\n- `orchestrator/executor.py`\n- `orchestrator/mcp.py`\n- `tests/test_pool.py`\n- `tests/test_mcp.py`\n\nFailures-only output:\n- `scripts/tests_green.sh`: missing from worktree.\n- `.claude/hooks/tests-green.sh`: initially failed before follow-up fixes.\n- Final direct 514-test run: one unrelated `test_memory_skill` failure because its subprocess used Python without `tomllib`.\n- Final scoped run: no failures.",
+        "executed_by": "codex:sol",
+        "thread": "01a0be6c-b648-77e2-bf10-58c14445fa1b",
+        "usage": {
+          "input_tokens": 1351850,
+          "cached_input_tokens": 1280640,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8909,
+          "reasoning_output_tokens": 3532
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789901712.861695,
+      "pipeline": {
+        "dispatched_at": 1789901189.312491,
+        "gated_at": 1789901712.861567,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789901999.8309,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789902152.507766,
+      "pipeline": {
+        "dispatched_at": 1789901189.312491,
+        "gated_at": 1789901712.861567,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789902152.507665
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0368 (request_changes)"
+    },
+    {
+      "ts": 1789903602.1517498,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0378 2905bc4",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789901189.312491,
+    "gated_at": 1789901712.861567,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789902152.507665
+  },
+  "claimed_at": 1789901190.676805,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0378 2905bc4"
+}

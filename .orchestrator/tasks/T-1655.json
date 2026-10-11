@@ -1,0 +1,1528 @@
+{
+  "id": "T-1655",
+  "created_at": 1791230637.854101,
+  "parent": "T-1654",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "scripts/with-tokens.sh: run a command with allowlisted f-tok tokens in its env, values never printed",
+  "spec": "New script scripts/with-tokens.sh in the orchestrator repo: run one command with selected stored tokens in its\nenvironment, never printing a value. Model it on luna-inbox's scripts/with-secrets.sh (read it:\n/Users/k3ntaw/code/luna-inbox/scripts/with-secrets.sh): it sources \"${HOME}/.config/f/f.sh\" and reads\n`f tok get <id> --reveal` into a variable with printf -v, never echoing.\n\nUsage:\n  scripts/with-tokens.sh ENV_NAME=token-id [ENV_NAME=token-id ...] -- command [args...]\n  scripts/with-tokens.sh --list        # prints the allowlisted token ids, one per line, nothing else\n\nRules:\n1. Allowlist: token ids allowed are the non-blank, non-# lines of ${WITH_TOKENS_ALLOWLIST:-<repo root>/.orchestrator/token-allowlist.txt}.\n   Missing or empty allowlist -> every request refused (exit 3, \"with-tokens: no allowlist\"). A token id not on the\n   list -> exit 3 \"with-tokens: <id> is not allowlisted\". The human owns this file; the script never writes it.\n2. ENV_NAME must match ^[A-Z][A-Z0-9_]*$ and must not be PATH, HOME, SHELL, IFS, BASH_ENV, ENV, LD_PRELOAD,\n   DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, PROMPT_COMMAND (exit 2 otherwise). token-id must match ^[A-Za-z0-9._-]+$.\n3. `--` and a command are required (exit 2 with usage otherwise).\n4. Source \"${WITH_TOKENS_F_SH:-$HOME/.config/f/f.sh}\" (the override exists for tests only). For each pair read the value\n   with `f tok get <id> --reveal 2>/dev/null` into a variable; empty or failed -> exit 1 \"with-tokens: missing or\n   empty token: <id>\" (the id, never the value). Export each value under its ENV_NAME and `exec` the command.\n5. Never write a value to stdout, stderr, a file or a log; no set -x; no `env`/`printenv` in the script.\n   The command's own output is the caller's responsibility (document: never run echo/printenv/env through it).\n6. Header comment: purpose, usage, the allowlist rule, and \"values reach only the child process\".\n\nTests: new tests/test_with_tokens.py (unittest, subprocess, no real secrets): a temp fake f.sh defining\n`f() { [ \"$1 $2\" = \"tok get\" ] && case \"$3\" in a-key) printf secret-a;; b-key) printf secret-b;; *) return 1;; esac; }`\npassed via WITH_TOKENS_F_SH, and a temp allowlist via WITH_TOKENS_ALLOWLIST. Named tests:\n- test_runs_command_with_token_in_env: A=a-key -- python3 -c \"import os;print(len(os.environ['A']))\" prints 8; the\n  value itself never appears in stdout or stderr of the wrapper (assert 'secret-a' not in stderr).\n- test_two_tokens\n- test_not_allowlisted_refused (exit 3, value of no token in output)\n- test_missing_allowlist_refuses_all\n- test_missing_token_exits_1_and_names_id_only\n- test_bad_env_name_refused (lowercase, PATH, LD_PRELOAD)\n- test_requires_double_dash_and_command\n- test_list_prints_allowlist_only\nRun: uv run python -m pytest -q tests/test_with_tokens.py (or unittest). Commit on the task branch.\nDo not touch .claude/hooks, .orchestrator/protected-paths.txt or the allowlist file itself (the human creates it).\n",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_with_tokens.py: the eight named tests exist and pass",
+    "No token value is ever written to stdout, stderr or a file by the script",
+    "Without .orchestrator/token-allowlist.txt every request is refused",
+    "No change under .claude/hooks or to .orchestrator/protected-paths.txt"
+  ],
+  "scope": [
+    "scripts/with-tokens.sh",
+    "tests/test_with_tokens.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1655",
+  "codex_thread": null,
+  "result": {
+    "summary": "I added `scripts/with-tokens.sh` and its tests, committed on `task/T-1655` in two commits. All eight named tests pass and the worktree is clean.\n\n**Summary**\n- The script reads token values from `f tok get <id> --reveal 2>/dev/null` into variables, exports each under its ENV_NAME, then `exec`s the command. It never prints a value: there's no `set -x`, no `env`/`printenv`, and error messages name only the token id.\n- **Allowlist:** it reads `${WITH_TOKENS_ALLOWLIST:-<repo>/.orchestrator/token-allowlist.txt}`, skipping blank and `#` lines and trimming whitespace. If the file is missing or empty, every request fails with exit 3 \"no allowlist\". An id that isn't on the list fails with exit 3 \"<id> is not allowlisted\".\n- **Input checks:** an ENV_NAME that doesn't match the pattern or is on the reserved list exits 2. So does a malformed token id, a missing `--`, a missing command, or no pairs at all.\n- **`--list`:** prints the allowlisted ids, one per line. With no allowlist it prints nothing and exits 0.\n- The header comment covers purpose, usage, the allowlist rule, \"values reach only the child process\", and a warning never to run echo, printenv or env through it.\n- The first test run caught one bug: macOS bash 3.2 won't let `printf -v` write into an array element. The second commit fixes it by appending each value to an array instead. Values still go straight into a variable and are never printed.\n- The suite command in the packet doesn't import the test file. Run it as `uv run python -m unittest discover -s tests -p test_with_tokens.py`.\n- I created no allowlist file and touched nothing under `.claude/hooks` or `.orchestrator/protected-paths.txt`. No new dependencies.\n\n**Files changed**\n- `scripts/with-tokens.sh` (new, executable)\n- `tests/test_with_tokens.py` (new)\n\n**Test output (failures only)**\nNone. The last run was 8 tests, OK.",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791230702.437488,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442
+      }
+    },
+    {
+      "ts": 1791230702.439766,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711
+      }
+    },
+    {
+      "ts": 1791230702.440587,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711
+      }
+    },
+    {
+      "ts": 1791230706.056921,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5619,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791230706.058919,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847
+      }
+    },
+    {
+      "ts": 1791230930.402317,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        }
+      }
+    },
+    {
+      "ts": 1791230930.939737,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1791230930.948717,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791230935.9405818,
+      "executor": "claude:opus"
+    },
+    {
+      "ts": 1791230937.450281,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5619,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791230937.472692,
+      "packet_meta": {
+        "chars": 4740,
+        "est_tokens": 1185,
+        "presented_tokens": 1185,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "be1a23f1e827c325c7f15aec5d90f9479a2a8d2c35e09bc989bf410746da8683"
+          },
+          "objective": {
+            "chars": 3082,
+            "est_tokens": 770,
+            "sha256": "ce0da7db6834d4087741d013333e74dc6d7d95a0f3bcc42039bd50e6914feb7e"
+          },
+          "acceptance": {
+            "chars": 296,
+            "est_tokens": 74,
+            "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "88662012ee56d287fda5a92b41bc3ca312a0d10e1f2b54d7103e59ebb6d77fcf"
+          },
+          "write_scope": {
+            "chars": 68,
+            "est_tokens": 17,
+            "sha256": "dc0b0798ac23b083dbad80d94fe3e1ab433ec3fd5afd1d907d8b99dc2aba7eb5"
+          },
+          "read_scope": {
+            "chars": 34,
+            "est_tokens": 8,
+            "sha256": "b591e1ffb7ab19cb79826b1472551fd5e7aca49d5044a96edd712837def8c65b"
+          },
+          "constraints": {
+            "chars": 122,
+            "est_tokens": 30,
+            "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+          },
+          "relevant_tests": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "6748020a3148b37650bdf63e6912368d1207475cacc71095b5d045a8366b1776"
+          },
+          "symbols": {
+            "chars": 20,
+            "est_tokens": 5,
+            "sha256": "3d44487559d25204da9256ebe9490acbe905d30e6f267b2eba18e34aacd19263"
+          },
+          "gotchas": {
+            "chars": 734,
+            "est_tokens": 183,
+            "sha256": "4de365eaadfcbd82401962d5900f27139e626359742ec3a724c24aad39be0090"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "24e7af0211fa",
+        "version": "24e7af0211fa",
+        "candidate_known": true,
+        "base": "884f2d03c34e",
+        "sources": "pool.toml@0335f430fe15 gotchas@224c49d69a8e memory@notes routed=shadow",
+        "policy_version": "0335f430fe15",
+        "gotchas": "224c49d69a8e",
+        "candidate_tokens": 2240,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 2052,
+        "routed_reduction_ratio": 0.8731914893617021,
+        "routed_hidden": 6,
+        "routed_ambiguous": 4,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59819cb638c5",
+          "812a65f4ae81",
+          "544f20f32144",
+          "bd62f8f3f351",
+          "e9c8377e90d6",
+          "942be77fcbe7",
+          "9ea39468a2ec",
+          "b97d90d53b77",
+          "d3f5ca4dc695",
+          "cbf4327c7b01",
+          "17323921f5fb",
+          "73c539987ff3",
+          "96143cbd81ae",
+          "f32738b12619",
+          "f27b9db40df6",
+          "51eb61db54bc",
+          "8357629877aa",
+          "5439aa96c5bd",
+          "486c48fb58bf",
+          "e3214c6f07d6",
+          "781ed98a0d00",
+          "3dd202ba0afc",
+          "8da265fd289f",
+          "32c46c4b4d7a",
+          "0ae7bac2c35a",
+          "6d9fe178a44e",
+          "e50f28598678",
+          "6445c57779e7",
+          "fa18290813a3",
+          "48d6d148d9db",
+          "6a7b1fba7956",
+          "969720431875",
+          "8e45446d7b77",
+          "33385380d816",
+          "d636a0d6426d",
+          "deaf7fca4b22",
+          "f5777d6fd658",
+          "a49015688224",
+          "90335d8aa2d7"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5619,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 410,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791230939.01676,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1655",
+      "claimed_at": 1791230939.016525
+    },
+    {
+      "ts": 1791230939.0179,
+      "account": "B"
+    },
+    {
+      "ts": 1791230944.793942,
+      "pid": 89126,
+      "account": "B"
+    },
+    {
+      "ts": 1791231034.79881,
+      "packet_meta": {
+        "chars": 4740,
+        "est_tokens": 1185,
+        "presented_tokens": 1185,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "be1a23f1e827c325c7f15aec5d90f9479a2a8d2c35e09bc989bf410746da8683"
+          },
+          "objective": {
+            "chars": 3082,
+            "est_tokens": 770,
+            "sha256": "ce0da7db6834d4087741d013333e74dc6d7d95a0f3bcc42039bd50e6914feb7e"
+          },
+          "acceptance": {
+            "chars": 296,
+            "est_tokens": 74,
+            "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "88662012ee56d287fda5a92b41bc3ca312a0d10e1f2b54d7103e59ebb6d77fcf"
+          },
+          "write_scope": {
+            "chars": 68,
+            "est_tokens": 17,
+            "sha256": "dc0b0798ac23b083dbad80d94fe3e1ab433ec3fd5afd1d907d8b99dc2aba7eb5"
+          },
+          "read_scope": {
+            "chars": 34,
+            "est_tokens": 8,
+            "sha256": "b591e1ffb7ab19cb79826b1472551fd5e7aca49d5044a96edd712837def8c65b"
+          },
+          "constraints": {
+            "chars": 122,
+            "est_tokens": 30,
+            "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+          },
+          "relevant_tests": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "6748020a3148b37650bdf63e6912368d1207475cacc71095b5d045a8366b1776"
+          },
+          "symbols": {
+            "chars": 20,
+            "est_tokens": 5,
+            "sha256": "3d44487559d25204da9256ebe9490acbe905d30e6f267b2eba18e34aacd19263"
+          },
+          "gotchas": {
+            "chars": 734,
+            "est_tokens": 183,
+            "sha256": "4de365eaadfcbd82401962d5900f27139e626359742ec3a724c24aad39be0090"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "24e7af0211fa",
+        "version": "24e7af0211fa",
+        "candidate_known": true,
+        "base": "884f2d03c34e",
+        "sources": "pool.toml@0335f430fe15 gotchas@224c49d69a8e memory@notes routed=shadow",
+        "policy_version": "0335f430fe15",
+        "gotchas": "224c49d69a8e",
+        "candidate_tokens": 2240,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 2052,
+        "routed_reduction_ratio": 0.8731914893617021,
+        "routed_hidden": 6,
+        "routed_ambiguous": 4,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59819cb638c5",
+          "812a65f4ae81",
+          "544f20f32144",
+          "bd62f8f3f351",
+          "e9c8377e90d6",
+          "942be77fcbe7",
+          "9ea39468a2ec",
+          "b97d90d53b77",
+          "d3f5ca4dc695",
+          "cbf4327c7b01",
+          "17323921f5fb",
+          "73c539987ff3",
+          "96143cbd81ae",
+          "f32738b12619",
+          "f27b9db40df6",
+          "51eb61db54bc",
+          "8357629877aa",
+          "5439aa96c5bd",
+          "486c48fb58bf",
+          "e3214c6f07d6",
+          "781ed98a0d00",
+          "3dd202ba0afc",
+          "8da265fd289f",
+          "32c46c4b4d7a",
+          "0ae7bac2c35a",
+          "6d9fe178a44e",
+          "e50f28598678",
+          "6445c57779e7",
+          "fa18290813a3",
+          "48d6d148d9db",
+          "6a7b1fba7956",
+          "969720431875",
+          "8e45446d7b77",
+          "33385380d816",
+          "d636a0d6426d",
+          "deaf7fca4b22",
+          "f5777d6fd658",
+          "a49015688224",
+          "90335d8aa2d7"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5619,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 410,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "3a2e22de-c9ee-4f11-a5dc-be6795d18a1a"
+      }
+    },
+    {
+      "ts": 1791231034.824555,
+      "packet_meta": {
+        "chars": 4740,
+        "est_tokens": 1185,
+        "presented_tokens": 1185,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "be1a23f1e827c325c7f15aec5d90f9479a2a8d2c35e09bc989bf410746da8683"
+          },
+          "objective": {
+            "chars": 3082,
+            "est_tokens": 770,
+            "sha256": "ce0da7db6834d4087741d013333e74dc6d7d95a0f3bcc42039bd50e6914feb7e"
+          },
+          "acceptance": {
+            "chars": 296,
+            "est_tokens": 74,
+            "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "88662012ee56d287fda5a92b41bc3ca312a0d10e1f2b54d7103e59ebb6d77fcf"
+          },
+          "write_scope": {
+            "chars": 68,
+            "est_tokens": 17,
+            "sha256": "dc0b0798ac23b083dbad80d94fe3e1ab433ec3fd5afd1d907d8b99dc2aba7eb5"
+          },
+          "read_scope": {
+            "chars": 34,
+            "est_tokens": 8,
+            "sha256": "b591e1ffb7ab19cb79826b1472551fd5e7aca49d5044a96edd712837def8c65b"
+          },
+          "constraints": {
+            "chars": 122,
+            "est_tokens": 30,
+            "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+          },
+          "relevant_tests": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "6748020a3148b37650bdf63e6912368d1207475cacc71095b5d045a8366b1776"
+          },
+          "symbols": {
+            "chars": 20,
+            "est_tokens": 5,
+            "sha256": "3d44487559d25204da9256ebe9490acbe905d30e6f267b2eba18e34aacd19263"
+          },
+          "gotchas": {
+            "chars": 734,
+            "est_tokens": 183,
+            "sha256": "4de365eaadfcbd82401962d5900f27139e626359742ec3a724c24aad39be0090"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "24e7af0211fa",
+        "version": "24e7af0211fa",
+        "candidate_known": true,
+        "base": "884f2d03c34e",
+        "sources": "pool.toml@0335f430fe15 gotchas@224c49d69a8e memory@notes routed=shadow",
+        "policy_version": "0335f430fe15",
+        "gotchas": "224c49d69a8e",
+        "candidate_tokens": 2240,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 2052,
+        "routed_reduction_ratio": 0.8731914893617021,
+        "routed_hidden": 6,
+        "routed_ambiguous": 4,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "59819cb638c5",
+          "812a65f4ae81",
+          "544f20f32144",
+          "bd62f8f3f351",
+          "e9c8377e90d6",
+          "942be77fcbe7",
+          "9ea39468a2ec",
+          "b97d90d53b77",
+          "d3f5ca4dc695",
+          "cbf4327c7b01",
+          "17323921f5fb",
+          "73c539987ff3",
+          "96143cbd81ae",
+          "f32738b12619",
+          "f27b9db40df6",
+          "51eb61db54bc",
+          "8357629877aa",
+          "5439aa96c5bd",
+          "486c48fb58bf",
+          "e3214c6f07d6",
+          "781ed98a0d00",
+          "3dd202ba0afc",
+          "8da265fd289f",
+          "32c46c4b4d7a",
+          "0ae7bac2c35a",
+          "6d9fe178a44e",
+          "e50f28598678",
+          "6445c57779e7",
+          "fa18290813a3",
+          "48d6d148d9db",
+          "6a7b1fba7956",
+          "969720431875",
+          "8e45446d7b77",
+          "33385380d816",
+          "d636a0d6426d",
+          "deaf7fca4b22",
+          "f5777d6fd658",
+          "a49015688224",
+          "90335d8aa2d7"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5619,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 410,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "3a2e22de-c9ee-4f11-a5dc-be6795d18a1a",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791231035.490921,
+      "status": "done",
+      "result": {
+        "summary": "I added `scripts/with-tokens.sh` and its tests, committed on `task/T-1655` in two commits. All eight named tests pass and the worktree is clean.\n\n**Summary**\n- The script reads token values from `f tok get <id> --reveal 2>/dev/null` into variables, exports each under its ENV_NAME, then `exec`s the command. It never prints a value: there's no `set -x`, no `env`/`printenv`, and error messages name only the token id.\n- **Allowlist:** it reads `${WITH_TOKENS_ALLOWLIST:-<repo>/.orchestrator/token-allowlist.txt}`, skipping blank and `#` lines and trimming whitespace. If the file is missing or empty, every request fails with exit 3 \"no allowlist\". An id that isn't on the list fails with exit 3 \"<id> is not allowlisted\".\n- **Input checks:** an ENV_NAME that doesn't match the pattern or is on the reserved list exits 2. So does a malformed token id, a missing `--`, a missing command, or no pairs at all.\n- **`--list`:** prints the allowlisted ids, one per line. With no allowlist it prints nothing and exits 0.\n- The header comment covers purpose, usage, the allowlist rule, \"values reach only the child process\", and a warning never to run echo, printenv or env through it.\n- The first test run caught one bug: macOS bash 3.2 won't let `printf -v` write into an array element. The second commit fixes it by appending each value to an array instead. Values still go straight into a variable and are never printed.\n- The suite command in the packet doesn't import the test file. Run it as `uv run python -m unittest discover -s tests -p test_with_tokens.py`.\n- I created no allowlist file and touched nothing under `.claude/hooks` or `.orchestrator/protected-paths.txt`. No new dependencies.\n\n**Files changed**\n- `scripts/with-tokens.sh` (new, executable)\n- `tests/test_with_tokens.py` (new)\n\n**Test output (failures only)**\nNone. The last run was 8 tests, OK.",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791231036.678781,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791231209.11805,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization"
+      }
+    },
+    {
+      "ts": 1791231209.863014,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        }
+      }
+    },
+    {
+      "ts": 1791231210.1348548,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        },
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c"
+      }
+    },
+    {
+      "ts": 1791231210.145229,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        },
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+        "gated_at_done": 1791231210.145041
+      }
+    },
+    {
+      "ts": 1791231237.918286,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791231312.17779,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        },
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+        "gated_at_done": 1791231210.145041,
+        "merged_at": 1791231312.177558,
+        "merged_at_lease": 1791232212.177558
+      }
+    },
+    {
+      "ts": 1791231480.842798,
+      "status": "done",
+      "merged_into": "goal/T-1654",
+      "sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+      "merged_at": 1791231480.8416388,
+      "changed_files": [
+        "scripts/with-tokens.sh",
+        "tests/test_with_tokens.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        },
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+        "gated_at_done": 1791231210.145041,
+        "merged_at": 1791231312.177558,
+        "merged_at_lease": 1791232212.177558
+      }
+    },
+    {
+      "ts": 1791231482.254015,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        },
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+        "gated_at_done": 1791231210.145041,
+        "merged_at": 1791231312.177558,
+        "merged_at_lease": 1791232212.177558,
+        "accepted_at": 1791231482.2534301
+      }
+    },
+    {
+      "ts": 1791231520.9888089,
+      "pipeline": {
+        "first_ready_at": 1791230702.437442,
+        "dispatched_at": 1791230702.439711,
+        "dispatched_at_lease": 1791231602.439711,
+        "dispatched_at_done": 1791230706.058847,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791230930.401985
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791231209.117849,
+        "gated_at_lease": 1791232109.117849,
+        "first_green_at": 1791231209.116964,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "semantic_pattern:authorization",
+        "stale_check": {
+          "base": "task/T-1655",
+          "goal_head": "goal/T-1654",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "severity": "unknown",
+          "severity_reasons": [
+            "git_failed"
+          ],
+          "risk": "unknown",
+          "risk_reasons": [
+            "git_failed"
+          ],
+          "graph": "absent",
+          "checked_at": 1791231209.862612,
+          "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+        },
+        "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+        "gated_at_done": 1791231210.145041,
+        "merged_at": 1791231312.177558,
+        "merged_at_lease": 1791232212.177558,
+        "accepted_at": 1791231482.2534301,
+        "merged_at_done": 1791231520.9885912
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791230702.437442,
+    "dispatched_at": 1791230702.439711,
+    "dispatched_at_lease": 1791231602.439711,
+    "dispatched_at_done": 1791230706.058847,
+    "handoff": {
+      "baseline": "claude:opus",
+      "selected": "claude:opus",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791230930.401985
+    },
+    "jev_route": {
+      "baseline": "opus",
+      "hypothetical": "claude:opus",
+      "key": "b6c1014d87714d1609a833ac1f35cfd84438a03b",
+      "adjustment": {
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "skills_used": [],
+    "gate_attempts": 1,
+    "gated_at": 1791231209.117849,
+    "gated_at_lease": 1791232109.117849,
+    "first_green_at": 1791231209.116964,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "semantic_pattern:authorization",
+    "stale_check": {
+      "base": "task/T-1655",
+      "goal_head": "goal/T-1654",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "severity": "unknown",
+      "severity_reasons": [
+        "git_failed"
+      ],
+      "risk": "unknown",
+      "risk_reasons": [
+        "git_failed"
+      ],
+      "graph": "absent",
+      "checked_at": 1791231209.862612,
+      "head": "37e8f88067394e62e3936584bb6421107eaa972c"
+    },
+    "reviewed_sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+    "gated_at_done": 1791231210.145041,
+    "merged_at": 1791231312.177558,
+    "merged_at_lease": 1791232212.177558,
+    "accepted_at": 1791231482.2534301,
+    "merged_at_done": 1791231520.9885912
+  },
+  "packet_meta": {
+    "chars": 4740,
+    "est_tokens": 1185,
+    "presented_tokens": 1185,
+    "sections": {
+      "_preamble": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "be1a23f1e827c325c7f15aec5d90f9479a2a8d2c35e09bc989bf410746da8683"
+      },
+      "objective": {
+        "chars": 3082,
+        "est_tokens": 770,
+        "sha256": "ce0da7db6834d4087741d013333e74dc6d7d95a0f3bcc42039bd50e6914feb7e"
+      },
+      "acceptance": {
+        "chars": 296,
+        "est_tokens": 74,
+        "sha256": "0fc36f9122ab4c13a39e5ab424922ad493c77685683b9d183d05fef082b5e23f"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "88662012ee56d287fda5a92b41bc3ca312a0d10e1f2b54d7103e59ebb6d77fcf"
+      },
+      "write_scope": {
+        "chars": 68,
+        "est_tokens": 17,
+        "sha256": "dc0b0798ac23b083dbad80d94fe3e1ab433ec3fd5afd1d907d8b99dc2aba7eb5"
+      },
+      "read_scope": {
+        "chars": 34,
+        "est_tokens": 8,
+        "sha256": "b591e1ffb7ab19cb79826b1472551fd5e7aca49d5044a96edd712837def8c65b"
+      },
+      "constraints": {
+        "chars": 122,
+        "est_tokens": 30,
+        "sha256": "25d19e89d44b4d4f2e8a9bc629af67531883103dbee8da1afc5dda6a255c93c4"
+      },
+      "relevant_tests": {
+        "chars": 33,
+        "est_tokens": 8,
+        "sha256": "6748020a3148b37650bdf63e6912368d1207475cacc71095b5d045a8366b1776"
+      },
+      "symbols": {
+        "chars": 20,
+        "est_tokens": 5,
+        "sha256": "3d44487559d25204da9256ebe9490acbe905d30e6f267b2eba18e34aacd19263"
+      },
+      "gotchas": {
+        "chars": 734,
+        "est_tokens": 183,
+        "sha256": "4de365eaadfcbd82401962d5900f27139e626359742ec3a724c24aad39be0090"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "24e7af0211fa",
+    "version": "24e7af0211fa",
+    "candidate_known": true,
+    "base": "884f2d03c34e",
+    "sources": "pool.toml@0335f430fe15 gotchas@224c49d69a8e memory@notes routed=shadow",
+    "policy_version": "0335f430fe15",
+    "gotchas": "224c49d69a8e",
+    "candidate_tokens": 2240,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 2052,
+    "routed_reduction_ratio": 0.8731914893617021,
+    "routed_hidden": 6,
+    "routed_ambiguous": 4,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "59819cb638c5",
+      "812a65f4ae81",
+      "544f20f32144",
+      "bd62f8f3f351",
+      "e9c8377e90d6",
+      "942be77fcbe7",
+      "9ea39468a2ec",
+      "b97d90d53b77",
+      "d3f5ca4dc695",
+      "cbf4327c7b01",
+      "17323921f5fb",
+      "73c539987ff3",
+      "96143cbd81ae",
+      "f32738b12619",
+      "f27b9db40df6",
+      "51eb61db54bc",
+      "8357629877aa",
+      "5439aa96c5bd",
+      "486c48fb58bf",
+      "e3214c6f07d6",
+      "781ed98a0d00",
+      "3dd202ba0afc",
+      "8da265fd289f",
+      "32c46c4b4d7a",
+      "0ae7bac2c35a",
+      "6d9fe178a44e",
+      "e50f28598678",
+      "6445c57779e7",
+      "fa18290813a3",
+      "48d6d148d9db",
+      "6a7b1fba7956",
+      "969720431875",
+      "8e45446d7b77",
+      "33385380d816",
+      "d636a0d6426d",
+      "deaf7fca4b22",
+      "f5777d6fd658",
+      "a49015688224",
+      "90335d8aa2d7"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 5619,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 471,
+    "instruction_tokens_modular": 410,
+    "role": "execute",
+    "tool_tokens_disclosed": 5995,
+    "tool_tokens_minimal": 5995,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_selected_l0": 25,
+    "skill_tokens_selected_l2": 62,
+    "skill_routing_mode": "shadow",
+    "session_id": "3a2e22de-c9ee-4f11-a5dc-be6795d18a1a",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:opus",
+  "claimed_at": 1791230939.016525,
+  "account": "B",
+  "pid": 89126,
+  "review_verdict": "approve",
+  "merged_into": "goal/T-1654",
+  "sha": "37e8f88067394e62e3936584bb6421107eaa972c",
+  "merged_at": 1791231480.8416388,
+  "changed_files": [
+    "scripts/with-tokens.sh",
+    "tests/test_with_tokens.py"
+  ]
+}

@@ -1,0 +1,196 @@
+{
+  "id": "T-0576",
+  "created_at": 1789971201.126276,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R16: orchestrator/stale.py \u2014 complete stale-work evidence: interface, tests, dependency, graph and overlapping-merge signals with graded risk and injectable git (AP P12)",
+  "spec": "Why: daemon.stale_check (orchestrator/daemon.py:1050-1070) only compares paths moved on the goal branch against the task's scope plus changed files and grades risk none/low/high; the brief (P7) also requires public-interface changes, relevant-test changes, dependency changes, graph-relationship changes and overlapping earlier merges, each recorded with base, goal head, changed relevant paths, risk, action and conflict outcome.\nWhat: new pure module orchestrator/stale.py; daemon delegation is a later integration task, so keep the existing stale_check output keys as a subset.\n- evidence(task, *, worktree, goal_ref=None, graph=None, tasks=None, git=None, now=None) -> {\"base\": task_ref, \"goal_head\", \"moved_count\", \"stale_paths\" (as today), \"signals\": {\"scoped_files_changed\": [...], \"changed_files_moved\": [...], \"tests_changed\": [...], \"interface_changed\": [{\"symbol\", \"file\", \"consumer\"}], \"graph_relationships\": [{\"source\", \"target\"}], \"dependency_changed\": [task ids], \"overlapping_merge\": [task ids]}, \"risk\": none|low|medium|high, \"risk_reasons\": [...], \"graph\": \"used\"|\"absent\"|\"stale\"|\"skipped\"}.\n- Signals: moved = gitutil.moved_paths(task_ref, goal_ref, cwd=worktree, git=git); changed = gitutil.changed_paths(task, git=git); scoped_files_changed = moved matching scope patterns; changed_files_moved = moved intersect changed; tests_changed = moved paths equal to tests/test_<stem>.py for stems of changed or scoped orchestrator/*.py files; interface_changed = for each moved file, graph nodes defined in that file (node.source_file) whose links (relation calls or imports) reach a node defined in one of the task's changed or scoped files, only when interference.graph_fresh_for reports True for those files, else graph = stale/absent and the signal is skipped; graph_relationships = links between moved files and task files regardless of symbol; dependency_changed = ids in task.depends_on whose merged sha is not an ancestor of task_ref (git merge-base --is-ancestor via the git callable); overlapping_merge = execute tasks from `tasks` merged into goal_ref whose changed_files or scope literals intersect the task's changed or scope paths and whose sha is not an ancestor of task_ref.\n- Risk: high when changed_files_moved, interface_changed or dependency_changed non-empty; medium when tests_changed, graph_relationships or overlapping_merge non-empty; low when only scoped_files_changed; none otherwise; unknown when git evidence fails (gitutil.GitError) with risk_reasons [\"git_failed\"].\n- row(task, evidence, action, conflict=None) -> dict for schedlog.append(\"stale\", ...) with task, goal_id, base, goal_head, changed_relevant_paths, risk, risk_reasons, action (recorded|rebased|rebase_conflict|revalidated), conflict paths.\nNever mutates git state; never discards work.",
+  "inputs": [
+    "T-0575"
+  ],
+  "acceptance": [
+    "tests/test_stale.py::test_interface_change_in_moved_file_consumed_by_task_is_high_risk \u2014 a graph linking a symbol in a moved file to the task's changed file yields interface_changed non-empty and risk high",
+    "tests/test_stale.py::test_relevant_test_change_is_medium_risk \u2014 tests/test_foo.py moved while the task changed orchestrator/foo.py yields tests_changed and risk medium",
+    "tests/test_stale.py::test_dependency_merged_after_branch_point_is_high_risk \u2014 a depends_on task whose sha is not an ancestor of the task ref yields dependency_changed and risk high",
+    "tests/test_stale.py::test_overlapping_earlier_merge_is_recorded \u2014 another execute task merged into the goal touching a scoped path appears in overlapping_merge with risk at least medium",
+    "tests/test_stale.py::test_absent_or_stale_graph_falls_back_and_git_failure_is_unknown \u2014 graph None yields graph absent with deterministic signals intact; a git callable raising GitError yields risk unknown and risk_reasons git_failed; row() carries base, goal_head, changed_relevant_paths, risk, action"
+  ],
+  "scope": [
+    "orchestrator/stale.py",
+    "tests/test_stale.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0576",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/interference.py",
+        "issue": "interface_changed's 'links (relation calls or imports)' filter can't be built on top of interference.load_graph()'s shape, which the spec also requires for the freshness gate (interference.graph_fresh_for) \u2014 load_graph() collapses every link to a bare (source,target) id pair and discards the relation field that raw graphify-out/graph.json actually carries.",
+        "severity": "high",
+        "line": 96
+      },
+      {
+        "path": "orchestrator/merge.py",
+        "issue": "overlapping_merge needs each merged task's changed_files, but no task record anywhere stores that field (merge() only stamps status/merged_into/sha), and recomputing it via gitutil.changed_paths needs a worktree that's typically pruned after merge.",
+        "severity": "high",
+        "line": 88
+      },
+      {
+        "path": "orchestrator/gitutil.py",
+        "issue": "evidence()'s explicit worktree kwarg is a second source of truth from task['worktree'], which gitutil.changed_paths reads internally with no worktree param \u2014 if the two diverge or task['worktree'] is unset, changed-file-dependent signals silently go empty.",
+        "severity": "med",
+        "line": 25
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "risk_reasons content is only pinned by acceptance tests for the unknown/git_failed case; nothing forces high/medium/low signals to populate risk_reasons with anything meaningful.",
+        "severity": "low",
+        "line": 1050
+      }
+    ],
+    "suggested_spec_changes": [
+      "Decide explicitly whether interface_changed distinguishes relation types: either drop 'relation calls or imports' and treat any link the same way interference.graph_signal already does, or specify that stale.py reads raw graphify-out/graph.json links directly (with its own freshness check) instead of interference.load_graph()'s reduced shape.",
+      "Specify how overlapping_merge obtains changed_files for a historical merged task: either say `tasks` entries must already carry a precomputed changed_files list (and note that this spec does not populate it, so overlapping_merge is scope-literal-only until a later task adds it), or drop the changed_files half of that signal for this task.",
+      "Change evidence()'s signature to derive worktree solely from task['worktree'] (matching how daemon.stale_check already does it) rather than taking a separate worktree kwarg, or require evidence() to inject `{**task, 'worktree': worktree}` before calling gitutil.moved_paths/changed_paths so there's one source of truth.",
+      "Pin at least one canonical risk_reasons string per non-unknown risk level (e.g. 'interface_changed', 'dependency_changed', 'tests_changed') in the acceptance criteria so risk_reasons can't be satisfied with an empty list."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789971204.364031,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0576",
+      "claimed_at": 1789971204.361161
+    },
+    {
+      "ts": 1789971204.370591,
+      "account": "B"
+    },
+    {
+      "ts": 1789971205.583992,
+      "pid": 14715,
+      "account": "B"
+    },
+    {
+      "ts": 1789971503.177075,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/interference.py",
+            "issue": "interface_changed's 'links (relation calls or imports)' filter can't be built on top of interference.load_graph()'s shape, which the spec also requires for the freshness gate (interference.graph_fresh_for) \u2014 load_graph() collapses every link to a bare (source,target) id pair and discards the relation field that raw graphify-out/graph.json actually carries.",
+            "severity": "high",
+            "line": 96
+          },
+          {
+            "path": "orchestrator/merge.py",
+            "issue": "overlapping_merge needs each merged task's changed_files, but no task record anywhere stores that field (merge() only stamps status/merged_into/sha), and recomputing it via gitutil.changed_paths needs a worktree that's typically pruned after merge.",
+            "severity": "high",
+            "line": 88
+          },
+          {
+            "path": "orchestrator/gitutil.py",
+            "issue": "evidence()'s explicit worktree kwarg is a second source of truth from task['worktree'], which gitutil.changed_paths reads internally with no worktree param \u2014 if the two diverge or task['worktree'] is unset, changed-file-dependent signals silently go empty.",
+            "severity": "med",
+            "line": 25
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "risk_reasons content is only pinned by acceptance tests for the unknown/git_failed case; nothing forces high/medium/low signals to populate risk_reasons with anything meaningful.",
+            "severity": "low",
+            "line": 1050
+          }
+        ],
+        "suggested_spec_changes": [
+          "Decide explicitly whether interface_changed distinguishes relation types: either drop 'relation calls or imports' and treat any link the same way interference.graph_signal already does, or specify that stale.py reads raw graphify-out/graph.json links directly (with its own freshness check) instead of interference.load_graph()'s reduced shape.",
+          "Specify how overlapping_merge obtains changed_files for a historical merged task: either say `tasks` entries must already carry a precomputed changed_files list (and note that this spec does not populate it, so overlapping_merge is scope-literal-only until a later task adds it), or drop the changed_files half of that signal for this task.",
+          "Change evidence()'s signature to derive worktree solely from task['worktree'] (matching how daemon.stale_check already does it) rather than taking a separate worktree kwarg, or require evidence() to inject `{**task, 'worktree': worktree}` before calling gitutil.moved_paths/changed_paths so there's one source of truth.",
+          "Pin at least one canonical risk_reasons string per non-unknown risk level (e.g. 'interface_changed', 'dependency_changed', 'tests_changed') in the acceptance criteria so risk_reasons can't be satisfied with an empty list."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971503.178565,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/interference.py",
+          "issue": "interface_changed's 'links (relation calls or imports)' filter can't be built on top of interference.load_graph()'s shape, which the spec also requires for the freshness gate (interference.graph_fresh_for) \u2014 load_graph() collapses every link to a bare (source,target) id pair and discards the relation field that raw graphify-out/graph.json actually carries.",
+          "severity": "high",
+          "line": 96
+        },
+        {
+          "path": "orchestrator/merge.py",
+          "issue": "overlapping_merge needs each merged task's changed_files, but no task record anywhere stores that field (merge() only stamps status/merged_into/sha), and recomputing it via gitutil.changed_paths needs a worktree that's typically pruned after merge.",
+          "severity": "high",
+          "line": 88
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "issue": "evidence()'s explicit worktree kwarg is a second source of truth from task['worktree'], which gitutil.changed_paths reads internally with no worktree param \u2014 if the two diverge or task['worktree'] is unset, changed-file-dependent signals silently go empty.",
+          "severity": "med",
+          "line": 25
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "risk_reasons content is only pinned by acceptance tests for the unknown/git_failed case; nothing forces high/medium/low signals to populate risk_reasons with anything meaningful.",
+          "severity": "low",
+          "line": 1050
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789971204.361161,
+  "account": "B",
+  "pid": 14715,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/interference.py",
+      "issue": "interface_changed's 'links (relation calls or imports)' filter can't be built on top of interference.load_graph()'s shape, which the spec also requires for the freshness gate (interference.graph_fresh_for) \u2014 load_graph() collapses every link to a bare (source,target) id pair and discards the relation field that raw graphify-out/graph.json actually carries.",
+      "severity": "high",
+      "line": 96
+    },
+    {
+      "path": "orchestrator/merge.py",
+      "issue": "overlapping_merge needs each merged task's changed_files, but no task record anywhere stores that field (merge() only stamps status/merged_into/sha), and recomputing it via gitutil.changed_paths needs a worktree that's typically pruned after merge.",
+      "severity": "high",
+      "line": 88
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "issue": "evidence()'s explicit worktree kwarg is a second source of truth from task['worktree'], which gitutil.changed_paths reads internally with no worktree param \u2014 if the two diverge or task['worktree'] is unset, changed-file-dependent signals silently go empty.",
+      "severity": "med",
+      "line": 25
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "risk_reasons content is only pinned by acceptance tests for the unknown/git_failed case; nothing forces high/medium/low signals to populate risk_reasons with anything meaningful.",
+      "severity": "low",
+      "line": 1050
+    }
+  ]
+}

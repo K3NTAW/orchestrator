@@ -1,0 +1,95 @@
+{
+  "id": "T-0141",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "C-O11: run_worker keeps a worker-posted verdict when its own JSON parse fails; merge_reviewed falls back to result.verdict",
+  "spec": "Why: the opus reviewer for T-0135 posted {verdict: approve, ...} itself via bus_post_result, then ended with fenced JSON that spawn.run_worker's extract_json could not parse; run_worker posted a second result {summary, parse_error, ...} without a verdict, replacing the first, and never set review_verdict. daemon.merge_reviewed reads only src.review_verdict or r.review_verdict, so the approved task sat unmerged until the Planner merged by hand (gotchas.md 2026-09-18, T-0139).\n\nChange orchestrator/spawn.py run_worker (review/spec_review/scout branch, the `elif r[\"status\"] == \"done\"` path): after result = extract_json(...), if the parse failed (result carries parse_error or has no \"verdict\" for review roles) and bus.get(task_id).get(\"result\", {}).get(\"verdict\") is already set, do NOT post the parsed result; keep the existing one and set the verdict fields (review_verdict / spec_review_verdict + risks) from the existing result on both the task and inputs[0], exactly as the success path does. If the parse failed and no verdict exists anywhere, for review roles post status \"failed\" with reason \"review returned no parseable verdict\" and resume_hint={\"raw\": text[-2000:]} instead of a done result without a verdict; non-review roles keep today's behaviour.\n\nChange orchestrator/daemon.py merge_reviewed: verdict = src.get(\"review_verdict\") or r.get(\"review_verdict\") or (r.get(\"result\") or {}).get(\"verdict\"); no other change.\n\nTests: tests/test_spawn.py (a) run_worker with run_claude patched to return done output whose result text is unparseable, on a review task whose bus result already has verdict approve \u2192 the task result still has verdict approve, task.review_verdict == \"approve\" and inputs[0].review_verdict == \"approve\"; (b) same with no prior verdict \u2192 task status failed, reason names the missing verdict, resume_hint.raw present. tests/test_daemon.py (c) a done review whose result has verdict approve but no review_verdict fields \u2192 merge_reviewed merges the source task (merge.merge patched, assert called with the source id). No new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [],
+  "acceptance": [
+    "A worker-posted verdict survives a failed parse of the final text and propagates to review_verdict on the task and its input (test a)",
+    "A review with no parseable verdict anywhere ends failed with the raw text in resume_hint, never done without a verdict (test b)",
+    "merge_reviewed falls back to result.verdict (test c)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the four scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_spawn.py"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0141",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0141`. Done.\n\n**Summary:** Fixed the review-verdict-loss bug from T-0139: `spawn.run_worker`'s review/spec_review/scout `done` branch now checks whether the final text failed to parse (either `extract_json` choked, or a review-role result has no `verdict`). If it did but the task already carries a posted verdict (from the worker's own mid-run `bus_post_result` call), it keeps that result instead of overwriting it and still sets `review_verdict`/`spec_review_verdict` on the task and its input. If no verdict exists anywhere, review roles now fail explicitly with `resume_hint.raw` set to the tail of the unparseable text, rather than posting a verdict-less `done`. Non-review roles are unaffected. `daemon.merge_reviewed` now also falls back to `result.verdict` as a last resort.\n\n**Files changed:** `orchestrator/spawn.py`, `orchestrator/daemon.py`, `tests/test_spawn.py`, `tests/test_daemon.py`.\n\n**Test output:** all 156 tests pass (`uv run python -m unittest discover -q tests` \u2192 `OK`), `.claude/hooks/tests-green.sh` exits 0. No failures to report.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789738995.888064,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789738996.7303019,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0141",
+      "claimed_at": 1789738996.729815
+    },
+    {
+      "ts": 1789738996.737565,
+      "pid": 85397,
+      "account": "A"
+    },
+    {
+      "ts": 1789739247.092132,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0141`. Done.\n\n**Summary:** Fixed the review-verdict-loss bug from T-0139: `spawn.run_worker`'s review/spec_review/scout `done` branch now checks whether the final text failed to parse (either `extract_json` choked, or a review-role result has no `verdict`). If it did but the task already carries a posted verdict (from the worker's own mid-run `bus_post_result` call), it keeps that result instead of overwriting it and still sets `review_verdict`/`spec_review_verdict` on the task and its input. If no verdict exists anywhere, review roles now fail explicitly with `resume_hint.raw` set to the tail of the unparseable text, rather than posting a verdict-less `done`. Non-review roles are unaffected. `daemon.merge_reviewed` now also falls back to `result.verdict` as a last resort.\n\n**Files changed:** `orchestrator/spawn.py`, `orchestrator/daemon.py`, `tests/test_spawn.py`, `tests/test_daemon.py`.\n\n**Test output:** all 156 tests pass (`uv run python -m unittest discover -q tests` \u2192 `OK`), `.claude/hooks/tests-green.sh` exits 0. No failures to report.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789739279.116319,
+      "pipeline": {
+        "gated_at": 1789739279.116221
+      }
+    },
+    {
+      "ts": 1789739305.847557,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "674b3909fb177a0ed6498bc261039c041325a050"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789738996.729815,
+  "pid": 85397,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789739279.116221
+  },
+  "merged_into": "goal/T-0073",
+  "sha": "674b3909fb177a0ed6498bc261039c041325a050"
+}

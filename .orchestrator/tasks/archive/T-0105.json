@@ -1,0 +1,47 @@
+{
+  "id": "T-0105",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "C-O4: `orchestrator serve` \u2014 bearer-authed HTTP API over goals for the kgpt orchestrator module (starlette, already a dependency of mcp)",
+  "spec": "Why: the kgpt `modules/orchestrator` (Phase C, kgpt side) forwards start_goal/goal_status/list_goals/cancel_goal to a per-user endpoint; this is that endpoint, running in the executor container on the home network. Implement orchestrator/serve.py with starlette (import from the mcp dependency tree; if starlette is not importable, fail at startup with a one-line message and do not add a dependency): routes GET /healthz (no auth, {\"status\":\"ok\"}), POST /goals {repo, goal, requester} \u2192 goals.start on the repo resolved from .orchestrator/repos.toml (slug \u2192 {path, git_url}); when path is missing and git_url is set, `git clone` it under ORCH_WORK (env, default /work) first; 404 unknown slug, 400 empty goal, 409 when a goal is already running for that repo (planner pid alive) \u2192 {goal_id, repo, status}; GET /goals[?repo=] \u2192 goals.list per repo; GET /goals/{repo}/{goal_id} \u2192 goals.status; POST /goals/{repo}/{goal_id}/cancel \u2192 SIGTERM the planner pid if alive, mark cancelled in goals.json, 404 otherwise. Auth: every route but /healthz requires `Authorization: Bearer <ORCH_SERVICE_TOKEN>` (env; refuse to start when unset), compared with hmac.compare_digest; 401 otherwise. Requester is recorded on the goal record and returned; the service never stores or logs the bearer. cli.py: `serve [--host 127.0.0.1] [--port 8090]` using uvicorn from the same dependency tree. `.orchestrator/repos.toml.example` with one commented entry. Tests in tests/test_serve.py with starlette's TestClient and goals.* patched: 401 without token, 404 unknown repo, 201 start returns goal id, 409 when running, cancel path, healthz open.\n(Recreated from T-0098: depends_on re-pointed at C-O3 v3 T-0103)",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_serve.py covers: healthz_no_auth, rejects_missing_or_wrong_bearer, unknown_repo_404, start_returns_goal_id, second_start_409_while_running, cancel_marks_cancelled; all green",
+    "`uv run orchestrator serve` without ORCH_SERVICE_TOKEN exits non-zero with one line",
+    "No route logs or persists the bearer token; requester is stored on the goal record",
+    "`uv run python -m unittest discover -q tests` green; no new dependency added to pyproject.toml"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "tests/test_serve.py",
+    ".orchestrator/repos.toml.example",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0103"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_serve.py",
+    "recreated_from": "T-0098"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789734726.877583,
+      "status": "failed",
+      "reason": "superseded by T-0116: depends_on re-pointed at C-O3 v4"
+    }
+  ],
+  "reason": "superseded by T-0116: depends_on re-pointed at C-O3 v4"
+}

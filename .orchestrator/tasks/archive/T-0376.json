@@ -1,0 +1,97 @@
+{
+  "id": "T-0376",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H5a fix round 1: codex_reply rounds replace the previous round's posted result instead of being dropped, and the commit sha is parsed only from an explicit commit label or a full 40-char sha (review T-0368)",
+  "spec": "STEP 0: the worktree must contain 2de1126 (T-0358, H5a) in git log; never drop or amend it.\nReview T-0368 on T-0358, both findings to address:\n1. (high) orchestrator/mcp.py:96 post_tool_result posts only while the task's bus status is running; the first codex() round flips it to done, so a later codex_reply round (the documented fix-loop path) finds status done and silently returns posted: false, leaving the stale round-1 result (wrong sha, wrong summary) on the bus. Rule: a codex_reply round always re-posts for a task that is assigned to codex and not yet merged (merged_into is null): it replaces summary, commit, usage and increments result.rounds, keeping result.previous_commits as a list; a fresh codex() on a task that already carries a result from a different thread posts only when the task is running (today's guard), otherwise returns posted: false with reason \"result exists from thread <id>\". Tests: rename test_codex_reply_does_not_overwrite_existing_result to test_codex_reply_replaces_previous_round_result (asserts the new sha and rounds == 2) and add test_codex_fresh_thread_does_not_overwrite_done_task.\n2. (med) orchestrator/executor.py:133 the commit regex matches any bare 7-plus hex run in the free-form message (a \"1234567-row migration\" becomes the commit). Accept only: a 40-char hex sha anywhere, or a 7-40 char hex run directly preceded by the words commit, committed, commit sha, sha, HEAD is now at, or inside backticks after the word Commit on the same line; otherwise fall through to git rev-parse HEAD in the worktree. Test: test_commit_sha_parse_requires_label_or_full_sha with the migration example (falls through) and three labelled forms (parsed).\nKeep the T-0358 tests and every existing test green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0371"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 2de1126 below your commit",
+    "tests/test_mcp.py::test_codex_reply_replaces_previous_round_result and ::test_codex_fresh_thread_does_not_overwrite_done_task pass",
+    "tests/test_executor.py::test_commit_sha_parse_requires_label_or_full_sha passes",
+    "tests/test_pool.py::test_running_counts_come_from_bus_not_state_file, ::test_restart_killed_process_leaks_no_slot and tests/test_mcp.py::test_codex_tool_posts_result_for_running_codex_task still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/mcp.py",
+    "orchestrator/executor.py",
+    "tests/test_mcp.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0376",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 147,
+        "issue": "post_tool_result's guard against clobbering a done task's result only rejects when `previous is not None and status != \"running\"`. But executor.start() unconditionally calls bus.claim(task_id, \"codex\", worktree) before post_tool_result ever runs, which flips status to \"running\" on ANY task_id (even one already done/merged) while leaving the old `result` field intact. So a second real codex(task_id, prompt) call on an already-completed task (e.g. Planner retry after a dropped MCP response) makes post_tool_result see status=\"running\" with a non-null previous result, both elif branches evaluate False, and the guard is skipped: the prior commit/thread/rounds/provenance is silently overwritten with no previous_commits entry and no merged_into check (that check only exists in the replace_result branch). test_codex_fresh_thread_does_not_overwrite_done_task passes only because it mocks executor.start, so the real bus.claim side effect that causes this never fires in the test.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789902588.50036,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0376",
+      "claimed_at": 1789902588.499826
+    },
+    {
+      "ts": 1789902588.502181,
+      "account": "B"
+    },
+    {
+      "ts": 1789902588.5394938,
+      "pid": 32119,
+      "account": "B"
+    },
+    {
+      "ts": 1789902762.050972,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 147,
+            "issue": "post_tool_result's guard against clobbering a done task's result only rejects when `previous is not None and status != \"running\"`. But executor.start() unconditionally calls bus.claim(task_id, \"codex\", worktree) before post_tool_result ever runs, which flips status to \"running\" on ANY task_id (even one already done/merged) while leaving the old `result` field intact. So a second real codex(task_id, prompt) call on an already-completed task (e.g. Planner retry after a dropped MCP response) makes post_tool_result see status=\"running\" with a non-null previous result, both elif branches evaluate False, and the guard is skipped: the prior commit/thread/rounds/provenance is silently overwritten with no previous_commits entry and no merged_into check (that check only exists in the replace_result branch). test_codex_fresh_thread_does_not_overwrite_done_task passes only because it mocks executor.start, so the real bus.claim side effect that causes this never fires in the test.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789902762.0534809,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789902588.499826,
+  "account": "B",
+  "pid": 32119,
+  "review_verdict": "request_changes"
+}

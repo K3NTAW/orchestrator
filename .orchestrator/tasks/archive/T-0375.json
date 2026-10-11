@@ -1,0 +1,80 @@
+{
+  "id": "T-0375",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H1 fix round 1: _tokens_of keeps the discounted cache-read convention for normalised rows, and the legacy total-only detection matches only rows without normalised buckets (review T-0367)",
+  "spec": "STEP 0: the worktree must contain 4f2a9ef (T-0356, H1) in git log; never drop or amend it.\nReview T-0367 on T-0356, both findings to address:\n1. (high) orchestrator/scorecard.py:384 _tokens_of returns int(entry['total_tokens']) whenever the key is present, bypassing the documented cache_read // 10 discount; since spawn.py:396 merges bus.normalize_usage (which always sets total_tokens) into every Claude run row, nearly every real row hits that branch and cache-heavy runs are inflated in by_task, by_goal, tokens_per_accepted_goal and failed_tokens. Restore the convention: when a row carries normalised buckets (input_uncached_tokens present), compute the discounted total from the buckets exactly as the pre-H1 code did for raw fields; use total_tokens verbatim only for genuinely legacy rows that carry total_tokens and no bucket fields at all. Add test_tokens_of_discounts_cache_read_on_normalised_rows (a row with total_tokens set and cache_read nonzero yields the discounted value, not total_tokens).\n2. (med) orchestrator/scorecard.py:545 the legacy total-only check (total_tokens is not None or 'input_uncached_tokens' in entry) also matches normalised rows, so tokens(entry) reads the old raw key names and exports zero uncached/cache_read/cache_write buckets for them. Make the predicate: legacy = total_tokens present and no normalised or raw bucket key present; for normalised rows read the normalised keys so tokens_uncached, tokens_cache_read and tokens_cache_write are exact. Add test_by_goal_buckets_exact_for_normalised_rows.\nKeep the four T-0356 tests and every existing test green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0370"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 4f2a9ef below your commit",
+    "tests/test_scorecard.py::test_tokens_of_discounts_cache_read_on_normalised_rows and ::test_by_goal_buckets_exact_for_normalised_rows pass",
+    "tests/test_bus.py::test_log_run_carries_decision_identity_and_versions, ::test_policy_version_stable_until_prompt_or_pool_changes and tests/test_scorecard.py::test_tokens_per_accepted_goal_undefined_at_zero, ::test_by_goal_median_and_range_small_sample still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0375",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789902477.611939,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0375",
+      "claimed_at": 1789902477.611493
+    },
+    {
+      "ts": 1789902477.613371,
+      "account": "B"
+    },
+    {
+      "ts": 1789902477.650763,
+      "pid": 18259,
+      "account": "B"
+    },
+    {
+      "ts": 1789902740.668239,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789902740.669776,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789902477.611493,
+  "account": "B",
+  "pid": 18259,
+  "review_verdict": "approve"
+}

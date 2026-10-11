@@ -1,0 +1,399 @@
+{
+  "id": "T-0763",
+  "created_at": 1790079470.807046,
+  "parent": "T-0760",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C-C: routing and handoff economics plus a token baseline from the run logs (P14-P16, P29, P1 baseline)",
+  "spec": "Objective: give the Planner the current routing and handoff mechanics with anchors, and a measured baseline of tokens per role and per accepted task from the run logs. Read (this checkout, main): orchestrator/executor.py (pick_executor inputs, resume_plan fresh vs resume, MAX_ROUNDS, fix-delta packet), orchestrator/pool.py (pick order, cooldowns, budgets, planner account pick), orchestrator/planner_router.py and orchestrator/planner_runs.py (Opus default, Fable escalation tier, escalation triggers, what the escalation launch receives), orchestrator/planner_packet.py, orchestrator/planner_shadow.py, orchestrator/handover.py, orchestrator/daemon.py auto_fix_round and _fix_round_spec, orchestrator/scorecard.py and orchestrator/attribution.py (fields, by_task, by_goal, routing_eval), orchestrator/bus.py log_run (the run-log line schema). Then compute from .orchestrator/runs/2026-09-2*.jsonl (worker runs; use jq or python, read-only) and .orchestrator/runs/jev/*.jsonl: per role (execute, review, spec_review, scout, challenge, planner) count of runs, mean and p90 input tokens, output tokens, cache-read tokens, cost where present; per accepted execute task the total tokens across its execute + fix rounds + reviews + spec reviews (join on task id and lineage if the log carries it, else approximate by task id prefix) for the last three days; share of tokens spent in fix rounds; count of planner launches by model and escalations; Jev daily tokens. Deliver: 1. the baseline table (state exactly which log fields you used and any approximation); 2. anchors for where a handoff rebuilds context (escalation packet, fresh fix round, Codex fresh thread) and what it re-sends; 3. the inputs pick_executor and the planner router use today and where a handoff-cost term would enter; 4. which scorecard/attribution fields could carry handoff cost and duplicated-context estimates without a schema change. Rules: read-only; cite path:line; confidence per finding; result under 1,500 tokens; do not print raw log lines; unverifiable stated as such.",
+  "inputs": [],
+  "acceptance": [
+    "result under 1,500 tokens with a baseline table naming its log fields, and anchored findings with confidence",
+    "every deliverable item answered or marked unverifiable"
+  ],
+  "scope": [
+    "read-only"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "objective": "routing handoff economics and token baseline",
+    "force": true
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0763",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Baseline uses .orchestrator/runs/2026-09-{20,21,22}.jsonl fields: role, input_tokens, output_tokens, cache_read_input_tokens, usd, task; jev uses .orchestrator/runs/jev/2026-09-{19..22}.jsonl fields input_tokens only (no output/cache logged there)",
+        "evidence": [
+          "orchestrator/bus.py:278-335"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "execute: n=155, mean_in=963995 p90_in=1776991, mean_out=7471 p90_out=11334, mean_cache_read=909139, mean_usd=6.9071 (75/155 rows have usd; Codex rows often log none)",
+        "evidence": [
+          ".orchestrator/runs/2026-09-2*.jsonl"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "review: n=127, mean_in=23 p90_in=32, mean_out=14298 p90_out=22105, mean_cache_read=658015, mean_usd=0.4577 (127/127 have usd) -- low input_tokens is the non-cached remainder, bulk sits in cache_read (near-fully cached packets)",
+        "evidence": [
+          ".orchestrator/runs/2026-09-2*.jsonl"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "spec_review: n=60, mean_in=27 p90_in=42, mean_out=15399 p90_out=22471, mean_cache_read=858581, mean_usd=0.5706 (59/60 have usd)",
+        "evidence": [
+          ".orchestrator/runs/2026-09-2*.jsonl"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "scout: n=9, mean_in=37 p90_in=64, mean_out=13484 p90_out=18538, mean_cache_read=1285103, mean_usd=0.8077 (9/9 have usd)",
+        "evidence": [
+          ".orchestrator/runs/2026-09-2*.jsonl"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "memory n=73, jev_route n=48, scout_decision n=3 log zero token/usd fields this period (fields absent, not zero-cost) -- treat as unmeasured, not free",
+        "evidence": [
+          ".orchestrator/runs/2026-09-2*.jsonl"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "No 'planner' or 'challenge' role rows in runs/2026-09-20..22.jsonl, and .orchestrator/runs/planner_runs.json (the file scorecard._planner_runs_for_goal expects) does not exist -- planner launch count by model and escalation count are UNVERIFIABLE for this window",
+        "evidence": [
+          "orchestrator/scorecard.py:434-439"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Jev daily input_tokens (calls): 09-19=749854(562), 09-20=955873(702), 09-21=385199(323), 09-22 partial=16285(9)",
+        "evidence": [
+          ".orchestrator/runs/jev/2026-09-*.jsonl"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Per accepted execute task, last 3 days: 77 accepted-task roots (merged_into set) had run activity ts>=2026-09-20T00:00Z; mean total tokens/task=3730653, median=2442871, min=285919, max=32303564. APPROXIMATION: root found by walking constraints.fix_round_for on tasks/T-*.json (reimplements attribution.lineage since older run rows lack lineage_root); token=input+output+cache_read summed over every row whose task equals the root or a fix-round descendant",
+        "evidence": [
+          "orchestrator/attribution.py:96-108",
+          "orchestrator/scorecard.py:397-419"
+        ],
+        "confidence": 0.55,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Fix-round share of tokens = tokens on execute rows whose task has constraints.fix_round_for or auto_round, divided by tokens on all rows carrying a task field, 3-day window = 87356685/441781823 = 19.8%. APPROXIMATION: excludes review/spec_review re-passes spent on fix rounds (undercounts true fix-loop cost); token measure = input+output+cache_read per scorecard._tokens_of convention",
+        "evidence": [
+          "orchestrator/scorecard.py:398-400",
+          "orchestrator/attribution.py:87-88"
+        ],
+        "confidence": 0.55,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Fresh fix round (no codex_thread, MAX_ROUNDS=5 exhausted, or incompatible worktree) resends the full task briefing via spawn.packet()+repair delta -- the expensive handoff path",
+        "evidence": [
+          "orchestrator/executor.py:185-197",
+          "orchestrator/executor.py:420-428",
+          "orchestrator/executor.py:17"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Normal resume sends only ['resume', codex_thread, delta] -- reuses Codex's own thread state, no repacket, cheapest path",
+        "evidence": [
+          "orchestrator/executor.py:416-417"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Escalation packet (Opus->Fable) resends only a filtered slice: goal, filtered original_sections, whitelisted opus_decision (400/800-char caps, max 10 tasks), unresolved, conflicting_evidence, scout_findings, memory_hits, capped at 6000 chars -- smaller than a fresh fix round but a real second context build",
+        "evidence": [
+          "orchestrator/planner_packet.py:279-284",
+          "orchestrator/planner_packet.py:253-276"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Planner session handover rewrites plan.md's Auto-handover section every ~15min (matches daemon interval), capped at 120 lines, items below p_relevant 0.5 pruned except merged/held -- a fresh Planner session re-reads this capped snapshot, not full task history",
+        "evidence": [
+          "orchestrator/handover.py:12",
+          "orchestrator/handover.py:19",
+          "orchestrator/handover.py:23"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "planner launch count by model and escalation count: no planner/challenge role rows and no planner_runs.json in this window -- needs either a longer window or confirmation the file was ever populated",
+      "per-task total-token join used a reimplemented lineage walk over tasks/T-*.json rather than the shipped lineage_root field, since older run rows predate that field -- worth re-running once all rows in the window post-date it for an exact figure"
+    ],
+    "suggested_next": [
+      "if exact planner-launch/escalation counts are needed, check whether an older planner_runs.json exists in state history or whether that logging path is currently dead code",
+      "add lineage_root-based grouping to scorecard.by_task as the concrete handoff-cost/duplicated-context metric, reusing existing fields per findings above"
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 8471,
+      "trimmed": {
+        "findings": 7
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790079531.156419,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0763",
+      "claimed_at": 1790079531.156111
+    },
+    {
+      "ts": 1790079531.1583302,
+      "account": "A"
+    },
+    {
+      "ts": 1790079531.850038,
+      "pid": 3216,
+      "account": "A"
+    },
+    {
+      "ts": 1790079763.2945569,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Baseline uses .orchestrator/runs/2026-09-{20,21,22}.jsonl fields: role, input_tokens, output_tokens, cache_read_input_tokens, usd, task; jev uses .orchestrator/runs/jev/2026-09-{19..22}.jsonl fields input_tokens only (no output/cache logged there)",
+            "evidence": [
+              "orchestrator/bus.py:278-335"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "execute: n=155, mean_in=963995 p90_in=1776991, mean_out=7471 p90_out=11334, mean_cache_read=909139, mean_usd=6.9071 (75/155 rows have usd; Codex rows often log none)",
+            "evidence": [
+              ".orchestrator/runs/2026-09-2*.jsonl"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "review: n=127, mean_in=23 p90_in=32, mean_out=14298 p90_out=22105, mean_cache_read=658015, mean_usd=0.4577 (127/127 have usd) -- low input_tokens is the non-cached remainder, bulk sits in cache_read (near-fully cached packets)",
+            "evidence": [
+              ".orchestrator/runs/2026-09-2*.jsonl"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "spec_review: n=60, mean_in=27 p90_in=42, mean_out=15399 p90_out=22471, mean_cache_read=858581, mean_usd=0.5706 (59/60 have usd)",
+            "evidence": [
+              ".orchestrator/runs/2026-09-2*.jsonl"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "scout: n=9, mean_in=37 p90_in=64, mean_out=13484 p90_out=18538, mean_cache_read=1285103, mean_usd=0.8077 (9/9 have usd)",
+            "evidence": [
+              ".orchestrator/runs/2026-09-2*.jsonl"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "memory n=73, jev_route n=48, scout_decision n=3 log zero token/usd fields this period (fields absent, not zero-cost) -- treat as unmeasured, not free",
+            "evidence": [
+              ".orchestrator/runs/2026-09-2*.jsonl"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "No 'planner' or 'challenge' role rows in runs/2026-09-20..22.jsonl, and .orchestrator/runs/planner_runs.json (the file scorecard._planner_runs_for_goal expects) does not exist -- planner launch count by model and escalation count are UNVERIFIABLE for this window",
+            "evidence": [
+              "orchestrator/scorecard.py:434-439"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Jev daily input_tokens (calls): 09-19=749854(562), 09-20=955873(702), 09-21=385199(323), 09-22 partial=16285(9)",
+            "evidence": [
+              ".orchestrator/runs/jev/2026-09-*.jsonl"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Per accepted execute task, last 3 days: 77 accepted-task roots (merged_into set) had run activity ts>=2026-09-20T00:00Z; mean total tokens/task=3730653, median=2442871, min=285919, max=32303564. APPROXIMATION: root found by walking constraints.fix_round_for on tasks/T-*.json (reimplements attribution.lineage since older run rows lack lineage_root); token=input+output+cache_read summed over every row whose task equals the root or a fix-round descendant",
+            "evidence": [
+              "orchestrator/attribution.py:96-108",
+              "orchestrator/scorecard.py:397-419"
+            ],
+            "confidence": 0.55,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Fix-round share of tokens = tokens on execute rows whose task has constraints.fix_round_for or auto_round, divided by tokens on all rows carrying a task field, 3-day window = 87356685/441781823 = 19.8%. APPROXIMATION: excludes review/spec_review re-passes spent on fix rounds (undercounts true fix-loop cost); token measure = input+output+cache_read per scorecard._tokens_of convention",
+            "evidence": [
+              "orchestrator/scorecard.py:398-400",
+              "orchestrator/attribution.py:87-88"
+            ],
+            "confidence": 0.55,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Fresh fix round (no codex_thread, MAX_ROUNDS=5 exhausted, or incompatible worktree) resends the full task briefing via spawn.packet()+repair delta -- the expensive handoff path",
+            "evidence": [
+              "orchestrator/executor.py:185-197",
+              "orchestrator/executor.py:420-428",
+              "orchestrator/executor.py:17"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Normal resume sends only ['resume', codex_thread, delta] -- reuses Codex's own thread state, no repacket, cheapest path",
+            "evidence": [
+              "orchestrator/executor.py:416-417"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Escalation packet (Opus->Fable) resends only a filtered slice: goal, filtered original_sections, whitelisted opus_decision (400/800-char caps, max 10 tasks), unresolved, conflicting_evidence, scout_findings, memory_hits, capped at 6000 chars -- smaller than a fresh fix round but a real second context build",
+            "evidence": [
+              "orchestrator/planner_packet.py:279-284",
+              "orchestrator/planner_packet.py:253-276"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Planner session handover rewrites plan.md's Auto-handover section every ~15min (matches daemon interval), capped at 120 lines, items below p_relevant 0.5 pruned except merged/held -- a fresh Planner session re-reads this capped snapshot, not full task history",
+            "evidence": [
+              "orchestrator/handover.py:12",
+              "orchestrator/handover.py:19",
+              "orchestrator/handover.py:23"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "planner launch count by model and escalation count: no planner/challenge role rows and no planner_runs.json in this window -- needs either a longer window or confirmation the file was ever populated",
+          "per-task total-token join used a reimplemented lineage walk over tasks/T-*.json rather than the shipped lineage_root field, since older run rows predate that field -- worth re-running once all rows in the window post-date it for an exact figure"
+        ],
+        "suggested_next": [
+          "if exact planner-launch/escalation counts are needed, check whether an older planner_runs.json exists in state history or whether that logging path is currently dead code",
+          "add lineage_root-based grouping to scorecard.by_task as the concrete handoff-cost/duplicated-context metric, reusing existing fields per findings above"
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 8471,
+          "trimmed": {
+            "findings": 7
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1790079531.156111,
+  "account": "A",
+  "pid": 3216
+}

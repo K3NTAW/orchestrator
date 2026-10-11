@@ -1,0 +1,78 @@
+{
+  "id": "T-0244",
+  "parent": "T-0240",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: F3: daemon posts Codex results \u2014 _dispatch_worker turns executor.start()'s return into a bus result",
+  "spec": "Gotcha 2026-09-19: orchestrator/daemon.py _dispatch_worker() (about line 305) calls executor.start(task_id, prompt) and discards the returned dict, so a Codex-executed task stays running with pid null after its run logs done; three tasks needed hand-posted results. The Claude fallback path posts from spawn.run_worker and is unaffected. Change _dispatch_worker():\n1. r = executor.start(...). status done -> bus.post_result(task_id, fit_result({summary: r['message'][:3000], executed_by: 'codex:' + executor id, thread: r['thread'], usage: r.get('usage')}), 'done'). status failed -> bus.post_result(..., 'failed') with reason. status held -> leave the hold executor set (it already updated the bus) and do nothing else. Use spawn.fit_result (or move it to bus if import order needs it) so the result stays within the bus size cap.\n2. If executor.start raises, keep today's pipeline.dispatch_error stamp and also set the task failed with reason 'dispatch error: ...' so it never stays running.\n3. The gate then treats the task like any other done execute task (tests-green, review policy, merge).\nTests in tests/test_daemon.py with executor.start monkeypatched: done posts a done result with executed_by codex:astra; failed posts failed with the reason; held leaves status held; a raising start marks the task failed. Keep every existing test green.",
+  "inputs": [
+    "T-0241"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_worker_posts_codex_done, ::test_dispatch_worker_posts_codex_failed, ::test_dispatch_worker_leaves_held, ::test_dispatch_worker_exception_marks_failed pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0244",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789834811.855735,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0244",
+      "claimed_at": 1789834811.855367
+    },
+    {
+      "ts": 1789834811.8576598,
+      "account": "B"
+    },
+    {
+      "ts": 1789834811.894094,
+      "pid": 99331,
+      "account": "B"
+    },
+    {
+      "ts": 1789834910.166573,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789834910.16995,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789834811.855367,
+  "account": "B",
+  "pid": 99331,
+  "review_verdict": "approve"
+}

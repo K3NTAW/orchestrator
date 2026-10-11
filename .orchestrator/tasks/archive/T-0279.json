@@ -1,0 +1,97 @@
+{
+  "id": "T-0279",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G2: compact worker packet \u2014 spawn.packet(task) rendered into execute and fix-round prompts at dispatch (objective, acceptance, base commit, write and read scope, symbols and tests per scope file, matching gotchas, verification command, evidence pointers), capped at about 1,200 tokens",
+  "spec": "Scout T-0262: execute.md fills only spec, acceptance, scope (270-char template, about 750 tokens rendered for T-0256) and tells the worker to implement then run tests; no recall or bus_read step; fix-delta.md fills n, failing_tests, assertion_lines; spawn.render is plain string substitution (spawn.py about line 70). Workers then spend their first turns on Grep and Read (T-0244: Grep, Read x5, Bash x3 before any edit).\nChange:\n1. spawn.packet(task, worktree) -> str, built without a model from data on disk, sections in this order: objective (title), acceptance (bullets), base (branch name, merge-base sha against the goal branch, goal id), write_scope (task scope), read_scope (directories of the scope paths plus tests/ and the modules imported by scope files, listed as paths), relevant_tests (tests/test_<module>.py for each scope module that exists, plus test names that mention a scope symbol, capped 15), symbols (top-level def and class names with line numbers per scope .py file via ast, capped 40 lines), gotchas (gotchas.md entries whose title or facts mention a scope path or module, as 'mem:gotchas.md:<line> <title>', capped 5), decisions (decisions.md entries naming the parent goal, titles only, capped 3), verify ('.claude/hooks/tests-green.sh .' and the failures-only convention), evidence (task inputs with their result summaries' first 200 chars). Hard cap: 4,800 characters, trimming from the bottom section up, with a final line 'packet truncated: N chars dropped; bus_read(task_id) has the full task'.\n2. execute.md and fix-delta.md gain {{packet}} at the top; spawn.render callers for execute and fix rounds (daemon dispatch renders spawn.render('execute', ...); executor reply path renders fix-delta) pass packet=spawn.packet(...). The Codex path uses the same rendered prompt (daemon passes it to executor.start), so no executor.py change.\n3. README: a 'Worker packet' paragraph in the Pipeline section listing the sections and the cap.\n4. Tests in tests/test_spawn.py: test_packet_sections_in_order (fixture repo with one scope module and a test file), test_packet_cap_trims_bottom_first, test_execute_prompt_contains_packet, test_packet_gotcha_match_by_path.",
+  "inputs": [
+    "T-0266"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_packet_sections_in_order, ::test_packet_cap_trims_bottom_first, ::test_execute_prompt_contains_packet, ::test_packet_gotcha_match_by_path pass",
+    "spawn.packet on T-0256's task json against this repo returns under 4,800 characters and names tests/test_bus.py and tests/test_handover.py under relevant_tests",
+    "README Pipeline section documents the packet",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    ".orchestrator/prompts/execute.md",
+    ".orchestrator/prompts/fix-delta.md",
+    "tests/test_spawn.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0279",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 127,
+        "issue": "The symbol-match loop for relevant_tests uses unqualified word-boundary regex against common short names (get, read, update, events, claim, db, locked, next_id), producing 172 raw matches for T-0256's task; the trailing `tests[:15]` cap (line 137) is applied after collecting matches in alphabetical file order, so tests/test_handover.py never makes the cut even though it's in the task's own scope and has 9 genuinely relevant tests. Verified empirically against T-0256's real task json: relevant_tests contains only test_bus.py/test_cli.py/test_daemon.py entries, and test_handover.py appears only under write_scope. This directly fails the stated acceptance criterion.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789845199.211879,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0279",
+      "claimed_at": 1789845199.2115169
+    },
+    {
+      "ts": 1789845199.21316,
+      "account": "A"
+    },
+    {
+      "ts": 1789845199.240561,
+      "pid": 746,
+      "account": "A"
+    },
+    {
+      "ts": 1789845426.286481,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 127,
+            "issue": "The symbol-match loop for relevant_tests uses unqualified word-boundary regex against common short names (get, read, update, events, claim, db, locked, next_id), producing 172 raw matches for T-0256's task; the trailing `tests[:15]` cap (line 137) is applied after collecting matches in alphabetical file order, so tests/test_handover.py never makes the cut even though it's in the task's own scope and has 9 genuinely relevant tests. Verified empirically against T-0256's real task json: relevant_tests contains only test_bus.py/test_cli.py/test_daemon.py entries, and test_handover.py appears only under write_scope. This directly fails the stated acceptance criterion.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789845426.288575,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789845199.2115169,
+  "account": "A",
+  "pid": 746,
+  "review_verdict": "request_changes"
+}

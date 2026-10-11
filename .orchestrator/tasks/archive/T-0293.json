@@ -1,0 +1,145 @@
+{
+  "id": "T-0293",
+  "parent": "T-0260",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: G7: the daemon writes routine fix rounds itself (gate red with failing test ids, review request_changes with concrete comments) and reconciles the original task's merged_into when the fix round merges; design or scope changes still escalate to the Planner",
+  "spec": "Depends on G6 (T-0268, stage leases). Today a held task waits for the Planner to write a fix-round spec by hand (this session wrote six), and after the fix round merges the Planner marks the original done + merged_into by hand. Held tasks already carry hold_reason and resume_hint (tests-green failures text, rebase conflicts), review tasks carry result.comments with path, line, issue, severity, and constraints.fix_round_for makes spawn.base_for cut the fix worktree from the held task's branch.\nChange daemon.py:\n1. auto_fix_round(task) runs in tick() for held execute tasks with no fix round yet (no task with constraints.fix_round_for == id that is not failed). Routine when: hold_reason is gate_red and resume_hint.failures names at least one FAIL or ERROR test id, or hold_reason starts 'review request_changes' and the review's result.comments all have a path inside the task scope; and the task has had fewer than [daemon].auto_fix_rounds (pool.toml, default 2) automatic rounds. Otherwise (spec_review request_changes, merge conflict, comments outside scope, no concrete failure, rounds exhausted) leave the hold for the Planner and notify once.\n2. The fix task: title 'fix round <n>: <original title>', spec rendered from a new .orchestrator/prompts/fix-round.md with the original task id and title, the failed acceptance criteria (those whose text mentions a failing test id, else all), the failure text capped at 3,000 chars, the review comments as path:line issue lines, branch and head sha, and the instruction to keep every original criterion; same scope, complexity, tier and constraints plus fix_round_for and auto_round = n; inputs = [original, review]; created under the bus lock with the same dedupe key pattern spec reviews use.\n3. Reconciliation: in gate() direct-merge and merge_reviewed(), after a task with constraints.fix_round_for merges, set the original task status done, merged_into = the same target, merged_via = 'fix round <fix id> <sha>', hold_reason None; if the original was itself a fix round, walk up the chain.\n4. README Pipeline: 'Automatic fix rounds' paragraph with the routine/escalate rule and the round cap; pool.toml [daemon] auto_fix_rounds = 2.\nTests in tests/test_daemon.py: test_auto_fix_round_on_gate_red, test_auto_fix_round_on_review_comments_in_scope, test_no_auto_fix_when_comments_outside_scope, test_no_auto_fix_after_round_cap, test_fix_round_merge_reconciles_original_chain.",
+  "inputs": [
+    "T-0272"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_auto_fix_round_on_gate_red, ::test_auto_fix_round_on_review_comments_in_scope, ::test_no_auto_fix_when_comments_outside_scope, ::test_no_auto_fix_after_round_cap, ::test_fix_round_merge_reconciles_original_chain pass",
+    "the generated fix task passes .claude/hooks/require-acceptance.sh (acceptance and scope present) and carries constraints.fix_round_for",
+    "README and pool.toml document the rule and the cap",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "README.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0293",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "auto_fix_round() has no coordination with planner_runs.py's existing autonomous 'held' decision point. decision_points() (planner_runs.py:145-152) yields every held execute child unconditionally -- it never checks whether a fix-round task already exists -- so when pool.toml [planner].autonomous=true (the documented executor-container mode), the same tick that has daemon.py deterministically create a fix-round task for a gate_red/in-scope-review hold can also have planner_runs.run() launch a full headless Planner for that same held task, which per CLAUDE.md will itself write another fix-round spec. That produces two competing fix-round branches/spend for one hold and contradicts the invariant merge_reviewed() itself documents at line 610-611 ('a daemon must not invent a spec') without reconciling it. planner_runs.py isn't in scope, but the interaction is unaddressed.",
+        "severity": "high",
+        "line": 816
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The spec's 'otherwise ... notify once' escalation path names no stamp/dedup mechanism, unlike every other held-notify in this file (dispatch's spec_review_held_at, gate's gated_at, reconcile_dead's orphaned_dirty_worktree), which all wrap notify() in `if stamp(...)`. tick() reruns every interval_s (30s by default); a literal implementation of 'leave hold, notify once' with no persisted marker will call notify() -- an osascript popup plus an optional webhook POST -- every tick for the lifetime of any held task the daemon declines to auto-fix (e.g. a common spec_review request_changes hold). No acceptance test in the list would catch this.",
+        "severity": "med",
+        "line": 380
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify how auto_fix_round must coordinate with planner_runs.py's 'held' decision point under [planner].autonomous=true -- e.g. have decision_points() skip a held task once a non-failed constraints.fix_round_for task exists for it, or gate auto_fix_round/decision_points so only one of the two ever acts on a given hold_reason/held_at -- and add a test covering that interaction.",
+      "Name the pipeline field that gates the escalation 'notify once' (e.g. pipeline.auto_fix_skipped_at), following the existing stamp()-then-notify convention elsewhere in daemon.py, and add a test asserting the escalation path does not re-notify on a second tick for the same hold."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789847326.202094,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0293",
+      "claimed_at": 1789847326.201674
+    },
+    {
+      "ts": 1789847326.2039108,
+      "account": "B"
+    },
+    {
+      "ts": 1789847326.212231,
+      "pid": 54967,
+      "account": "B"
+    },
+    {
+      "ts": 1789847546.314922,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "auto_fix_round() has no coordination with planner_runs.py's existing autonomous 'held' decision point. decision_points() (planner_runs.py:145-152) yields every held execute child unconditionally -- it never checks whether a fix-round task already exists -- so when pool.toml [planner].autonomous=true (the documented executor-container mode), the same tick that has daemon.py deterministically create a fix-round task for a gate_red/in-scope-review hold can also have planner_runs.run() launch a full headless Planner for that same held task, which per CLAUDE.md will itself write another fix-round spec. That produces two competing fix-round branches/spend for one hold and contradicts the invariant merge_reviewed() itself documents at line 610-611 ('a daemon must not invent a spec') without reconciling it. planner_runs.py isn't in scope, but the interaction is unaddressed.",
+            "severity": "high",
+            "line": 816
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The spec's 'otherwise ... notify once' escalation path names no stamp/dedup mechanism, unlike every other held-notify in this file (dispatch's spec_review_held_at, gate's gated_at, reconcile_dead's orphaned_dirty_worktree), which all wrap notify() in `if stamp(...)`. tick() reruns every interval_s (30s by default); a literal implementation of 'leave hold, notify once' with no persisted marker will call notify() -- an osascript popup plus an optional webhook POST -- every tick for the lifetime of any held task the daemon declines to auto-fix (e.g. a common spec_review request_changes hold). No acceptance test in the list would catch this.",
+            "severity": "med",
+            "line": 380
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify how auto_fix_round must coordinate with planner_runs.py's 'held' decision point under [planner].autonomous=true -- e.g. have decision_points() skip a held task once a non-failed constraints.fix_round_for task exists for it, or gate auto_fix_round/decision_points so only one of the two ever acts on a given hold_reason/held_at -- and add a test covering that interaction.",
+          "Name the pipeline field that gates the escalation 'notify once' (e.g. pipeline.auto_fix_skipped_at), following the existing stamp()-then-notify convention elsewhere in daemon.py, and add a test asserting the escalation path does not re-notify on a second tick for the same hold."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789847546.317554,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "auto_fix_round() has no coordination with planner_runs.py's existing autonomous 'held' decision point. decision_points() (planner_runs.py:145-152) yields every held execute child unconditionally -- it never checks whether a fix-round task already exists -- so when pool.toml [planner].autonomous=true (the documented executor-container mode), the same tick that has daemon.py deterministically create a fix-round task for a gate_red/in-scope-review hold can also have planner_runs.run() launch a full headless Planner for that same held task, which per CLAUDE.md will itself write another fix-round spec. That produces two competing fix-round branches/spend for one hold and contradicts the invariant merge_reviewed() itself documents at line 610-611 ('a daemon must not invent a spec') without reconciling it. planner_runs.py isn't in scope, but the interaction is unaddressed.",
+          "severity": "high",
+          "line": 816
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec's 'otherwise ... notify once' escalation path names no stamp/dedup mechanism, unlike every other held-notify in this file (dispatch's spec_review_held_at, gate's gated_at, reconcile_dead's orphaned_dirty_worktree), which all wrap notify() in `if stamp(...)`. tick() reruns every interval_s (30s by default); a literal implementation of 'leave hold, notify once' with no persisted marker will call notify() -- an osascript popup plus an optional webhook POST -- every tick for the lifetime of any held task the daemon declines to auto-fix (e.g. a common spec_review request_changes hold). No acceptance test in the list would catch this.",
+          "severity": "med",
+          "line": 380
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789847326.201674,
+  "account": "B",
+  "pid": 54967,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "auto_fix_round() has no coordination with planner_runs.py's existing autonomous 'held' decision point. decision_points() (planner_runs.py:145-152) yields every held execute child unconditionally -- it never checks whether a fix-round task already exists -- so when pool.toml [planner].autonomous=true (the documented executor-container mode), the same tick that has daemon.py deterministically create a fix-round task for a gate_red/in-scope-review hold can also have planner_runs.run() launch a full headless Planner for that same held task, which per CLAUDE.md will itself write another fix-round spec. That produces two competing fix-round branches/spend for one hold and contradicts the invariant merge_reviewed() itself documents at line 610-611 ('a daemon must not invent a spec') without reconciling it. planner_runs.py isn't in scope, but the interaction is unaddressed.",
+      "severity": "high",
+      "line": 816
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec's 'otherwise ... notify once' escalation path names no stamp/dedup mechanism, unlike every other held-notify in this file (dispatch's spec_review_held_at, gate's gated_at, reconcile_dead's orphaned_dirty_worktree), which all wrap notify() in `if stamp(...)`. tick() reruns every interval_s (30s by default); a literal implementation of 'leave hold, notify once' with no persisted marker will call notify() -- an osascript popup plus an optional webhook POST -- every tick for the lifetime of any held task the daemon declines to auto-fix (e.g. a common spec_review request_changes hold). No acceptance test in the list would catch this.",
+      "severity": "med",
+      "line": 380
+    }
+  ]
+}

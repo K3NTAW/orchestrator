@@ -1,0 +1,183 @@
+{
+  "id": "T-1516",
+  "created_at": 1790895181.673831,
+  "parent": "T-1515",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "H2: planner-context hook: post-resume grace by turn count, nag-once after a handover is written for this session, shipped default 300000 and a short reminder line instead of the full instruction once handover ran",
+  "spec": "Goal T-1515 (human 2026-10-02 01:15), plan label H2. Problem: planner_context.hook_message returns the full 'hand over now' line on EVERY prompt once the session is over [planner].handover_context_tokens, including right after a fresh session's /resume that had to read plan.md and the bus, and it keeps repeating after `orchestrator handover --reason context` has already written the handover (nothing records that it ran).\n\nFacts (main c4dbf2d):\n- orchestrator/planner_context.py: context_tokens(config_dir, root, *, transcript=None, session_id=None) reads the transcript's last message.usage line (input + cache_read + cache_creation) via _reverse_lines; hook_message(cfg, config_dir, root, *, transcript=None, session_id=None) returns the instruction when tokens >= cfg['planner']['handover_context_tokens'] (int) else None.\n- .claude/hooks/planner-prompt.sh calls `orchestrator planner-context --hook --transcript <path> --session-id <sid>` (cli.py 'planner-context' branch, ~line 620) and prints its output on every UserPromptSubmit.\n- orchestrator/handover.py write(reason) renders the '## Auto-handover <ts> \u2014 <reason>' section into plan.md; _save_handover_last_at(now) persists the last run ts (grep its path); cli.py 'handover' branch calls handover.write(a.reason). No session id reaches handover.write today.\n- The transcript is a JSONL of records with 'type' ('user', 'assistant', ...); a user turn is a record with type 'user' whose message.content is a string or a list without a 'tool_result' block (tool results are also type 'user').\n\nChange:\n1. planner_context.user_turns(transcript) -> int: count of user prompt records (type 'user', content not a tool_result list) in the transcript; 0 when unreadable.\n2. hook_message gains a grace: [planner].handover_grace_turns (default 12, read with .get) \u2014 when user_turns(transcript) < grace the hook returns None even over the threshold (documented: a resume that reads the plan, the bus and the open specs passes a low threshold in its first turns; the session still hands over once it has done real work). Grace applies only when a transcript path or session id is known (legacy newest-by-mtime path: no grace).\n3. Nag-once: `orchestrator handover --reason <r> [--session-id <sid>]` records {'session_id': sid, 'ts': now, 'reason': r} in .orchestrator/checkpoint/handover-session.json (new, next to the existing last-at file; .orchestrator/checkpoint/ already exists untracked). cli.py passes --session-id when given; the planner-prompt.sh instruction text printed by hook_message includes `--session-id <sid>` when a session id is known so the Planner's command records it. When that record names the current session id and its ts is newer than the transcript's mtime at the time handover ran (store the transcript size or last-usage ts in the record and compare: record['tokens_at'] >= 0.95 * current tokens means no real work since), hook_message returns the SHORT line 'handover written <HH:MM>; restart with f orch' instead of the full instruction; if the session kept growing past that point by more than [planner].handover_regrow_tokens (default 20000) the full instruction returns (another handover is due).\n4. Shipped default: the pool.toml template or defaults that carry handover_context_tokens (grep orchestrator/ and README.md for 'handover_context_tokens'; the live .orchestrator/pool.toml is NOT in scope and must not be touched) move from 150000 to 300000 with one line of why (a Planner session that resumes a goal reads 100k+ before its first decision). README.md line ~261 and CLAUDE.md line 5 mention the key: update the number only if they state one.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_planner_context.py::test_hook_message_over_threshold builds a transcript and expects the full line: give it enough user turns (>= grace) or pass handover_grace_turns 0 in cfg; keep it passing. tests/test_cli.py::test_planner_context_hook_passes_transcript_and_session_id pins the CLI forwarding: unchanged. Run tests/test_planner_context.py, tests/test_cli.py and tests/test_handover.py (if present; grep tests/ for 'handover').\n\nRollback: one `git revert` of the merge commit; the live pool.toml threshold is a separate human setting. Out of scope: .claude/hooks/planner-prompt.sh (reads the printed line as is), .orchestrator/pool.toml.\n\nWork on the task branch cut from goal/T-1515. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_context.py::test_hook_message_grace_turns_suppresses_early_handover: passes: a transcript over the threshold with 3 user prompt records (tool_result records excluded from the count) and handover_grace_turns 12 makes hook_message return None; the same transcript with 12 user prompts returns the full instruction; the legacy no-transcript path ignores the grace",
+    "tests/test_planner_context.py::test_hook_message_short_line_after_handover_for_this_session: passes: after handover.write(reason, session_id=S) recorded the session, hook_message for session S returns a line starting 'handover written' and not containing 'hand over now'; a different session id still gets the full instruction; when the transcript grew by more than handover_regrow_tokens since the record the full instruction returns",
+    "tests/test_cli.py::test_handover_cli_forwards_session_id: passes: `orchestrator handover --reason context --session-id S` calls handover.write with session_id S (patched) and the hook instruction printed by `planner-context --hook --session-id S` contains '--session-id S'",
+    "tests/test_planner_context.py::test_shipped_default_threshold_is_300000: passes: the shipped pool defaults (the template file or defaults dict that carries handover_context_tokens) read 300000",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/planner_context.py",
+    "orchestrator/handover.py",
+    "orchestrator/cli.py",
+    "README.md",
+    "CLAUDE.md",
+    "tests/test_planner_context.py",
+    "tests/test_cli.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "H2",
+    "goal_branch": "goal/T-1515"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "reason": "task T-1516 status is superseded; cannot claim",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790895256.7411032,
+      "pipeline": {
+        "first_ready_at": 1790895256.741055
+      }
+    },
+    {
+      "ts": 1790895256.7426162,
+      "pipeline": {
+        "first_ready_at": 1790895256.741055,
+        "dispatched_at": 1790895256.742558,
+        "dispatched_at_lease": 1790896156.742558
+      }
+    },
+    {
+      "ts": 1790895256.743513,
+      "pipeline": {
+        "first_ready_at": 1790895256.741055,
+        "dispatched_at": 1790895256.742558,
+        "dispatched_at_lease": 1790896156.742558
+      }
+    },
+    {
+      "ts": 1790895261.211875,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 9333,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790895261.21507,
+      "pipeline": {
+        "first_ready_at": 1790895256.741055,
+        "dispatched_at": 1790895256.742558,
+        "dispatched_at_lease": 1790896156.742558,
+        "dispatched_at_done": 1790895261.214844
+      }
+    },
+    {
+      "ts": 1790895274.470741,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1518 (2026-10-02 H2v2: no shipped template carries handover_context_tokens; default lives in planner_context)"
+    },
+    {
+      "ts": 1790895283.8430269,
+      "pipeline": {
+        "first_ready_at": 1790895256.741055,
+        "dispatched_at": 1790895256.742558,
+        "dispatched_at_lease": 1790896156.742558,
+        "dispatched_at_done": 1790895261.214844,
+        "jev_route": {
+          "baseline": "sonnet",
+          "hypothetical": "astra",
+          "key": "48ca6c150bda1738540547bc28b49c71484d6cee",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790895283.84624,
+      "status": "failed",
+      "result": {
+        "reason": "task T-1516 status is superseded; cannot claim",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790895256.741055,
+    "dispatched_at": 1790895256.742558,
+    "dispatched_at_lease": 1790896156.742558,
+    "dispatched_at_done": 1790895261.214844,
+    "jev_route": {
+      "baseline": "sonnet",
+      "hypothetical": "astra",
+      "key": "48ca6c150bda1738540547bc28b49c71484d6cee",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    }
+  },
+  "packet_meta": {
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 9333,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ]
+  },
+  "hold_reason": "superseded by T-1518 (2026-10-02 H2v2: no shipped template carries handover_context_tokens; default lives in planner_context)"
+}

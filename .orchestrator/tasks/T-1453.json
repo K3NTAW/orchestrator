@@ -1,0 +1,235 @@
+{
+  "id": "T-1453",
+  "created_at": 1790874104.581741,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "Execute result derived from git state v2: a failed Claude execute run with fresh commits and a clean tree posts done; in-scope leftovers after a fresh commit are auto-committed and marked synthetic; otherwise execute_incomplete hold",
+  "spec": "Goal T-1403, wave 2, plan label B4v2 (respec of T-1435 after spec review T-1445 request_changes; every risk is\nanswered below). The commit-now resume step of T-1435 is DROPPED: every recorded non_json case has no session id\n(SIGTERM, empty output), so the branch was dead code with session-mutation risk (T-1445 #5, #6).\n\nContract (plan.md): gitutil.execute_outcome(worktree, parent, scope) -> {ahead, head, dirty_in_scope,\ndirty_out_of_scope} | None; hold prefix 'execute_incomplete' (B5 later maps it to failure kind 'incomplete').\n\nEvidence (U2, 2026-10-01): status_reason non_json is set at spawn.py:1380-1384 when json.loads of the\n`claude -p --output-format json` stdout fails; every recorded case is 'non-JSON output (rc=143): ' with empty\nstdout+stderr (SIGTERM). luna T-0526 was different: the worker posted done itself through bus_post_result with a\nprose summary and the daemon's reconcile marked the process dead. So the robust signal is the git state of the\nworktree, and a result the worker already posted must win.\n\nFacts (goal/T-1403 at 92c1a98; spawn.py/gitutil.py unchanged since main 355583c):\n- spawn.py:1513 run_worker(); 1564-1565 sets t['executor'] = 'claude:<tier>' for execute; 1611 first =\n  run_claude(...); 1656-1660 run_claude done + execute posts {'summary', 'executed_by': f\"claude:{tier}\",\n  'review'} with no commit; 1709-1716 failed -> status failed, reason, resume_hint.partial_output. Every write goes\n  through worker_control.write_if_current (worker_control.py:215-218: bus lock + is_current(epoch)).\n- gitutil.py:11-22 _resolve_base(worktree, parent); 8-9 _git_in(worktree, *args) has no timeout.\n- daemon.py:1230-1249 _dirty_scope_paths parses `git status --porcelain -z --untracked-files=all`, ignores\n  .orchestrator/ and .venv, matches with fnmatch/prefix/'.'; scopes.py:7-10 matches(path, entries) implements the\n  same three rules with fnmatchcase. Do not import daemon from gitutil.\n\nChange:\n1. gitutil.execute_outcome(worktree, parent, scope, *, since=None): None when worktree is not a directory, not a\n   git work tree, no base resolves, or any git call fails (non-zero rc, OSError, timeout); every git call uses\n   timeout=60. Else {'ahead': rev-list --count <since or base>..HEAD, 'head': sha, 'dirty_in_scope': sorted,\n   'dirty_out_of_scope': sorted} where dirty paths come from the same porcelain -z parsing as daemon\n   _dirty_scope_paths (rename pairs, .orchestrator/ and .venv ignored) and in/out is decided by scopes.matches(path,\n   scope). `since` is a commit sha: pass it to count commits made after that sha (T-1445 #1). Also\n   gitutil.head_sha(worktree) -> sha | None. Read-only.\n2. spawn.py: module seam `execute_outcome = gitutil.execute_outcome` and `head_sha = gitutil.head_sha` referenced\n   as module attributes so tests patch spawn.execute_outcome. Config switch: derive =\n   pool.cfg.get('spawn', {}).get('derive_execute_result', True); False -> today's behaviour exactly (kill switch,\n   T-1445 #9; no pool.toml edit, the default lives in code).\n3. run_worker, role execute only: pre_head = head_sha(worktree) before run_claude (None when not git). After the\n   run, only when r['status'] == 'failed' and derive is True (the 'done' path keeps today's post, T-1445 #3):\n   o = execute_outcome(worktree, parent, scope, since=pre_head).\n   - o is None -> today's failed write.\n   - current = bus.get(task_id); if current['status'] == 'done' or (current.get('result') or {}).get('commit'):\n     the worker posted its own result; log nothing else and leave it (T-1445 #2).\n   - o['ahead'] == 0 (no commits since run start) -> status held, hold_reason 'execute_incomplete: no commits',\n     resume_hint {'partial_output': result text[:2000] when any, 'dirty_in_scope': [...],\n     'dirty_out_of_scope': [...], 'head': head}. Never auto-commit when the run made no commit (T-1445 #4).\n   - dirty_out_of_scope non-empty -> status held, hold_reason 'execute_incomplete: uncommitted changes outside\n     scope', same resume_hint shape.\n   - dirty_in_scope non-empty (and ahead > 0, nothing out of scope) -> auto-commit guard: refuse (hold\n     'execute_incomplete: leftovers not auto-committable: <why>') when more than 40 paths, when any path's last\n     component matches .env*, *.pem, *.key, *.p12, id_rsa*, *.keychain, or when <worktree>/.git/index.lock exists\n     (worktree .git may be a file; resolve the gitdir via `git rev-parse --git-dir`). Otherwise\n     `git add -- <exact paths>` then `git commit -m \"<task id>: auto-commit in-scope leftovers after executor\n     exit (synthetic)\"`; non-zero rc on either -> hold 'execute_incomplete: auto-commit failed: <stderr[:200]>'.\n     Recompute o; if still dirty in scope -> that hold.\n   - ahead > 0 and clean -> if not worker_control.is_current(task_id, epoch): return superseded; else\n     post_result done via write_if_current with {'summary': model result text when any else 'derived from git\n     state after <r reason>', 'commit': head, 'executed_by': t['executor'], 'derived_from': 'git_state',\n     'synthetic_commit': sha when the auto-commit ran else absent, 'review': same text as the done path}; run\n     contracts.process on it exactly like the done path (repair_session None).\n   bus.log_run(task, role='execute', outcome='derived_done' | 'execute_incomplete', executor=t['executor'],\n   derived_from='git_state') once per derived decision so the scorecard sees it.\n4. spawn.py:1657: executed_by = t['executor'] (set at 1564) instead of re-deriving from tier; when the model's\n   result lacks 'commit' and o (computed the same way) shows ahead > 0, set commit = head.\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract):\n- tests/test_spawn.py::test_failed_without_reason_key_sets_default_and_resume_hint (~543-558): its worktree is a\n  plain directory; execute_outcome returns None and it must pass unchanged.\n- Every tests/test_spawn.py execute test that patches ensure_worktree to TMP (test_run_worker_records_skills_exposed_and_l0_tokens\n  ~1774, the instruction-token test ~1755-1773, and any other execute run_worker test) must patch\n  spawn.execute_outcome to return None and spawn.head_sha to return None explicitly, so they never depend on\n  whether TMP sits inside a git repo (T-1445 #8).\n- Build the new tests on tests/_harness.py scratch_repo (goal branch + task worktree) and patch run_claude like\n  the neighbouring tests; the fix-round case seeds one commit before the run and asserts the hold.\n\nOut of scope: daemon.py (B5 adds fix rounds for execute_incomplete; the gate hold 'executor did not commit'\nstays), executor.py, failures.py, pool.toml. Rollback: the Planner records `git revert` of the merge and the\nderive_execute_result=false switch in decisions.md at merge.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gitutil.py::test_execute_outcome_reports_ahead_head_and_dirty_split_by_scope: passes: in a scratch repo with a goal branch and a task worktree, gitutil.execute_outcome(worktree, parent, scope) returns ahead (commits since merge-base with goal/<parent>), head sha, and uncommitted paths split into dirty_in_scope / dirty_out_of_scope (untracked included, .orchestrator/ and .venv ignored, scopes.matches rules); with since=<sha of an older commit> ahead counts only commits after it; returns None for a directory that is not a git work tree and when a git call fails",
+    "tests/test_spawn.py::test_execute_result_derived_from_git_state: passes: run_worker for an execute task whose run_claude returns failed 'non-JSON output (rc=143): ' (a) posts status done with result.commit = the worktree HEAD, executed_by = t['executor'] and derived_from 'git_state' when the run added a commit and the tree is clean; (b) with one fresh commit plus in-scope uncommitted files auto-commits them, posts done with synthetic_commit set and the worktree clean; (c) with an out-of-scope dirty file holds 'execute_incomplete: uncommitted changes outside scope' with resume_hint.dirty_out_of_scope; (d) with a pre-existing commit but none since run start holds 'execute_incomplete: no commits' and auto-commits nothing even with in-scope dirt; (e) when the task is already status done on the bus (worker posted itself) the derived path writes nothing; (f) with pool.cfg['spawn']['derive_execute_result'] False the task is marked failed exactly as before",
+    "tests/test_spawn.py::test_auto_commit_refused_for_secrets_or_index_lock: passes: an in-scope leftover named .env or a present .git/index.lock holds 'execute_incomplete: leftovers not auto-committable: ...' and leaves the worktree untouched",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/gitutil.py",
+    "tests/test_spawn.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B4v2",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1435"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790874985.354489,
+      "pipeline": {
+        "first_ready_at": 1790874985.354443
+      }
+    },
+    {
+      "ts": 1790874986.3036249,
+      "pipeline": {
+        "first_ready_at": 1790874985.354443,
+        "spec_review_at": 1790874986.303574,
+        "spec_review_at_lease": 1790875886.303574
+      }
+    },
+    {
+      "ts": 1790874986.3139079,
+      "pipeline": {
+        "first_ready_at": 1790874985.354443,
+        "spec_review_at": 1790874986.303574,
+        "spec_review_at_lease": 1790875886.303574,
+        "spec_review_at_done": 1790874986.3138292
+      }
+    },
+    {
+      "ts": 1790875045.574049,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1656,
+          "issue": "The spec says the done path keeps today's post. Item 4 then changes that path to use t['executor'] and to set commit from execute_outcome. That runs git on every successful execute, which contradicts 'only when failed'. Item 4 is also the only place that touches the model's own result, and no acceptance test covers it. Calling execute_outcome there without a since value would count pre-existing commits.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1713,
+          "issue": "The current-result check uses a separate bus.get() followed by later writes. A worker can post its own result between that read and the derived write. Only the epoch check is atomic. Item (e) is checked in only one place and has a TOCTOU gap. The derived done write and the check need to happen in one bus.locked() section, for example a check-and-post inside write_if_current. The auto-commit also mutates the worktree before that check runs.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1713,
+          "issue": "The spec runs the auto-commit before the is_current check. A superseded or reaped worker can therefore mutate the worktree that a successor now owns. Check is_current before any git add or commit.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "line": 8,
+          "issue": "_git_in has no timeout, and the spec requires timeout=60 on every call in execute_outcome. The spec does not say whether to extend _git_in or add a new helper. Changing _git_in's signature affects the other callers (reconcile_dead and changed_paths). Specify a new keyword-only timeout that defaults to None, or a separate helper, so existing behaviour does not change. subprocess.TimeoutExpired must also be caught explicitly, since it is not an OSError.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1713,
+          "issue": "The ahead == 0 hold uses 'no commits since pre_head'. If pre_head is None because head_sha failed on a git worktree, since=None falls back to the base, and old commits count as new work. A run that made no commits would then be derived as done. Specify: if pre_head is None while the worktree is a git work tree, return None and use the old failed write.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1713,
+          "issue": "A failure caused by a user kill, a timeout, or a budget cap can leave a half-finished commit plus a clean tree. That would be derived as 'done' and sent on to the gate, even though the executor never finished. The spec does not restrict which failure reasons qualify. Either restrict derivation to non_json and rc=143, or say plainly that any failed status qualifies. Also state what happens when r['status'] is 'held'.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1713,
+          "issue": "The auto-commit uses git add with exact paths. A deleted path or a rename pair from porcelain -z needs a defined handling. Rename pairs and deletions must be staged correctly (use `git add -A --`). Hooks, a missing git identity, and a signing config can also make the commit fail or hang. Specify `--no-verify` or an explicit failure hold, and a timeout for these git calls as well. The index.lock check is racy with a still-running child process. State that the process is confirmed dead before the auto-commit.",
+          "severity": "med"
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "line": 543,
+          "issue": "Acceptance (f) and the existing failed-without-reason test rely on execute_outcome returning None for a non-git directory. Other execute run_worker tests that patch ensure_worktree to TMP must be enumerated. The wording 'any other execute run_worker test' cannot be checked. A grep-based list of the tests to patch is needed, or a default autouse-style patch in setUp.",
+          "severity": "low"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1713,
+          "issue": "Logging: bus.log_run with outcome 'derived_done' or 'execute_incomplete' is not covered by any acceptance test. The 'once per derived decision' rule is untested. Also check whether the scorecard treats an unknown outcome as a failure. No scorecard or failures.py check is in scope.",
+          "severity": "low"
+        }
+      ]
+    },
+    {
+      "ts": 1790875247.588759,
+      "pipeline": {
+        "first_ready_at": 1790874985.354443,
+        "spec_review_at": 1790874986.303574,
+        "spec_review_at_lease": 1790875886.303574,
+        "spec_review_at_done": 1790874986.3138292,
+        "spec_review_held_at": 1790875247.588661
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790875488.6205142,
+      "pipeline": {
+        "first_ready_at": 1790874985.354443,
+        "spec_review_at": 1790874986.303574,
+        "spec_review_at_lease": 1790875886.303574,
+        "spec_review_at_done": 1790874986.3138292,
+        "spec_review_held_at": 1790875247.588661,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790875490.0644622,
+      "pipeline": {
+        "first_ready_at": 1790874985.354443,
+        "spec_review_at": 1790874986.303574,
+        "spec_review_at_lease": 1790875886.303574,
+        "spec_review_at_done": 1790874986.3138292,
+        "spec_review_held_at": 1790875247.588661,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790875247.588759": true
+        }
+      }
+    },
+    {
+      "ts": 1790878815.905708,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1468 (2026-10-01 wave 2 respec)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790874985.354443,
+    "spec_review_at": 1790874986.303574,
+    "spec_review_at_lease": 1790875886.303574,
+    "spec_review_at_done": 1790874986.3138292,
+    "spec_review_held_at": 1790875247.588661,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790875247.588759": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1656,
+      "issue": "The spec says the done path keeps today's post. Item 4 then changes that path to use t['executor'] and to set commit from execute_outcome. That runs git on every successful execute, which contradicts 'only when failed'. Item 4 is also the only place that touches the model's own result, and no acceptance test covers it. Calling execute_outcome there without a since value would count pre-existing commits.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1713,
+      "issue": "The current-result check uses a separate bus.get() followed by later writes. A worker can post its own result between that read and the derived write. Only the epoch check is atomic. Item (e) is checked in only one place and has a TOCTOU gap. The derived done write and the check need to happen in one bus.locked() section, for example a check-and-post inside write_if_current. The auto-commit also mutates the worktree before that check runs.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1713,
+      "issue": "The spec runs the auto-commit before the is_current check. A superseded or reaped worker can therefore mutate the worktree that a successor now owns. Check is_current before any git add or commit.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "line": 8,
+      "issue": "_git_in has no timeout, and the spec requires timeout=60 on every call in execute_outcome. The spec does not say whether to extend _git_in or add a new helper. Changing _git_in's signature affects the other callers (reconcile_dead and changed_paths). Specify a new keyword-only timeout that defaults to None, or a separate helper, so existing behaviour does not change. subprocess.TimeoutExpired must also be caught explicitly, since it is not an OSError.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1713,
+      "issue": "The ahead == 0 hold uses 'no commits since pre_head'. If pre_head is None because head_sha failed on a git worktree, since=None falls back to the base, and old commits count as new work. A run that made no commits would then be derived as done. Specify: if pre_head is None while the worktree is a git work tree, return None and use the old failed write.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1713,
+      "issue": "A failure caused by a user kill, a timeout, or a budget cap can leave a half-finished commit plus a clean tree. That would be derived as 'done' and sent on to the gate, even though the executor never finished. The spec does not restrict which failure reasons qualify. Either restrict derivation to non_json and rc=143, or say plainly that any failed status qualifies. Also state what happens when r['status'] is 'held'.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1713,
+      "issue": "The auto-commit uses git add with exact paths. A deleted path or a rename pair from porcelain -z needs a defined handling. Rename pairs and deletions must be staged correctly (use `git add -A --`). Hooks, a missing git identity, and a signing config can also make the commit fail or hang. Specify `--no-verify` or an explicit failure hold, and a timeout for these git calls as well. The index.lock check is racy with a still-running child process. State that the process is confirmed dead before the auto-commit.",
+      "severity": "med"
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "line": 543,
+      "issue": "Acceptance (f) and the existing failed-without-reason test rely on execute_outcome returning None for a non-git directory. Other execute run_worker tests that patch ensure_worktree to TMP must be enumerated. The wording 'any other execute run_worker test' cannot be checked. A grep-based list of the tests to patch is needed, or a default autouse-style patch in setUp.",
+      "severity": "low"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1713,
+      "issue": "Logging: bus.log_run with outcome 'derived_done' or 'execute_incomplete' is not covered by any acceptance test. The 'once per derived decision' rule is untested. Also check whether the scorecard treats an unknown outcome as a failure. No scorecard or failures.py check is in scope.",
+      "severity": "low"
+    }
+  ],
+  "hold_reason": "superseded by T-1468 (2026-10-01 wave 2 respec)"
+}

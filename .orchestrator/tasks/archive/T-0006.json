@@ -1,0 +1,254 @@
+{
+  "id": "T-0006",
+  "parent": "T-0004",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "Scout: repo-map of the CLI and status path for eval 001",
+  "spec": "Skill repo-map. Question: where does `orchestrator status` produce its output, what does Pool().status() return per account and for codex (field names, types), and how are CLI subcommands and their tests structured? Cite path:line for: the status branch in orchestrator/cli.py, Pool.status in orchestrator/pool.py, the existing CLI test (if any) in tests/test_orchestrator.py, and the test harness conventions (TMP, ORCH_ROOT). Suggest the smallest place to add a `--plain` flag printing one line per account and one for codex. Max 8 findings.",
+  "inputs": [],
+  "acceptance": [
+    "findings cite path:line for cli status branch, Pool.status fields, test conventions",
+    "suggested_next names the exact insertion point for --plain",
+    "JSON schema of the scout prompt respected"
+  ],
+  "scope": [
+    "orchestrator/cli.py",
+    "orchestrator/pool.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0006",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "The `status` CLI branch calls Pool().status(), merges in a queue dict keyed by bus status, and dumps as pretty JSON (indent=1). This is the sole place status output is produced today.",
+        "evidence": [
+          "orchestrator/cli.py:30-31"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Pool.status() returns {'accounts': [...], 'codex': {...}}. Each account dict has: id:str, utilization:float(round 3), day_tokens:int, daily_budget:int, cooling_s:int(>=0), reason:str (from Account.hold_reason).",
+        "evidence": [
+          "orchestrator/pool.py:115-118",
+          "orchestrator/pool.py:17-29"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Pool.status()'s codex dict has: available:bool (from codex_available()), running:int, day_tasks:int, cooling_s:int(>=0), on_exhausted:str (a config string literal: 'hold'|'fallback_claude'|'overflow_api').",
+        "evidence": [
+          "orchestrator/pool.py:119-121",
+          "orchestrator/pool.py:42-50",
+          ".orchestrator/pool.toml:25"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "There is no existing CLI-level test for orchestrator/cli.py or the status command. tests/test_orchestrator.py imports only bus, pool (as P), spawn, merge, executor directly \u2014 cli is never imported or invoked as a module; cli.py only appears as a string path inside hook-guardrail test payloads.",
+        "evidence": [
+          "tests/test_orchestrator.py:14",
+          "tests/test_orchestrator.py:180"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Test harness convention: a module-level TMP dir is created via tempfile.mkdtemp, exported as ORCH_ROOT env var before any orchestrator import, then seeded with a copied pool.toml and symlinked prompts/.claude dirs; sys.path is prepended with REPO so `from orchestrator import ...` resolves against the source tree, not an installed package.",
+        "evidence": [
+          "tests/test_orchestrator.py:5-14"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "CLI subcommands follow a uniform argparse pattern: each verb is sub.add_parser(name) with .add_argument(...) chained inline (e.g. resume/hold/merge/post), dispatched via a flat if/elif chain on a.cmd in main(); output for stateful commands is always json.dumps(..., indent=1).",
+        "evidence": [
+          "orchestrator/cli.py:20-43"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Smallest insertion point for --plain: add `.add_argument('--plain', action='store_true')` to the existing `sub.add_parser('status')` call at cli.py:22, then branch inside the `if a.cmd == 'status':` block at cli.py:30-31 \u2014 on a.plain, iterate Pool().status()['accounts'] printing one f-string line per account (id, utilization, cooling_s, reason) and one final line for the 'codex' dict (available, running, day_tasks, cooling_s); otherwise keep the current json.dumps path unchanged.",
+        "evidence": [
+          "orchestrator/cli.py:22",
+          "orchestrator/cli.py:30-31"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "No test currently exercises cli.py's argparse wiring or output formatting at all, so a --plain test would be new coverage, not a modification of an existing test \u2014 likely added as a new TestCase class in tests/test_orchestrator.py following the TMP/ORCH_ROOT pattern, invoking orchestrator.cli.main() with patched sys.argv or capturing stdout.",
+        "evidence": [
+          "tests/test_orchestrator.py:14",
+          "orchestrator/cli.py:20-47"
+        ],
+        "confidence": 0.6,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Is stdout capture (capsys-style) or subprocess invocation the intended way to test cli.main() in this codebase, given no precedent test does either?"
+    ],
+    "suggested_next": [
+      "Add `.add_argument('--plain', action='store_true')` to `sub.add_parser('status')` at orchestrator/cli.py:22, and branch on `a.plain` inside the `if a.cmd == 'status':` block at orchestrator/cli.py:30-31 to print one line per account plus one for codex, falling back to the existing json.dumps for the non-plain path."
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789656034.2905731,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0006",
+      "claimed_at": 1789656034.2905018
+    },
+    {
+      "ts": 1789656034.323195,
+      "pid": 83674,
+      "account": "B"
+    },
+    {
+      "ts": 1789656080.112446,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "The `status` CLI branch calls Pool().status(), merges in a queue dict keyed by bus status, and dumps as pretty JSON (indent=1). This is the sole place status output is produced today.",
+            "evidence": [
+              "orchestrator/cli.py:30-31"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Pool.status() returns {'accounts': [...], 'codex': {...}}. Each account dict has: id:str, utilization:float(round 3), day_tokens:int, daily_budget:int, cooling_s:int(>=0), reason:str (from Account.hold_reason).",
+            "evidence": [
+              "orchestrator/pool.py:115-118",
+              "orchestrator/pool.py:17-29"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Pool.status()'s codex dict has: available:bool (from codex_available()), running:int, day_tasks:int, cooling_s:int(>=0), on_exhausted:str (a config string literal: 'hold'|'fallback_claude'|'overflow_api').",
+            "evidence": [
+              "orchestrator/pool.py:119-121",
+              "orchestrator/pool.py:42-50",
+              ".orchestrator/pool.toml:25"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "There is no existing CLI-level test for orchestrator/cli.py or the status command. tests/test_orchestrator.py imports only bus, pool (as P), spawn, merge, executor directly \u2014 cli is never imported or invoked as a module; cli.py only appears as a string path inside hook-guardrail test payloads.",
+            "evidence": [
+              "tests/test_orchestrator.py:14",
+              "tests/test_orchestrator.py:180"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Test harness convention: a module-level TMP dir is created via tempfile.mkdtemp, exported as ORCH_ROOT env var before any orchestrator import, then seeded with a copied pool.toml and symlinked prompts/.claude dirs; sys.path is prepended with REPO so `from orchestrator import ...` resolves against the source tree, not an installed package.",
+            "evidence": [
+              "tests/test_orchestrator.py:5-14"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "CLI subcommands follow a uniform argparse pattern: each verb is sub.add_parser(name) with .add_argument(...) chained inline (e.g. resume/hold/merge/post), dispatched via a flat if/elif chain on a.cmd in main(); output for stateful commands is always json.dumps(..., indent=1).",
+            "evidence": [
+              "orchestrator/cli.py:20-43"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Smallest insertion point for --plain: add `.add_argument('--plain', action='store_true')` to the existing `sub.add_parser('status')` call at cli.py:22, then branch inside the `if a.cmd == 'status':` block at cli.py:30-31 \u2014 on a.plain, iterate Pool().status()['accounts'] printing one f-string line per account (id, utilization, cooling_s, reason) and one final line for the 'codex' dict (available, running, day_tasks, cooling_s); otherwise keep the current json.dumps path unchanged.",
+            "evidence": [
+              "orchestrator/cli.py:22",
+              "orchestrator/cli.py:30-31"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "No test currently exercises cli.py's argparse wiring or output formatting at all, so a --plain test would be new coverage, not a modification of an existing test \u2014 likely added as a new TestCase class in tests/test_orchestrator.py following the TMP/ORCH_ROOT pattern, invoking orchestrator.cli.main() with patched sys.argv or capturing stdout.",
+            "evidence": [
+              "tests/test_orchestrator.py:14",
+              "orchestrator/cli.py:20-47"
+            ],
+            "confidence": 0.6,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Is stdout capture (capsys-style) or subprocess invocation the intended way to test cli.main() in this codebase, given no precedent test does either?"
+        ],
+        "suggested_next": [
+          "Add `.add_argument('--plain', action='store_true')` to `sub.add_parser('status')` at orchestrator/cli.py:22, and branch on `a.plain` inside the `if a.cmd == 'status':` block at orchestrator/cli.py:30-31 to print one line per account plus one for codex, falling back to the existing json.dumps for the non-plain path."
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789656034.2905018,
+  "pid": 83674,
+  "account": "B"
+}

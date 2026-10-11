@@ -1,0 +1,786 @@
+{
+  "id": "T-1089",
+  "created_at": 1790164187.9236338,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S1f env_policy: allowlisted environment propagation for worker subprocesses (off/shadow/active), names-only shadow log, never a secret value (P22)",
+  "spec": "Create orchestrator/env_policy.py. worker_env(role, *, base, extra, cfg) -> (env, stripped): base is the parent environment mapping, extra the keys the caller must set (CLAUDE_CONFIG_DIR, ORCH_TASK_ID, oauth token env for the account, resolved [secrets.<role>] keys), cfg the pool config. Config in .orchestrator/pool.toml [secrets]: env_mode = \"shadow\" (values off, shadow, active; add with a dated comment) and env_passthrough = [\"PATH\",\"HOME\",\"USER\",\"LOGNAME\",\"LANG\",\"LC_ALL\",\"TERM\",\"SHELL\",\"TMPDIR\",\"XDG_*\",\"CLAUDE_*\",\"ORCH_*\",\"UV_*\",\"VIRTUAL_ENV\",\"PYTHONPATH\",\"NODE_*\",\"GIT_*\",\"SSH_AUTH_SOCK\"] (glob patterns; defaults used when absent). Rules: active -> env contains only base keys matching the passthrough patterns plus every extra key; shadow -> env is base plus extra unchanged, but stripped lists the keys active would have removed; off -> no computation, stripped empty. Keys whose name contains KEY, TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL or AUTH are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>] (so CLAUDE_CODE_OAUTH_TOKEN reaches the worker only because spawn passes it as extra). Shadow and active both log one runs row via bus.log_run(role=\"env_policy\", task=..., outcome=mode, stripped=<sorted key names>, count=n) \u2014 key names only, never values; the row must never raise.\nWire: spawn.py where the claude -p env is built (around line 1020-1025) and executor.py where codex exec subprocesses get their environment (find the subprocess call; if it inherits os.environ implicitly, pass env explicitly). Also audit and document (docs/hermes-hardening/06-credential-filtering.md): which env keys the current machine would strip in active mode (names only, measured by running worker_env against os.environ in shadow and listing the names), where jev.redact already applies, and that logs never carry values. Do not change [secrets.<role>] resolution. Test fixtures use synthetic names and values that are not credential-shaped.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-1049"
+  ],
+  "acceptance": [
+    "tests/test_env_policy.py::test_active_mode_allowlists_and_keeps_extra (a base env with secret-looking names is stripped, PATH and ORCH_* kept, extra keys kept)",
+    "tests/test_env_policy.py::test_shadow_mode_only_reports (env unchanged, stripped names listed, log row written with names only)",
+    "tests/test_env_policy.py::test_off_mode_noop",
+    "tests/test_env_policy.py::test_log_row_never_contains_values (a synthetic value never appears in the runs row)",
+    "tests/test_spawn.py::test_spawn_uses_env_policy (patched Popen receives the env from worker_env; oauth token passed as extra)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/env_policy.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_env_policy.py",
+    "tests/test_spawn.py",
+    ".orchestrator/pool.toml",
+    "docs/hermes-hardening/06-credential-filtering.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1089",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "The spec's own default env_passthrough list includes SSH_AUTH_SOCK, but the credential-name veto rule ('keys whose name contains ... AUTH ... are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>]') matches SSH_AUTH_SOCK (contains 'AUTH' as substring) and also GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_AUTHOR_DATE despite the GIT_* passthrough pattern. Implemented literally, active mode strips its own documented default passthrough entries, breaking SSH-agent-based git push and git author identity for any worker relying on ambient env in active mode. Self-contradictory defaults.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/env_policy.py",
+        "issue": "worker_env(role, *, base, extra, cfg) has no task parameter, but the spec requires bus.log_run(role='env_policy', task=..., outcome=mode, stripped=..., count=n) inside it every call. The only place a task id could come from is a magic lookup of extra['ORCH_TASK_ID'], which is never stated as a contract and silently breaks logging (task=None) for any caller (e.g. executor.py) that doesn't happen to name that exact key in extra.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "_create_goal_task (~line 114) and launch_planner (~line 334) build claude -p subprocess environments with the same shape as spawn.py's run_claude (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN, resolved [secrets.<role>] keys) but are outside scope. Same for orchestrator/planner_shadow.py:launch (~line 40-52), which also injects CLAUDE_CODE_OAUTH_TOKEN into a claude -p subprocess env unfiltered. The task's audit doc will claim to measure/harden credential exposure for orchestrator workers while these equally credential-bearing spawn paths stay completely unfiltered and unlogged, giving false confidence about coverage.",
+        "severity": "med",
+        "line": 334
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "Spec says wire executor.py's codex subprocess to worker_env but never specifies what role name or extra dict to pass. executor.py currently has no secrets_for_role/[secrets.execute] usage at all -- today codex exec inherits the full unfiltered parent env implicitly. Without specifying role/extra here, the implementer has to guess, and the shadow-mode audit in the doc can't tell reviewers what codex actually needs (e.g. any registry/API credentials currently reached only via ambient inheritance) versus what active mode would cut.",
+        "severity": "low",
+        "line": 163
+      }
+    ],
+    "suggested_spec_changes": [
+      "Resolve the passthrough-vs-credential-veto conflict explicitly: either exempt SSH_AUTH_SOCK and GIT_AUTHOR_* by adding them to a documented exemption set, or require the AUTH/KEY/TOKEN/etc. name check to use word-boundary matching (not bare substring) so AUTHOR doesn't match AUTH, and call out SSH_AUTH_SOCK as an explicit case to test.",
+      "Specify how worker_env obtains the task id for bus.log_run -- either add an explicit task keyword-only parameter to worker_env(role, *, base, extra, cfg, task) or state plainly that callers must put the task id under a fixed extra key and document that key name as part of the contract, with a defined fallback (task=None) when absent.",
+      "Either bring orchestrator/goals.py (_create_goal_task, launch_planner) and orchestrator/planner_shadow.py:launch into scope for the same worker_env wiring, or add an explicit note in docs/hermes-hardening/06-credential-filtering.md that these are known-unfiltered follow-up spawn paths so the audit doesn't imply full coverage.",
+      "Specify the role name and extra contents executor.py should pass to worker_env for the codex exec call, and confirm via the shadow-mode audit whether codex currently relies on any ambient credential-shaped env var so active mode doesn't silently break codex execution."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790164192.811871,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7c3d08406e2ad7d91a3090883eaf3a7078218df9e2e542366d0ba99d72fe2e18"
+          },
+          "spec": {
+            "chars": 2635,
+            "est_tokens": 658,
+            "sha256": "34e1a88b60e870b292c2718e118d13e9ec1cfcff106f7a84271a0a26a3f74a5c"
+          },
+          "acceptance": {
+            "chars": 633,
+            "est_tokens": 158,
+            "sha256": "4c51adf83217e2d5876493ad7e4f701f81923b0e2edd1b5b663a290c5360cfa7"
+          },
+          "scope": {
+            "chars": 215,
+            "est_tokens": 53,
+            "sha256": "498aa8ef077ed941f0f0d32b4456ea49194ec2541c5dda9d3f7b35afeccfad53"
+          },
+          "depends_on": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "bd10790c114a014a844dc6d8789e8b604db54b18e5afb8c42604500c002c13ba"
+          },
+          "existing tests": {
+            "chars": 488,
+            "est_tokens": 122,
+            "sha256": "9a8a6bee306c38428c3633927fa23108d9afcf558673a5c1a20d570bc8dba607"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "a3a39453f381",
+        "version": "a3a39453f381",
+        "candidate_known": false,
+        "base": "da4f92dad9b1",
+        "sources": "task@T-1049 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790164196.170225,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1089",
+      "claimed_at": 1790164196.1673222
+    },
+    {
+      "ts": 1790164196.1800199,
+      "account": "B"
+    },
+    {
+      "ts": 1790164206.474101,
+      "pid": 6035,
+      "account": "B"
+    },
+    {
+      "ts": 1790164212.400873,
+      "status": "held",
+      "hold_reason": "rate_limit on B, cooling 1800s"
+    },
+    {
+      "ts": 1790164244.209381,
+      "status": "queued",
+      "hold_reason": null,
+      "pipeline": {},
+      "reason": "Planner sweeper: re-queued for the daemon's respawn path"
+    },
+    {
+      "ts": 1790164336.011494,
+      "pipeline": {
+        "respawned_at": 1790164335.933795,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790164338.706563,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cade9dcbf1370f1deac7fd6c400890c5efed383c4ca78a69d255be9d1365d1ae"
+          },
+          "spec": {
+            "chars": 2635,
+            "est_tokens": 658,
+            "sha256": "34e1a88b60e870b292c2718e118d13e9ec1cfcff106f7a84271a0a26a3f74a5c"
+          },
+          "acceptance": {
+            "chars": 633,
+            "est_tokens": 158,
+            "sha256": "4c51adf83217e2d5876493ad7e4f701f81923b0e2edd1b5b663a290c5360cfa7"
+          },
+          "scope": {
+            "chars": 215,
+            "est_tokens": 53,
+            "sha256": "498aa8ef077ed941f0f0d32b4456ea49194ec2541c5dda9d3f7b35afeccfad53"
+          },
+          "depends_on": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "bd10790c114a014a844dc6d8789e8b604db54b18e5afb8c42604500c002c13ba"
+          },
+          "existing tests": {
+            "chars": 488,
+            "est_tokens": 122,
+            "sha256": "9a8a6bee306c38428c3633927fa23108d9afcf558673a5c1a20d570bc8dba607"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "a3a39453f381",
+        "version": "a3a39453f381",
+        "candidate_known": false,
+        "base": "0f54292fe85b",
+        "sources": "task@T-1049 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790164340.091723,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1089",
+      "claimed_at": 1790164340.090935
+    },
+    {
+      "ts": 1790164340.0954711,
+      "account": "B"
+    },
+    {
+      "ts": 1790164342.571061,
+      "pid": 22761,
+      "account": "B"
+    },
+    {
+      "ts": 1790164345.371674,
+      "status": "held",
+      "hold_reason": "rate_limit on B, cooling 1800s"
+    },
+    {
+      "ts": 1790164364.5008059,
+      "status": "queued",
+      "hold_reason": null,
+      "pipeline": {},
+      "reason": "Planner sweeper: re-queued for the daemon's respawn path"
+    },
+    {
+      "ts": 1790164479.123664,
+      "pipeline": {
+        "respawned_at": 1790164479.0442,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790164482.463281,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cade9dcbf1370f1deac7fd6c400890c5efed383c4ca78a69d255be9d1365d1ae"
+          },
+          "spec": {
+            "chars": 2635,
+            "est_tokens": 658,
+            "sha256": "34e1a88b60e870b292c2718e118d13e9ec1cfcff106f7a84271a0a26a3f74a5c"
+          },
+          "acceptance": {
+            "chars": 633,
+            "est_tokens": 158,
+            "sha256": "4c51adf83217e2d5876493ad7e4f701f81923b0e2edd1b5b663a290c5360cfa7"
+          },
+          "scope": {
+            "chars": 215,
+            "est_tokens": 53,
+            "sha256": "498aa8ef077ed941f0f0d32b4456ea49194ec2541c5dda9d3f7b35afeccfad53"
+          },
+          "depends_on": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "bd10790c114a014a844dc6d8789e8b604db54b18e5afb8c42604500c002c13ba"
+          },
+          "existing tests": {
+            "chars": 488,
+            "est_tokens": 122,
+            "sha256": "9a8a6bee306c38428c3633927fa23108d9afcf558673a5c1a20d570bc8dba607"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "a3a39453f381",
+        "version": "a3a39453f381",
+        "candidate_known": false,
+        "base": "0f54292fe85b",
+        "sources": "task@T-1049 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790164483.4581199,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1089",
+      "claimed_at": 1790164483.457608
+    },
+    {
+      "ts": 1790164483.462271,
+      "account": "A"
+    },
+    {
+      "ts": 1790164485.69099,
+      "pid": 38206,
+      "account": "A"
+    },
+    {
+      "ts": 1790164635.543159,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cade9dcbf1370f1deac7fd6c400890c5efed383c4ca78a69d255be9d1365d1ae"
+          },
+          "spec": {
+            "chars": 2635,
+            "est_tokens": 658,
+            "sha256": "34e1a88b60e870b292c2718e118d13e9ec1cfcff106f7a84271a0a26a3f74a5c"
+          },
+          "acceptance": {
+            "chars": 633,
+            "est_tokens": 158,
+            "sha256": "4c51adf83217e2d5876493ad7e4f701f81923b0e2edd1b5b663a290c5360cfa7"
+          },
+          "scope": {
+            "chars": 215,
+            "est_tokens": 53,
+            "sha256": "498aa8ef077ed941f0f0d32b4456ea49194ec2541c5dda9d3f7b35afeccfad53"
+          },
+          "depends_on": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "bd10790c114a014a844dc6d8789e8b604db54b18e5afb8c42604500c002c13ba"
+          },
+          "existing tests": {
+            "chars": 488,
+            "est_tokens": 122,
+            "sha256": "9a8a6bee306c38428c3633927fa23108d9afcf558673a5c1a20d570bc8dba607"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "a3a39453f381",
+        "version": "a3a39453f381",
+        "candidate_known": false,
+        "base": "0f54292fe85b",
+        "sources": "task@T-1049 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d6bb3db5-92eb-47c2-afb1-c78eba9a94d7"
+      }
+    },
+    {
+      "ts": 1790164635.578926,
+      "packet_meta": {
+        "chars": 4238,
+        "est_tokens": 1059,
+        "presented_tokens": 1059,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cade9dcbf1370f1deac7fd6c400890c5efed383c4ca78a69d255be9d1365d1ae"
+          },
+          "spec": {
+            "chars": 2635,
+            "est_tokens": 658,
+            "sha256": "34e1a88b60e870b292c2718e118d13e9ec1cfcff106f7a84271a0a26a3f74a5c"
+          },
+          "acceptance": {
+            "chars": 633,
+            "est_tokens": 158,
+            "sha256": "4c51adf83217e2d5876493ad7e4f701f81923b0e2edd1b5b663a290c5360cfa7"
+          },
+          "scope": {
+            "chars": 215,
+            "est_tokens": 53,
+            "sha256": "498aa8ef077ed941f0f0d32b4456ea49194ec2541c5dda9d3f7b35afeccfad53"
+          },
+          "depends_on": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "bd10790c114a014a844dc6d8789e8b604db54b18e5afb8c42604500c002c13ba"
+          },
+          "existing tests": {
+            "chars": 488,
+            "est_tokens": 122,
+            "sha256": "9a8a6bee306c38428c3633927fa23108d9afcf558673a5c1a20d570bc8dba607"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "a3a39453f381",
+        "version": "a3a39453f381",
+        "candidate_known": false,
+        "base": "0f54292fe85b",
+        "sources": "task@T-1049 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d6bb3db5-92eb-47c2-afb1-c78eba9a94d7",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "respawned_at": 1790164479.0442,
+        "respawn_count": 1,
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790164635.6143548,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "The spec's own default env_passthrough list includes SSH_AUTH_SOCK, but the credential-name veto rule ('keys whose name contains ... AUTH ... are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>]') matches SSH_AUTH_SOCK (contains 'AUTH' as substring) and also GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_AUTHOR_DATE despite the GIT_* passthrough pattern. Implemented literally, active mode strips its own documented default passthrough entries, breaking SSH-agent-based git push and git author identity for any worker relying on ambient env in active mode. Self-contradictory defaults.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/env_policy.py",
+            "issue": "worker_env(role, *, base, extra, cfg) has no task parameter, but the spec requires bus.log_run(role='env_policy', task=..., outcome=mode, stripped=..., count=n) inside it every call. The only place a task id could come from is a magic lookup of extra['ORCH_TASK_ID'], which is never stated as a contract and silently breaks logging (task=None) for any caller (e.g. executor.py) that doesn't happen to name that exact key in extra.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "_create_goal_task (~line 114) and launch_planner (~line 334) build claude -p subprocess environments with the same shape as spawn.py's run_claude (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN, resolved [secrets.<role>] keys) but are outside scope. Same for orchestrator/planner_shadow.py:launch (~line 40-52), which also injects CLAUDE_CODE_OAUTH_TOKEN into a claude -p subprocess env unfiltered. The task's audit doc will claim to measure/harden credential exposure for orchestrator workers while these equally credential-bearing spawn paths stay completely unfiltered and unlogged, giving false confidence about coverage.",
+            "severity": "med",
+            "line": 334
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Spec says wire executor.py's codex subprocess to worker_env but never specifies what role name or extra dict to pass. executor.py currently has no secrets_for_role/[secrets.execute] usage at all -- today codex exec inherits the full unfiltered parent env implicitly. Without specifying role/extra here, the implementer has to guess, and the shadow-mode audit in the doc can't tell reviewers what codex actually needs (e.g. any registry/API credentials currently reached only via ambient inheritance) versus what active mode would cut.",
+            "severity": "low",
+            "line": 163
+          }
+        ],
+        "suggested_spec_changes": [
+          "Resolve the passthrough-vs-credential-veto conflict explicitly: either exempt SSH_AUTH_SOCK and GIT_AUTHOR_* by adding them to a documented exemption set, or require the AUTH/KEY/TOKEN/etc. name check to use word-boundary matching (not bare substring) so AUTHOR doesn't match AUTH, and call out SSH_AUTH_SOCK as an explicit case to test.",
+          "Specify how worker_env obtains the task id for bus.log_run -- either add an explicit task keyword-only parameter to worker_env(role, *, base, extra, cfg, task) or state plainly that callers must put the task id under a fixed extra key and document that key name as part of the contract, with a defined fallback (task=None) when absent.",
+          "Either bring orchestrator/goals.py (_create_goal_task, launch_planner) and orchestrator/planner_shadow.py:launch into scope for the same worker_env wiring, or add an explicit note in docs/hermes-hardening/06-credential-filtering.md that these are known-unfiltered follow-up spawn paths so the audit doesn't imply full coverage.",
+          "Specify the role name and extra contents executor.py should pass to worker_env for the codex exec call, and confirm via the shadow-mode audit whether codex currently relies on any ambient credential-shaped env var so active mode doesn't silently break codex execution."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790164635.622228,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "The spec's own default env_passthrough list includes SSH_AUTH_SOCK, but the credential-name veto rule ('keys whose name contains ... AUTH ... are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>]') matches SSH_AUTH_SOCK (contains 'AUTH' as substring) and also GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_AUTHOR_DATE despite the GIT_* passthrough pattern. Implemented literally, active mode strips its own documented default passthrough entries, breaking SSH-agent-based git push and git author identity for any worker relying on ambient env in active mode. Self-contradictory defaults.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/env_policy.py",
+          "issue": "worker_env(role, *, base, extra, cfg) has no task parameter, but the spec requires bus.log_run(role='env_policy', task=..., outcome=mode, stripped=..., count=n) inside it every call. The only place a task id could come from is a magic lookup of extra['ORCH_TASK_ID'], which is never stated as a contract and silently breaks logging (task=None) for any caller (e.g. executor.py) that doesn't happen to name that exact key in extra.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "_create_goal_task (~line 114) and launch_planner (~line 334) build claude -p subprocess environments with the same shape as spawn.py's run_claude (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN, resolved [secrets.<role>] keys) but are outside scope. Same for orchestrator/planner_shadow.py:launch (~line 40-52), which also injects CLAUDE_CODE_OAUTH_TOKEN into a claude -p subprocess env unfiltered. The task's audit doc will claim to measure/harden credential exposure for orchestrator workers while these equally credential-bearing spawn paths stay completely unfiltered and unlogged, giving false confidence about coverage.",
+          "severity": "med",
+          "line": 334
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Spec says wire executor.py's codex subprocess to worker_env but never specifies what role name or extra dict to pass. executor.py currently has no secrets_for_role/[secrets.execute] usage at all -- today codex exec inherits the full unfiltered parent env implicitly. Without specifying role/extra here, the implementer has to guess, and the shadow-mode audit in the doc can't tell reviewers what codex actually needs (e.g. any registry/API credentials currently reached only via ambient inheritance) versus what active mode would cut.",
+          "severity": "low",
+          "line": 163
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4238,
+    "est_tokens": 1059,
+    "presented_tokens": 1059,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "cade9dcbf1370f1deac7fd6c400890c5efed383c4ca78a69d255be9d1365d1ae"
+      },
+      "spec": {
+        "chars": 2635,
+        "est_tokens": 658,
+        "sha256": "34e1a88b60e870b292c2718e118d13e9ec1cfcff106f7a84271a0a26a3f74a5c"
+      },
+      "acceptance": {
+        "chars": 633,
+        "est_tokens": 158,
+        "sha256": "4c51adf83217e2d5876493ad7e4f701f81923b0e2edd1b5b663a290c5360cfa7"
+      },
+      "scope": {
+        "chars": 215,
+        "est_tokens": 53,
+        "sha256": "498aa8ef077ed941f0f0d32b4456ea49194ec2541c5dda9d3f7b35afeccfad53"
+      },
+      "depends_on": {
+        "chars": 168,
+        "est_tokens": 42,
+        "sha256": "bd10790c114a014a844dc6d8789e8b604db54b18e5afb8c42604500c002c13ba"
+      },
+      "existing tests": {
+        "chars": 488,
+        "est_tokens": 122,
+        "sha256": "9a8a6bee306c38428c3633927fa23108d9afcf558673a5c1a20d570bc8dba607"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "a3a39453f381",
+    "version": "a3a39453f381",
+    "candidate_known": false,
+    "base": "0f54292fe85b",
+    "sources": "task@T-1049 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "d6bb3db5-92eb-47c2-afb1-c78eba9a94d7",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790164483.457608,
+  "account": "A",
+  "pid": 38206,
+  "hold_reason": null,
+  "pipeline": {
+    "respawned_at": 1790164479.0442,
+    "respawn_count": 1,
+    "skills_used": []
+  },
+  "reason": "Planner sweeper: re-queued for the daemon's respawn path",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "The spec's own default env_passthrough list includes SSH_AUTH_SOCK, but the credential-name veto rule ('keys whose name contains ... AUTH ... are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>]') matches SSH_AUTH_SOCK (contains 'AUTH' as substring) and also GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_AUTHOR_DATE despite the GIT_* passthrough pattern. Implemented literally, active mode strips its own documented default passthrough entries, breaking SSH-agent-based git push and git author identity for any worker relying on ambient env in active mode. Self-contradictory defaults.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/env_policy.py",
+      "issue": "worker_env(role, *, base, extra, cfg) has no task parameter, but the spec requires bus.log_run(role='env_policy', task=..., outcome=mode, stripped=..., count=n) inside it every call. The only place a task id could come from is a magic lookup of extra['ORCH_TASK_ID'], which is never stated as a contract and silently breaks logging (task=None) for any caller (e.g. executor.py) that doesn't happen to name that exact key in extra.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "_create_goal_task (~line 114) and launch_planner (~line 334) build claude -p subprocess environments with the same shape as spawn.py's run_claude (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN, resolved [secrets.<role>] keys) but are outside scope. Same for orchestrator/planner_shadow.py:launch (~line 40-52), which also injects CLAUDE_CODE_OAUTH_TOKEN into a claude -p subprocess env unfiltered. The task's audit doc will claim to measure/harden credential exposure for orchestrator workers while these equally credential-bearing spawn paths stay completely unfiltered and unlogged, giving false confidence about coverage.",
+      "severity": "med",
+      "line": 334
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Spec says wire executor.py's codex subprocess to worker_env but never specifies what role name or extra dict to pass. executor.py currently has no secrets_for_role/[secrets.execute] usage at all -- today codex exec inherits the full unfiltered parent env implicitly. Without specifying role/extra here, the implementer has to guess, and the shadow-mode audit in the doc can't tell reviewers what codex actually needs (e.g. any registry/API credentials currently reached only via ambient inheritance) versus what active mode would cut.",
+      "severity": "low",
+      "line": 163
+    }
+  ]
+}

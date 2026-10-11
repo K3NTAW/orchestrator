@@ -1,0 +1,850 @@
+{
+  "id": "T-1029",
+  "created_at": 1790154103.4476612,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S1c worker_registry: durable runtime registry of running workers with structured events, reconciliation and read-only inspection CLI (P11, P12)",
+  "spec": "Create orchestrator/worker_registry.py. STATUSES = (\"starting\",\"running\",\"waiting\",\"steering\",\"cancelling\",\"cancelled\",\"done\",\"failed\",\"held\"). Files: .orchestrator/workers/<task>.json (one document: task, role, model, provider, account, pid, worktree, branch, started_at, last_event_at, stage, current_tool (only if the event stream reports it), tokens (input_uncached, cache_read, output so far when known), usd, elapsed_s (computed on read), parent, children (task ids created with constraints.fix_round_for or parent equal to this task while it runs), status, status_reason) and .orchestrator/workers/<task>.events.jsonl (append-only: ts, kind, data; kinds at least spawned, claimed, stage, tool, usage, exit, reconciled, held). Writes are atomic (temp file + rename) under the existing bus lock helper if one is exposed, else a registry-local fcntl lock. API: upsert(task_id, **fields), get(task_id), active(), event(task_id, kind, **data), finish(task_id, status, reason=None), reconcile(alive_fn=daemon.alive) marks entries whose pid is dead and status is running/starting as failed with reason process_dead and emits a reconciled event (no bus changes; daemon.reconcile_dead stays the authority for task status).\nWire producers with minimal edits: spawn.py where the claude -p Popen is created (around line 1046: spawned with pid, account, model, worktree, branch) and where the json result is parsed (around line 1084-1090: usage event + finish done/failed); executor.py where a codex exec thread starts and ends (provider codex, thread id as pid substitute in field thread, plus usage and finish); daemon.reconcile_dead calls worker_registry.reconcile at the end of its handling. Never store packet text, prompts, transcripts or secrets in the registry; only identifiers, numbers and event kinds. Never expose hidden reasoning: only observable runtime events.\nCLI: `orchestrator workers [--task T-dddd] [--all] [--json]`: table of active workers (task, role, model, provider, status, stage, elapsed, tokens, worktree) and with --task the full document plus the last 20 events; --all includes finished ones from the last 24 h. Docs: docs/hermes-hardening/03-worker-registry.md (document shape, event kinds, what is deliberately not recorded).\nSpec review T-1000 folded in: (1) executor.py runs codex through one blocking subprocess.run (near line 159) and learns thread_id only after stdout is parsed: upsert the registry entry BEFORE launching (status starting, provider codex, model, worktree, branch, task, account codex) and replace subprocess.run with Popen plus communicate(timeout=...) preserving the existing timeout, capture and error semantics, so the pid is recorded at launch (event spawned with pid) and the entry is live for the whole run; add the thread id to the entry after parsing (event claimed or thread). Acceptance test: a patched Popen for codex shows an active entry with pid before communicate returns. (2) worker_registry.py never imports daemon (daemon imports it): reconcile(alive_fn) takes the function as a required argument, and daemon.tick calls worker_registry.reconcile(alive) exactly once per tick after the dead-task loop (not inside reconcile_dead). (3) children = task ids whose constraints.fix_round_for equals this task only (the parent field carries the goal container, never the spawning worker); drop the parent-based half of the definition; document that in 03-worker-registry.md.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-1020"
+  ],
+  "acceptance": [
+    "tests/test_worker_registry.py::test_upsert_event_finish_roundtrip (document and event file shapes, atomic write, elapsed computed)",
+    "tests/test_worker_registry.py::test_reconcile_marks_dead_pids (alive_fn false marks failed process_dead and appends reconciled event; alive entries untouched)",
+    "tests/test_worker_registry.py::test_registry_never_stores_prompt_text (upsert with a packet or prompt kwarg raises ValueError)",
+    "tests/test_spawn.py::test_spawn_records_worker_registry_entry (patched Popen and json output produce spawned, usage and exit events)",
+    "tests/test_cli.py::test_workers_cli_lists_active (workers --json lists an active entry; --task shows events)",
+    "tests/test_executor.py::test_codex_registry_entry_is_live_before_exit (patched Popen: entry exists with pid and status running while the process runs; usage and exit events after)",
+    "tests/test_daemon.py::test_tick_reconciles_registry_once_per_tick (patched worker_registry.reconcile called once with the daemon's alive function)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/worker_registry.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_worker_registry.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/03-worker-registry.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1029",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "tests/test_executor.py",
+        "issue": "Not listed in `scope`, but the folded-in fix (1) requires executor._run (line 159) to switch from subprocess.run to Popen+communicate, and the acceptance list requires adding tests/test_executor.py::test_codex_registry_entry_is_live_before_exit. scope-guard.sh blocks any Edit/Write to this file since it has no matching glob in scope, so the executor cannot add the required test. Worse, at least six existing tests in this file (the fake_codex helper used across many tests, plus inline patches around lines 207-214, 227-233, 280-284) monkeypatch executor.subprocess.run directly to intercept the codex call; once _run() calls subprocess.Popen instead, those monkeypatches stop being hit, Popen tries to exec a real 'codex' binary (or raises FileNotFoundError, which _run does not catch), and every one of those pre-existing tests breaks. Because the file is out of scope, the executor also cannot fix those broken tests, so tests-green.sh cannot pass.",
+        "severity": "high",
+        "line": 159
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "The spec's fold-in point (1) is otherwise correct and matches the code (subprocess.run at line 159 inside _run, single blocking call, thread_id only known after parsing stdout at line 168-169). No other issue with this part once scope is fixed.",
+        "severity": "low",
+        "line": 159
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add tests/test_executor.py to the scope list.",
+      "Explicitly require updating the existing subprocess.run-patching tests in tests/test_executor.py (fake_codex helper and the inline patches for usage-limit/argv-error paths) to patch subprocess.Popen instead, so they keep passing after _run switches to Popen+communicate.",
+      "Optionally: give FakeProc (tests/_harness.py) a communicate() method or add a FakePopen-style stand-in mirroring the one already in tests/test_spawn.py, so the executor doesn't have to invent a new fake shape for this file."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790154105.149993,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1790156120.1985931,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner: re-spawned after account B cooldown"
+    },
+    {
+      "ts": 1790156120.7689621,
+      "packet_meta": {
+        "chars": 6104,
+        "est_tokens": 1526,
+        "presented_tokens": 1526,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+          },
+          "spec": {
+            "chars": 4062,
+            "est_tokens": 1015,
+            "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+          },
+          "acceptance": {
+            "chars": 1053,
+            "est_tokens": 263,
+            "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b49b2fb92c6c",
+        "version": "b49b2fb92c6c",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1020 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790156122.077017,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1029",
+      "claimed_at": 1790156122.076633
+    },
+    {
+      "ts": 1790156122.078445,
+      "account": "B"
+    },
+    {
+      "ts": 1790156123.0583282,
+      "pid": 28219,
+      "account": "B"
+    },
+    {
+      "ts": 1790156250.0015092,
+      "packet_meta": {
+        "chars": 6104,
+        "est_tokens": 1526,
+        "presented_tokens": 1526,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+          },
+          "spec": {
+            "chars": 4062,
+            "est_tokens": 1015,
+            "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+          },
+          "acceptance": {
+            "chars": 1053,
+            "est_tokens": 263,
+            "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b49b2fb92c6c",
+        "version": "b49b2fb92c6c",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1020 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "95fc5650-9a62-4d62-b6b6-ae353e887334"
+      }
+    },
+    {
+      "ts": 1790156250.0314062,
+      "packet_meta": {
+        "chars": 6104,
+        "est_tokens": 1526,
+        "presented_tokens": 1526,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+          },
+          "spec": {
+            "chars": 4062,
+            "est_tokens": 1015,
+            "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+          },
+          "acceptance": {
+            "chars": 1053,
+            "est_tokens": 263,
+            "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b49b2fb92c6c",
+        "version": "b49b2fb92c6c",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1020 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "95fc5650-9a62-4d62-b6b6-ae353e887334",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790156250.040283,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/worker_registry.py",
+            "issue": "Base spec text says reconcile(alive_fn=daemon.alive) and 'daemon.reconcile_dead calls worker_registry.reconcile at the end of its handling', but fold-in item (2) explicitly overrides this: alive_fn must be a required arg (a default of daemon.alive would force worker_registry to import daemon, which already imports worker_registry -> circular import) and the call site moves to daemon.tick (once per tick after the dead-task loop), not inside reconcile_dead (which runs once per dead task in a loop). The contradictory base wording was never struck, so an implementer reading top-to-bottom could wire the circular-import version.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/worker_registry.py",
+            "issue": "Base 'Files:' section defines children as tasks with constraints.fix_round_for OR parent equal to this task. Verified against daemon.py: 'parent' on a task document is the goal container id (used throughout daemon.py for goal_id/base-branch resolution), never the spawning worker's id. Matching children by parent would make sibling tasks under the same goal falsely list each other as children. Fold-in item (3) correctly retracts the parent-based half but the base text still contains it, so the two definitions in the same packet conflict.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Fold-in item (1) requires replacing `r = subprocess.run(cmd, **run_kwargs)` (line 159) with Popen + communicate(timeout=...), 'preserving the existing timeout ... semantics'. That's not automatic: subprocess.run kills the child process internally before re-raising TimeoutExpired, but Popen.communicate does not. The existing `except subprocess.TimeoutExpired` handler (lines 160-161) just returns a failed result without killing the process -- it never needed to, because subprocess.run already killed it. A naive Popen swap will leak an orphaned `codex exec` process on every timeout unless the handler adds p.kill() (mirroring spawn.py's own TimeoutExpired handler at spawn.py:1049-1051). The spec should say this explicitly instead of implying 'preserve semantics' covers it for free.",
+            "severity": "high",
+            "line": 159
+          }
+        ],
+        "suggested_spec_changes": [
+          "Strike the base-text sentence 'daemon.reconcile_dead calls worker_registry.reconcile at the end of its handling' and the 'alive_fn=daemon.alive' default-parameter phrasing; state only the fold-in version (alive_fn required, called once from daemon.tick after the dead-task loop) so there is one instruction, not two.",
+          "Strike 'or parent equal to this task while it runs' from the children definition in the Files: section; state only 'children = tasks whose constraints.fix_round_for equals this task's id' to match fold-in item (3) and match how 'parent' is actually used elsewhere in daemon.py (goal container id).",
+          "Add to the executor.py Popen migration instruction: on subprocess.TimeoutExpired from communicate(), call p.kill() (and a follow-up communicate() to drain pipes) before returning the failed result, so the codex child is not left running past its timeout the way it was implicitly killed by subprocess.run before."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790156250.041574,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/worker_registry.py",
+          "issue": "Base spec text says reconcile(alive_fn=daemon.alive) and 'daemon.reconcile_dead calls worker_registry.reconcile at the end of its handling', but fold-in item (2) explicitly overrides this: alive_fn must be a required arg (a default of daemon.alive would force worker_registry to import daemon, which already imports worker_registry -> circular import) and the call site moves to daemon.tick (once per tick after the dead-task loop), not inside reconcile_dead (which runs once per dead task in a loop). The contradictory base wording was never struck, so an implementer reading top-to-bottom could wire the circular-import version.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/worker_registry.py",
+          "issue": "Base 'Files:' section defines children as tasks with constraints.fix_round_for OR parent equal to this task. Verified against daemon.py: 'parent' on a task document is the goal container id (used throughout daemon.py for goal_id/base-branch resolution), never the spawning worker's id. Matching children by parent would make sibling tasks under the same goal falsely list each other as children. Fold-in item (3) correctly retracts the parent-based half but the base text still contains it, so the two definitions in the same packet conflict.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Fold-in item (1) requires replacing `r = subprocess.run(cmd, **run_kwargs)` (line 159) with Popen + communicate(timeout=...), 'preserving the existing timeout ... semantics'. That's not automatic: subprocess.run kills the child process internally before re-raising TimeoutExpired, but Popen.communicate does not. The existing `except subprocess.TimeoutExpired` handler (lines 160-161) just returns a failed result without killing the process -- it never needed to, because subprocess.run already killed it. A naive Popen swap will leak an orphaned `codex exec` process on every timeout unless the handler adds p.kill() (mirroring spawn.py's own TimeoutExpired handler at spawn.py:1049-1051). The spec should say this explicitly instead of implying 'preserve semantics' covers it for free.",
+          "severity": "high",
+          "line": 159
+        }
+      ]
+    },
+    {
+      "ts": 1790156315.215978,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner sweeper: re-spawned after account B cooldown"
+    },
+    {
+      "ts": 1790156315.917651,
+      "packet_meta": {
+        "chars": 6104,
+        "est_tokens": 1526,
+        "presented_tokens": 1526,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+          },
+          "spec": {
+            "chars": 4062,
+            "est_tokens": 1015,
+            "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+          },
+          "acceptance": {
+            "chars": 1053,
+            "est_tokens": 263,
+            "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b49b2fb92c6c",
+        "version": "b49b2fb92c6c",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1020 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790156316.6372879,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1029",
+      "claimed_at": 1790156316.636943
+    },
+    {
+      "ts": 1790156316.638634,
+      "account": "B"
+    },
+    {
+      "ts": 1790156317.173171,
+      "pid": 40409,
+      "account": "B"
+    },
+    {
+      "ts": 1790156466.910861,
+      "packet_meta": {
+        "chars": 6104,
+        "est_tokens": 1526,
+        "presented_tokens": 1526,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+          },
+          "spec": {
+            "chars": 4062,
+            "est_tokens": 1015,
+            "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+          },
+          "acceptance": {
+            "chars": 1053,
+            "est_tokens": 263,
+            "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b49b2fb92c6c",
+        "version": "b49b2fb92c6c",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1020 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "da72db00-196d-4822-91ca-22bef380bca0"
+      }
+    },
+    {
+      "ts": 1790156466.942514,
+      "packet_meta": {
+        "chars": 6104,
+        "est_tokens": 1526,
+        "presented_tokens": 1526,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+          },
+          "spec": {
+            "chars": 4062,
+            "est_tokens": 1015,
+            "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+          },
+          "acceptance": {
+            "chars": 1053,
+            "est_tokens": 263,
+            "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b49b2fb92c6c",
+        "version": "b49b2fb92c6c",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1020 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "da72db00-196d-4822-91ca-22bef380bca0",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790156466.9494798,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "tests/test_executor.py",
+            "issue": "Not listed in `scope`, but the folded-in fix (1) requires executor._run (line 159) to switch from subprocess.run to Popen+communicate, and the acceptance list requires adding tests/test_executor.py::test_codex_registry_entry_is_live_before_exit. scope-guard.sh blocks any Edit/Write to this file since it has no matching glob in scope, so the executor cannot add the required test. Worse, at least six existing tests in this file (the fake_codex helper used across many tests, plus inline patches around lines 207-214, 227-233, 280-284) monkeypatch executor.subprocess.run directly to intercept the codex call; once _run() calls subprocess.Popen instead, those monkeypatches stop being hit, Popen tries to exec a real 'codex' binary (or raises FileNotFoundError, which _run does not catch), and every one of those pre-existing tests breaks. Because the file is out of scope, the executor also cannot fix those broken tests, so tests-green.sh cannot pass.",
+            "severity": "high",
+            "line": 159
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "The spec's fold-in point (1) is otherwise correct and matches the code (subprocess.run at line 159 inside _run, single blocking call, thread_id only known after parsing stdout at line 168-169). No other issue with this part once scope is fixed.",
+            "severity": "low",
+            "line": 159
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add tests/test_executor.py to the scope list.",
+          "Explicitly require updating the existing subprocess.run-patching tests in tests/test_executor.py (fake_codex helper and the inline patches for usage-limit/argv-error paths) to patch subprocess.Popen instead, so they keep passing after _run switches to Popen+communicate.",
+          "Optionally: give FakeProc (tests/_harness.py) a communicate() method or add a FakePopen-style stand-in mirroring the one already in tests/test_spawn.py, so the executor doesn't have to invent a new fake shape for this file."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790156466.950679,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "tests/test_executor.py",
+          "issue": "Not listed in `scope`, but the folded-in fix (1) requires executor._run (line 159) to switch from subprocess.run to Popen+communicate, and the acceptance list requires adding tests/test_executor.py::test_codex_registry_entry_is_live_before_exit. scope-guard.sh blocks any Edit/Write to this file since it has no matching glob in scope, so the executor cannot add the required test. Worse, at least six existing tests in this file (the fake_codex helper used across many tests, plus inline patches around lines 207-214, 227-233, 280-284) monkeypatch executor.subprocess.run directly to intercept the codex call; once _run() calls subprocess.Popen instead, those monkeypatches stop being hit, Popen tries to exec a real 'codex' binary (or raises FileNotFoundError, which _run does not catch), and every one of those pre-existing tests breaks. Because the file is out of scope, the executor also cannot fix those broken tests, so tests-green.sh cannot pass.",
+          "severity": "high",
+          "line": 159
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The spec's fold-in point (1) is otherwise correct and matches the code (subprocess.run at line 159 inside _run, single blocking call, thread_id only known after parsing stdout at line 168-169). No other issue with this part once scope is fixed.",
+          "severity": "low",
+          "line": 159
+        }
+      ]
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner sweeper: re-spawned after account B cooldown",
+  "packet_meta": {
+    "chars": 6104,
+    "est_tokens": 1526,
+    "presented_tokens": 1526,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "42a79719cd870569d8cd35811a6f850fd0033fe8fd18a357ed819b4896f87793"
+      },
+      "spec": {
+        "chars": 4062,
+        "est_tokens": 1015,
+        "sha256": "0577694a449f4f09ddafee333d702995488251feca1a54c354e7b2b12b6b0fd8"
+      },
+      "acceptance": {
+        "chars": 1053,
+        "est_tokens": 263,
+        "sha256": "24044e45e7f70f34b2fac4383de1643c5d9d9e7a21ad694ef3bec1807672b3c1"
+      },
+      "scope": {
+        "chars": 261,
+        "est_tokens": 65,
+        "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 606,
+        "est_tokens": 151,
+        "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "b49b2fb92c6c",
+    "version": "b49b2fb92c6c",
+    "candidate_known": false,
+    "base": "87bea11f32d9",
+    "sources": "task@T-1020 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "da72db00-196d-4822-91ca-22bef380bca0",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790156316.636943,
+  "account": "B",
+  "pid": 40409,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "tests/test_executor.py",
+      "issue": "Not listed in `scope`, but the folded-in fix (1) requires executor._run (line 159) to switch from subprocess.run to Popen+communicate, and the acceptance list requires adding tests/test_executor.py::test_codex_registry_entry_is_live_before_exit. scope-guard.sh blocks any Edit/Write to this file since it has no matching glob in scope, so the executor cannot add the required test. Worse, at least six existing tests in this file (the fake_codex helper used across many tests, plus inline patches around lines 207-214, 227-233, 280-284) monkeypatch executor.subprocess.run directly to intercept the codex call; once _run() calls subprocess.Popen instead, those monkeypatches stop being hit, Popen tries to exec a real 'codex' binary (or raises FileNotFoundError, which _run does not catch), and every one of those pre-existing tests breaks. Because the file is out of scope, the executor also cannot fix those broken tests, so tests-green.sh cannot pass.",
+      "severity": "high",
+      "line": 159
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The spec's fold-in point (1) is otherwise correct and matches the code (subprocess.run at line 159 inside _run, single blocking call, thread_id only known after parsing stdout at line 168-169). No other issue with this part once scope is fixed.",
+      "severity": "low",
+      "line": 159
+    }
+  ]
+}

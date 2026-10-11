@@ -1,0 +1,959 @@
+{
+  "id": "T-1286",
+  "created_at": 1790176932.741954,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "Bugfix: evidence feedback loop: specialist.shared_evidence lists the goal pool into every packet and spawn re-adds each line as a previous_result row with a fresh index (12,292 rows, 2.3 MB packets)",
+  "spec": "Root cause found by the Planner (real 22:15): in spawn._packet_body, when skills mode is active, composition.shared_evidence(task) appends one evidence line per item of the goal evidence pool; every line is then turned into a previous_result evidence object with location task:<id>:evidence:<index> and added to the same pool, so each packet build grows the pool by the number of lines it read (T-1274 alone contributed 3,034 rows; the pool reached 12,292 rows and a review packet rendered 2.26 MB, argv too long). Fix: (1) previous_result rows are keyed by (task id, content hash) with no running index, and EvidencePool.add replaces the existing row for a task instead of appending; rows for superseded tasks are dropped on load; (2) shared_evidence output never becomes new evidence objects (do not wrap lines that already came from the pool); (3) cap the legacy evidence section and the shared_evidence contribution at [context_router].legacy_evidence_chars (default 6000, dated comment) so no mode can build an unbounded packet. Regression tests: building three packets in a row for one task leaves the pool size unchanged; a pool with 5,000 rows yields an evidence section under the cap. Repository rules: unittest, no new dependencies, run .claude/hooks/tests-green.sh . until green, do not ask questions.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_evidence.py::test_previous_result_rows_keyed_per_task_and_superseded_dropped",
+    "tests/test_spawn.py::test_three_packet_builds_do_not_grow_the_pool_and_evidence_section_capped",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/evidence.py",
+    "orchestrator/spawn.py",
+    "orchestrator/specialist.py",
+    ".orchestrator/pool.toml",
+    "tests/test_evidence.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 1800,
+    "task_class": "bug"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1286",
+  "codex_thread": "01a0cef4-336e-78f0-a652-5626299c0912",
+  "result": {
+    "summary": "Summary: Implemented stable per-task/content-hash evidence keys, superseded-row compaction, shared-evidence loop prevention, and a configurable 6,000-character evidence cap.\n\nFiles changed:\n\n- `.orchestrator/pool.toml`\n- `orchestrator/evidence.py`\n- `orchestrator/spawn.py`\n- `tests/test_evidence.py`\n- `tests/test_spawn.py`\n\nGate result: **red** after the maximum two permitted runs. The task-specific regression passed; the final run failed an unrelated threshold test that passed on the first run.\n\nCommit: `0a33640212ffae6f7eac24cdb574bd289cd42621`\n\nFailures-only test output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_localized_fix_reduces_and_keeps_scope_full (test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full)\nTraceback (most recent call last):\nAssertionError: 0.144 not greater than or equal to 0.4\nFAILED (failures=1)\n```",
+    "executed_by": "codex:sol",
+    "thread": "01a0cef4-336e-78f0-a652-5626299c0912",
+    "usage": {
+      "input_tokens": 816821,
+      "cached_input_tokens": 775552,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6188,
+      "reasoning_output_tokens": 1480,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790176936.313243,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202
+      }
+    },
+    {
+      "ts": 1790176936.314316,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790176936.314262,
+        "dispatched_at_lease": 1790177836.314262
+      }
+    },
+    {
+      "ts": 1790176940.437428,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790176936.314262,
+        "dispatched_at_lease": 1790177836.314262,
+        "dispatched_at_done": 1790176940.437322
+      }
+    },
+    {
+      "ts": 1790178122.3830779,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202
+      }
+    },
+    {
+      "ts": 1790178413.218465,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425
+      }
+    },
+    {
+      "ts": 1790178417.2099369,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833
+      }
+    },
+    {
+      "ts": 1790178503.471498,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        }
+      }
+    },
+    {
+      "ts": 1790178505.513424,
+      "packet_meta": {
+        "chars": 4771,
+        "est_tokens": 1192,
+        "presented_tokens": 1192,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "dda8af22233b1267082e14122d4d6475ce4801098ba77f02dcd6c802516fcdb3"
+          },
+          "objective": {
+            "chars": 1538,
+            "est_tokens": 384,
+            "sha256": "96efee1211a246776407b81eaa704d508f2bd05c6e50ba2f087fffcb0e98686a"
+          },
+          "acceptance": {
+            "chars": 240,
+            "est_tokens": 60,
+            "sha256": "a1637ca58ac270bd7bdb48dfa5d61976fdb7d007c2d2462de8ebdd6e25b00a79"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "7c3228dace3622ac4ba43d005bd7f99c9f8871d44bfeecee938c67bad3b9b57c"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 91,
+            "est_tokens": 22,
+            "sha256": "9dfa58c7a4247bbf4ddb706ee9e467472aa882ab734143af06dda4e3fde6d70d"
+          },
+          "relevant_tests": {
+            "chars": 955,
+            "est_tokens": 238,
+            "sha256": "a324146c717ca99c467cc8a8216c4ea9b985fae0a0f13e0d9d412f91d8be0bc3"
+          },
+          "symbols": {
+            "chars": 1401,
+            "est_tokens": 350,
+            "sha256": "1929d3354b1b8e8a28433718ff80887b7108e367e6fca3a028691f175c38899c"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "3fc04f00e69e",
+        "version": "3fc04f00e69e",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@28e5fc3ca227 gotchas@640949526723 memory@notes routed=active",
+        "policy_version": "28e5fc3ca227",
+        "gotchas": "640949526723",
+        "candidate_tokens": 2306,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 15134,
+        "routed_reduction_ratio": 0.9366837903076066,
+        "routed_hidden": 2,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "64cafd84b898",
+          "fcb0688062a7",
+          "77c381076889",
+          "0752032fdb9b",
+          "d90f2fc35b32",
+          "f691f21d34c7",
+          "ab45dc0d1990",
+          "bc691347e557",
+          "cf29924f8ff9",
+          "24eb129315e6",
+          "6f6b02dad815",
+          "2076d84d2e73",
+          "504365aa02ad",
+          "e45c73c317e2",
+          "582c30a68185",
+          "4d1d2cbbcc71",
+          "0f5a35f16a20",
+          "426750e45e21",
+          "c444dfeae350",
+          "cd369262d442",
+          "dd2ff0dbe863",
+          "43cfd698a24a",
+          "5b82579c7db6",
+          "4e049de6c162",
+          "eb12f8dd9470",
+          "49abafd289a7",
+          "aa70f5c28651",
+          "2a718388c895",
+          "70d31326d405",
+          "e5b1e5b84b44",
+          "ed7108bdae06",
+          "912282d76be6",
+          "30f5962236f4",
+          "10a806ca49eb",
+          "d8356694118c",
+          "e4c630cc87b3",
+          "a7bd1f0a42e0",
+          "66ab1306ccfc",
+          "f5e9df567728",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "669cef77d8ef",
+          "cc9eccd61e92",
+          "3be7d28daede",
+          "83406e2b84b7",
+          "584f4a33bddf",
+          "ef89878d23da",
+          "d0294cc58dda"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790178505.514634,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1286",
+      "claimed_at": 1790178505.514477
+    },
+    {
+      "ts": 1790178505.515628,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790178985.942354,
+      "codex_thread": "01a0cef4-336e-78f0-a652-5626299c0912",
+      "codex_thread_head": "0a33640212ffae6f7eac24cdb574bd289cd42621"
+    },
+    {
+      "ts": 1790178985.944889,
+      "packet_meta": {
+        "chars": 4771,
+        "est_tokens": 1192,
+        "presented_tokens": 1192,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "dda8af22233b1267082e14122d4d6475ce4801098ba77f02dcd6c802516fcdb3"
+          },
+          "objective": {
+            "chars": 1538,
+            "est_tokens": 384,
+            "sha256": "96efee1211a246776407b81eaa704d508f2bd05c6e50ba2f087fffcb0e98686a"
+          },
+          "acceptance": {
+            "chars": 240,
+            "est_tokens": 60,
+            "sha256": "a1637ca58ac270bd7bdb48dfa5d61976fdb7d007c2d2462de8ebdd6e25b00a79"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 168,
+            "est_tokens": 42,
+            "sha256": "7c3228dace3622ac4ba43d005bd7f99c9f8871d44bfeecee938c67bad3b9b57c"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 91,
+            "est_tokens": 22,
+            "sha256": "9dfa58c7a4247bbf4ddb706ee9e467472aa882ab734143af06dda4e3fde6d70d"
+          },
+          "relevant_tests": {
+            "chars": 955,
+            "est_tokens": 238,
+            "sha256": "a324146c717ca99c467cc8a8216c4ea9b985fae0a0f13e0d9d412f91d8be0bc3"
+          },
+          "symbols": {
+            "chars": 1401,
+            "est_tokens": 350,
+            "sha256": "1929d3354b1b8e8a28433718ff80887b7108e367e6fca3a028691f175c38899c"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "3fc04f00e69e",
+        "version": "3fc04f00e69e",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@28e5fc3ca227 gotchas@640949526723 memory@notes routed=active",
+        "policy_version": "28e5fc3ca227",
+        "gotchas": "640949526723",
+        "candidate_tokens": 2306,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 15134,
+        "routed_reduction_ratio": 0.9366837903076066,
+        "routed_hidden": 2,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "64cafd84b898",
+          "fcb0688062a7",
+          "77c381076889",
+          "0752032fdb9b",
+          "d90f2fc35b32",
+          "f691f21d34c7",
+          "ab45dc0d1990",
+          "bc691347e557",
+          "cf29924f8ff9",
+          "24eb129315e6",
+          "6f6b02dad815",
+          "2076d84d2e73",
+          "504365aa02ad",
+          "e45c73c317e2",
+          "582c30a68185",
+          "4d1d2cbbcc71",
+          "0f5a35f16a20",
+          "426750e45e21",
+          "c444dfeae350",
+          "cd369262d442",
+          "dd2ff0dbe863",
+          "43cfd698a24a",
+          "5b82579c7db6",
+          "4e049de6c162",
+          "eb12f8dd9470",
+          "49abafd289a7",
+          "aa70f5c28651",
+          "2a718388c895",
+          "70d31326d405",
+          "e5b1e5b84b44",
+          "ed7108bdae06",
+          "912282d76be6",
+          "30f5962236f4",
+          "10a806ca49eb",
+          "d8356694118c",
+          "e4c630cc87b3",
+          "a7bd1f0a42e0",
+          "66ab1306ccfc",
+          "f5e9df567728",
+          "d02e6bc9902a",
+          "bb8ef90a30f4",
+          "461132b06b06",
+          "669cef77d8ef",
+          "cc9eccd61e92",
+          "3be7d28daede",
+          "83406e2b84b7",
+          "584f4a33bddf",
+          "ef89878d23da",
+          "d0294cc58dda"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790178985.956424,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790178985.9596128,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented stable per-task/content-hash evidence keys, superseded-row compaction, shared-evidence loop prevention, and a configurable 6,000-character evidence cap.\n\nFiles changed:\n\n- `.orchestrator/pool.toml`\n- `orchestrator/evidence.py`\n- `orchestrator/spawn.py`\n- `tests/test_evidence.py`\n- `tests/test_spawn.py`\n\nGate result: **red** after the maximum two permitted runs. The task-specific regression passed; the final run failed an unrelated threshold test that passed on the first run.\n\nCommit: `0a33640212ffae6f7eac24cdb574bd289cd42621`\n\nFailures-only test output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_localized_fix_reduces_and_keeps_scope_full (test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full)\nTraceback (most recent call last):\nAssertionError: 0.144 not greater than or equal to 0.4\nFAILED (failures=1)\n```",
+        "executed_by": "codex:sol",
+        "thread": "01a0cef4-336e-78f0-a652-5626299c0912",
+        "usage": {
+          "input_tokens": 816821,
+          "cached_input_tokens": 775552,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6188,
+          "reasoning_output_tokens": 1480,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790179001.0433369,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790179130.677943,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790179130.677772,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_localized_fix_reduces_and_keeps_scope_full (test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full)\nTraceback (most recent call last):\nAssertionError: 0.144 not greater than or equal to 0.4\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1286/.orchestrator/runs/tests/T-1286-20260923-175850.log\n"
+      }
+    },
+    {
+      "ts": 1790179131.591247,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_localized_fix_reduces_and_keeps_scope_full (test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full)\nTraceback (most recent call last):\nAssertionError: 0.144 not greater than or equal to 0.4\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1286/.orchestrator/runs/tests/T-1286-20260923-175850.log\n",
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790179131.6879098,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_localized_fix_reduces_and_keeps_scope_full (test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full)\nTraceback (most recent call last):\nAssertionError: 0.144 not greater than or equal to 0.4\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1286/.orchestrator/runs/tests/T-1286-20260923-175850.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_context_eval (unittest.loader._FailedTest.test_context_eval)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_context_eval\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_context_eval'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790179131.689468,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790179130.677772,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790179131.813218,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790179130.677772,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790179130.677943"
+      }
+    },
+    {
+      "ts": 1790179516.7106528,
+      "codex_thread": "01a0cef4-336e-78f0-a652-5626299c0912",
+      "codex_thread_head": "5fb069465a50121606df956136bc16b7aef87e73"
+    },
+    {
+      "ts": 1790179516.765389,
+      "rounds": 1
+    },
+    {
+      "ts": 1790179708.518198,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790179130.677772,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790179130.677943",
+        "first_green_at": 1790179708.5147378,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790180211.979685,
+      "status": "done",
+      "merged_into": "goal/T-0991",
+      "merged_via": "fix round T-1300 5fb069465a50121606df956136bc16b7aef87e73",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790176936.313202,
+        "dispatched_at": 1790178413.218425,
+        "dispatched_at_lease": 1790179313.218425,
+        "dispatched_at_done": 1790178417.209833,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790178503.4710422
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790179130.677772,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790179130.677943",
+        "first_green_at": 1790179708.5147378,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790180211.977868
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790176936.313202,
+    "dispatched_at": 1790178413.218425,
+    "dispatched_at_lease": 1790179313.218425,
+    "dispatched_at_done": 1790178417.209833,
+    "handoff": {
+      "baseline": "sol",
+      "selected": "sol",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790178503.4710422
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "b6dba2a7c72542bac0440654749aa43822250b34",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790179130.677772,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1790179130.677943",
+    "first_green_at": 1790179708.5147378,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790180211.977868
+  },
+  "packet_meta": {
+    "chars": 4771,
+    "est_tokens": 1192,
+    "presented_tokens": 1192,
+    "sections": {
+      "_preamble": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "dda8af22233b1267082e14122d4d6475ce4801098ba77f02dcd6c802516fcdb3"
+      },
+      "objective": {
+        "chars": 1538,
+        "est_tokens": 384,
+        "sha256": "96efee1211a246776407b81eaa704d508f2bd05c6e50ba2f087fffcb0e98686a"
+      },
+      "acceptance": {
+        "chars": 240,
+        "est_tokens": 60,
+        "sha256": "a1637ca58ac270bd7bdb48dfa5d61976fdb7d007c2d2462de8ebdd6e25b00a79"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+      },
+      "write_scope": {
+        "chars": 168,
+        "est_tokens": 42,
+        "sha256": "7c3228dace3622ac4ba43d005bd7f99c9f8871d44bfeecee938c67bad3b9b57c"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 91,
+        "est_tokens": 22,
+        "sha256": "9dfa58c7a4247bbf4ddb706ee9e467472aa882ab734143af06dda4e3fde6d70d"
+      },
+      "relevant_tests": {
+        "chars": 955,
+        "est_tokens": 238,
+        "sha256": "a324146c717ca99c467cc8a8216c4ea9b985fae0a0f13e0d9d412f91d8be0bc3"
+      },
+      "symbols": {
+        "chars": 1401,
+        "est_tokens": 350,
+        "sha256": "1929d3354b1b8e8a28433718ff80887b7108e367e6fca3a028691f175c38899c"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "3fc04f00e69e",
+    "version": "3fc04f00e69e",
+    "candidate_known": true,
+    "base": "1acfc3b30612",
+    "sources": "pool.toml@28e5fc3ca227 gotchas@640949526723 memory@notes routed=active",
+    "policy_version": "28e5fc3ca227",
+    "gotchas": "640949526723",
+    "candidate_tokens": 2306,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 15134,
+    "routed_reduction_ratio": 0.9366837903076066,
+    "routed_hidden": 2,
+    "routed_ambiguous": 18,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "64cafd84b898",
+      "fcb0688062a7",
+      "77c381076889",
+      "0752032fdb9b",
+      "d90f2fc35b32",
+      "f691f21d34c7",
+      "ab45dc0d1990",
+      "bc691347e557",
+      "cf29924f8ff9",
+      "24eb129315e6",
+      "6f6b02dad815",
+      "2076d84d2e73",
+      "504365aa02ad",
+      "e45c73c317e2",
+      "582c30a68185",
+      "4d1d2cbbcc71",
+      "0f5a35f16a20",
+      "426750e45e21",
+      "c444dfeae350",
+      "cd369262d442",
+      "dd2ff0dbe863",
+      "43cfd698a24a",
+      "5b82579c7db6",
+      "4e049de6c162",
+      "eb12f8dd9470",
+      "49abafd289a7",
+      "aa70f5c28651",
+      "2a718388c895",
+      "70d31326d405",
+      "e5b1e5b84b44",
+      "ed7108bdae06",
+      "912282d76be6",
+      "30f5962236f4",
+      "10a806ca49eb",
+      "d8356694118c",
+      "e4c630cc87b3",
+      "a7bd1f0a42e0",
+      "66ab1306ccfc",
+      "f5e9df567728",
+      "d02e6bc9902a",
+      "bb8ef90a30f4",
+      "461132b06b06",
+      "669cef77d8ef",
+      "cc9eccd61e92",
+      "3be7d28daede",
+      "83406e2b84b7",
+      "584f4a33bddf",
+      "ef89878d23da",
+      "d0294cc58dda"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790178505.514477,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "5fb069465a50121606df956136bc16b7aef87e73",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_localized_fix_reduces_and_keeps_scope_full (test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full)\nTraceback (most recent call last):\nAssertionError: 0.144 not greater than or equal to 0.4\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1286/.orchestrator/runs/tests/T-1286-20260923-175850.log\n",
+    "flaky_runs": [
+      {
+        "ids": [
+          "test_context_eval.ContextEval.test_localized_fix_reduces_and_keeps_scope_full"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_context_eval (unittest.loader._FailedTest.test_context_eval)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_context_eval\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_context_eval'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-0991",
+  "merged_via": "fix round T-1300 5fb069465a50121606df956136bc16b7aef87e73"
+}

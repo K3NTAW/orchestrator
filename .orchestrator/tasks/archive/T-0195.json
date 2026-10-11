@@ -1,0 +1,165 @@
+{
+  "id": "T-0195",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): D5 fix round 1 on task/T-0194 \u2014 delta 38d91fe..28d0fad (T-0194, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0194 delta: `git diff 38d91fe 28d0fad` in worktree wt/T-0194 (orchestrator/scorecard.py, orchestrator/cli.py, tests/test_scorecard.py, README.md). Fix round for review T-0191; confirm: (1) planner transcript tokens read from day_tokens per account in the real pool shape (fixture built with pool._save_planner_account) and shown once as a footer under --by goal, never as a per-goal column; (2) per-goal planner column shows decision runs from planner_runs.json with \"-\" (file missing) / \"0 runs\" / \"n runs\" distinguished, plus usd when present; (3) an other bucket collects challenge/triage/unknown roles and total_usd covers every child task (2.0 + 5.0 \u2192 7.0 test); (4) format helper returns str in every path; sys.argv restored via addCleanup; a numeric cell asserted in the --by goal output; (5) default scorecard output still byte-identical (existing test). Also confirm the token formula still matches spawn.run_claude (input + output + cache_read // 10), nothing reads transcript content, malformed jsonl and missing task files are skipped. Run `uv run python -m unittest tests.test_scorecard -q` once. Second review of D5: approve unless a defect would print wrong cost figures in production; smaller points as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0194"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five T-0191 groups confirmed resolved or named unresolved with evidence",
+    "Token formula and default-output guarantee confirmed"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_scorecard.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0186",
+      "T-0194"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0195",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 169,
+        "issue": "Unresolved acceptance item (T-0186 spec point 5, re-asked in this task): malformed jsonl is NOT skipped. `e = json.loads(line)` is unguarded, so one truncated line in runs/*.jsonl aborts the whole command. Reproduced on a scratch root with a half-written line: by_task raises JSONDecodeError, and by_goal raises the same via scorecard.py:220 on a truncated tasks/T-*.json. Note it is consistent with the module's existing readers (build() at scorecard.py:49 and cli.cost at cli.py:19 are equally unguarded), and log_run appends are small single writes, so the exposure is low \u2014 hence a note, not a block. A try/except json.JSONDecodeError: continue in both loops closes it.",
+        "severity": "med"
+      },
+      {
+        "path": "README.md",
+        "line": 33,
+        "issue": "The doc advertises the goal split as 'percent of usd' with no caveat, but Codex execute runs never log a usd field (executor.py:79 passes tokens only; only spawn.run_claude sets usd=total_cost_usd at spawn.py:156). Live data today is all-Claude so every run carries usd and the table is correct (verified: 125.24 total matches across --by task and --by goal), but the first Codex-executed goal will render execute% ~0 and attribute the goal's whole cost to reviews. executor.py is out of scope here, so this is a caveat to state in the README (or a follow-up task), not a change to make in this diff.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 186,
+        "issue": "planner_runs.json has no writer anywhere in the repo (D3/T-0122 has not landed; grep over *.py/*.sh/*.md finds only this reader, the README line and the tests). The shape is therefore assumed, not verified: a JSON list of dicts. If T-0122 lands a dict keyed by goal id, `r.get(\"goal_id\")` runs against str keys and `scorecard --by goal` dies with AttributeError. An isinstance(runs, list) guard (returning [] otherwise) would make the reader fail soft the way its FileNotFoundError path already does.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 146,
+        "issue": "The --by task total row prints tokens as a float because total_tokens is seeded from the shared `= 0.0` at cli.py:141, while every data row prints an int. Live output: rows show `941890`, the total shows `21987302.0`. Seed total_tokens = 0 separately.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 184,
+        "issue": "_planner_runs_for_goal swallows json.JSONDecodeError into [], but by_goal only branches on runs_path.exists(), so a corrupt planner_runs.json yields planner={'n_runs': 0} and the cell prints '0 runs'. That contradicts format_planner_runs_cell's own docstring claim that '-' means 'we never wrote it' and '0 runs' means 'genuinely none' \u2014 the distinction the fix round was asked to add. Propagating the decode failure as the missing case would keep the invariant.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 240,
+        "issue": "`usd_vals = [r[\"usd\"] for r in runs if \"usd\" in r]` sums only the records that carry usd, while n_runs counts all of them, so a mixed file renders e.g. '5 runs ($0.40)' where the $0.40 covers 2 of the 5. Either require usd on every record before showing a figure, or mark it partial.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789765289.3203049,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0195",
+      "claimed_at": 1789765289.3197849
+    },
+    {
+      "ts": 1789765289.3585851,
+      "pid": 69995,
+      "account": "B"
+    },
+    {
+      "ts": 1789765516.9192598,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 169,
+            "issue": "Unresolved acceptance item (T-0186 spec point 5, re-asked in this task): malformed jsonl is NOT skipped. `e = json.loads(line)` is unguarded, so one truncated line in runs/*.jsonl aborts the whole command. Reproduced on a scratch root with a half-written line: by_task raises JSONDecodeError, and by_goal raises the same via scorecard.py:220 on a truncated tasks/T-*.json. Note it is consistent with the module's existing readers (build() at scorecard.py:49 and cli.cost at cli.py:19 are equally unguarded), and log_run appends are small single writes, so the exposure is low \u2014 hence a note, not a block. A try/except json.JSONDecodeError: continue in both loops closes it.",
+            "severity": "med"
+          },
+          {
+            "path": "README.md",
+            "line": 33,
+            "issue": "The doc advertises the goal split as 'percent of usd' with no caveat, but Codex execute runs never log a usd field (executor.py:79 passes tokens only; only spawn.run_claude sets usd=total_cost_usd at spawn.py:156). Live data today is all-Claude so every run carries usd and the table is correct (verified: 125.24 total matches across --by task and --by goal), but the first Codex-executed goal will render execute% ~0 and attribute the goal's whole cost to reviews. executor.py is out of scope here, so this is a caveat to state in the README (or a follow-up task), not a change to make in this diff.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 186,
+            "issue": "planner_runs.json has no writer anywhere in the repo (D3/T-0122 has not landed; grep over *.py/*.sh/*.md finds only this reader, the README line and the tests). The shape is therefore assumed, not verified: a JSON list of dicts. If T-0122 lands a dict keyed by goal id, `r.get(\"goal_id\")` runs against str keys and `scorecard --by goal` dies with AttributeError. An isinstance(runs, list) guard (returning [] otherwise) would make the reader fail soft the way its FileNotFoundError path already does.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 146,
+            "issue": "The --by task total row prints tokens as a float because total_tokens is seeded from the shared `= 0.0` at cli.py:141, while every data row prints an int. Live output: rows show `941890`, the total shows `21987302.0`. Seed total_tokens = 0 separately.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 184,
+            "issue": "_planner_runs_for_goal swallows json.JSONDecodeError into [], but by_goal only branches on runs_path.exists(), so a corrupt planner_runs.json yields planner={'n_runs': 0} and the cell prints '0 runs'. That contradicts format_planner_runs_cell's own docstring claim that '-' means 'we never wrote it' and '0 runs' means 'genuinely none' \u2014 the distinction the fix round was asked to add. Propagating the decode failure as the missing case would keep the invariant.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 240,
+            "issue": "`usd_vals = [r[\"usd\"] for r in runs if \"usd\" in r]` sums only the records that carry usd, while n_runs counts all of them, so a mixed file renders e.g. '5 runs ($0.40)' where the $0.40 covers 2 of the 5. Either require usd on every record before showing a figure, or mark it partial.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789765516.922382,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789765520.454056,
+      "pipeline": {
+        "merged_at": 1789765520.4539661
+      }
+    }
+  ],
+  "claimed_at": 1789765289.3197849,
+  "pid": 69995,
+  "account": "B",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789765520.4539661
+  }
+}

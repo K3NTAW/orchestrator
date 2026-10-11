@@ -1,0 +1,152 @@
+{
+  "id": "T-0610",
+  "created_at": 1789973289.633544,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R4 v3: orchestrator/concurrency.py \u2014 adaptive concurrency 0..hard_max from compatible groups (coupled clusters cap their own contribution), capacity and merge pressure, with pinned input shapes (AP P13, P11)",
+  "spec": "Why: daemon.dispatch fills wave_limit = min(slots, max_wave or slots) (orchestrator/daemon.py:690), so concurrency is always the hard maximum; AP P13 wants a selected concurrency below the cap derived from evidence, AP P11 wants merge pressure to bound it. v3 after spec reviews T-0569 and T-0589.\nWhat: new pure module orchestrator/concurrency.py; no daemon edits. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in that file; no pytest fixtures.\n- reason_kind(reason) -> reason.split(':', 1)[0] (own implementation; do not import interference._reason_kind).\n- compatible_groups(ready_ids, pairwise_rows) -> list of lists: connected components over rows with level hard or soft (interference.pairwise shape {a, b, level, reasons}); singletons are independent; deterministic order (sorted by first member).\n- group_contribution(group, pairwise_rows) -> int: singleton 1; every internal pair hard -> 1; size >= 3 with any hard edge -> 1; otherwise (soft-only, or size 2 mixed) -> 2. (Under interference.DEFAULT_RULES same_glob/glob_covers are already hard, so no separate shared-interface branch exists; the kind names 'interface' and 'migration' are reserved for a future interference extension and documented as such.)\n- select_limit(hard_max, ready_ids, tasks, pairwise_rows, priorities, snapshot=None, pressure=None, durations=None, cfg=None) -> {\"hard_max\", \"limit\", \"reasons\": [str], \"tasks_considered\": ready_ids, \"expected_benefit_s\", \"groups\": [{\"members\", \"contribution\"}]}. Input shapes pinned: snapshot = {\"executors\": {id: {\"free\": int, ...}}, \"claude_workers_free\": int, \"fallback\": bool} (capacity.snapshot); pressure = {\"pressure\": \"none\"|\"elevated\"|\"saturated\", ...} (merge_pressure.assess); durations = {task_id: seconds}; priorities = {task_id: critical_path.explain dict}. Rules, each appended to reasons when it binds: ready empty -> limit 0, reasons ['no_ready']; start at hard_max ('hard_max=N'); structural bound sum of contributions ('groups=k contributions=m'), a cluster capped to 1 adds 'coupled_group:<sorted ids>'; capacity bound = sum of executor free, or claude_workers_free when fallback ('capacity=m'); pressure saturated -> limit <= max(1, number of singleton groups) ('merge_pressure=saturated'); cfg [scheduler].concurrency_mode 'fixed'|'adaptive' (default adaptive; fixed -> hard_max, reasons ['fixed']); minimum 1 when ready work exists and capacity > 0; never above hard_max.\n- expected_benefit_s: selected = the first `limit` ranked ids (ranked by priorities['priority'] descending then id); 0.0 when selected is empty; otherwise sum(est) - max(est) with est from durations or critical_path.est_duration_s(tasks[id]).\n- log_row(result, wave_ids=None) -> dict for schedlog.append('concurrency', ...) with hard_max, limit, reasons, tasks_considered, expected_benefit_s, selected, observed_outcome None.",
+  "inputs": [
+    "T-0599"
+  ],
+  "acceptance": [
+    "tests/test_concurrency.py::test_coupled_cluster_caps_only_its_own_contribution \u2014 a hard-coupled cluster of four plus three independent singletons with hard_max 8 yields limit 4 and a coupled_group reason naming the cluster",
+    "tests/test_concurrency.py::test_soft_group_contributes_two_and_mixed_cluster_one \u2014 two soft-linked tasks contribute 2; three tasks with one hard edge contribute 1",
+    "tests/test_concurrency.py::test_independent_modules_select_higher_concurrency \u2014 five ready tasks with no interference and hard_max 4 yield limit 4 with the hard_max reason",
+    "tests/test_concurrency.py::test_hard_max_is_never_exceeded_and_fixed_mode \u2014 twenty independent tasks and hard_max 3 yield limit 3; concurrency_mode fixed returns hard_max with reasons ['fixed']",
+    "tests/test_concurrency.py::test_no_ready_work_yields_zero_benefit_zero \u2014 empty ready set yields limit 0, reasons ['no_ready'] and expected_benefit_s 0.0 without raising",
+    "tests/test_concurrency.py::test_quota_and_merge_pressure_bound_the_limit \u2014 a snapshot with two free executor slots bounds the limit to 2 with a capacity reason; pressure saturated with one singleton bounds to 1 with merge_pressure=saturated; log_row carries hard_max, limit, reasons, tasks_considered, expected_benefit_s"
+  ],
+  "scope": [
+    "orchestrator/concurrency.py",
+    "tests/test_concurrency.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0610",
+  "codex_thread": null,
+  "result": {
+    "summary": "Traced all six acceptance tests against select_limit/compatible_groups/group_contribution/log_row logic; all pass (verified by running tests.test_concurrency). Scope matches (only orchestrator/concurrency.py and tests/test_concurrency.py), no daemon edits, no import of interference._reason_kind, structural/capacity/pressure/fixed-mode binding order matches spec. Pure module with no I/O, subprocess, eval, or secrets handling \u2014 no security concerns despite the security checklist trigger.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "5d6e1d6fb2f0",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789973289.6344068,
+      "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864"
+    },
+    {
+      "ts": 1789973292.284446,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0610",
+      "claimed_at": 1789973292.284109
+    },
+    {
+      "ts": 1789973292.285565,
+      "account": "B"
+    },
+    {
+      "ts": 1789973292.7238169,
+      "pid": 99099,
+      "account": "B"
+    },
+    {
+      "ts": 1789973381.262111,
+      "status": "done",
+      "result": {
+        "summary": "Traced all six acceptance tests against select_limit/compatible_groups/group_contribution/log_row logic; all pass (verified by running tests.test_concurrency). Scope matches (only orchestrator/concurrency.py and tests/test_concurrency.py), no daemon edits, no import of interference._reason_kind, structural/capacity/pressure/fixed-mode binding order matches spec. Pure module with no I/O, subprocess, eval, or secrets handling \u2014 no security concerns despite the security checklist trigger.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "5d6e1d6fb2f0",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973381.263177,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789973381.295313,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+        "packet_version": "5d6e1d6fb2f0",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+      "packet_version": "5d6e1d6fb2f0",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+  "claimed_at": 1789973292.284109,
+  "account": "B",
+  "pid": 99099,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "6389b9464e37afafbfe27e5a66cc397b86bd9864",
+    "packet_version": "5d6e1d6fb2f0",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "5d6e1d6fb2f0",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

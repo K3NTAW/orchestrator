@@ -1,0 +1,49 @@
+{
+  "id": "T-0112",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "D3: Planner as a function \u2014 the daemon invokes a fresh headless Planner only at decision points (scouts done, task held, goal closable)",
+  "spec": "Why: the interactive Planner spent about 11.2M tokens on 2026-09-18, most of it re-sending a 250k context on 112 wait notifications. Build on C-O3 v3 (orchestrator/goals.py launches a headless Planner) and C-O7b (handover writes the checkpoint). Implement orchestrator/planner_runs.py: decision_points(root) scans the bus for goals (parentless triage tasks not done) and yields (goal_id, kind, payload) for: \"scouts_done\" when the goal has scout children, all are done or failed, no execute child exists yet and no planner run is recorded for this kind on this goal; \"held\" for each execute child with status held and no planner run recorded for (goal, task, hold_reason); \"closable\" when every execute child is merged, no queued or running children remain, and no run of kind closable exists. run(root, goal_id, kind, payload): if a Planner pid for this root is alive (goals.py identity), skip; else handover.write(f\"decision {kind}\"), then launch exactly like goals.start's launch step but with prompt rendered from .orchestrator/prompts/planner-decision.md ({{kind}}, {{goal_id}}, {{payload}}: \"Read .orchestrator/plan.md and the bus. Decision: <kind>. Do only what this decision needs, write plan.md, and finish.\"), --max-budget-usd from limits.max_budget_usd.get(\"planner_decision\", 3), record {goal_id, kind, payload_key, pid, started_at, log} in .orchestrator/runs/planner_runs.json under the bus lock. daemon.tick(): after the stages, when pool.cfg.get(\"planner\", {}).get(\"autonomous\", False) is true, iterate decision_points and run each (one launch per tick at most). pool.toml: [planner] autonomous = false (the interactive session stays the default until the human flips it) with a comment. Tests in tests/test_planner_runs.py with fixtures from the harness and subprocess.Popen patched: scouts_done_detected_once, held_detected_per_hold_reason, closable_detected, run_skips_when_planner_alive, tick_launches_at_most_one_and_only_when_autonomous. README.md: \"Autonomous mode\" paragraph.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_runs.py has the five named tests, green",
+    "With [planner] autonomous = false (committed default) tick() launches nothing and existing daemon tests are unchanged and green",
+    "planner_runs.json records one entry per (goal, kind, payload) and a second tick does not relaunch the same decision",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0103",
+    "T-0108",
+    "T-0102"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2700,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_planner_runs.py"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789734726.89697,
+      "status": "failed",
+      "reason": "superseded by T-0122: re-pointed at C-O3 v4 and the recreated C-O7b"
+    }
+  ],
+  "reason": "superseded by T-0122: re-pointed at C-O3 v4 and the recreated C-O7b"
+}

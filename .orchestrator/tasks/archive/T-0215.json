@@ -1,0 +1,118 @@
+{
+  "id": "T-0215",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "E3: Jev tool-call gate \u2014 PreToolUse hook scores every worker tool call for necessity, logs always, blocks only in block mode",
+  "spec": "Pattern from the LiteLLM typesafe guardrail and jev-compactor: ask Jev a typed question per tool call, branch on the probability, keep everything else verbatim. Workers run as `claude -p` with the repo hooks; PreToolUse hook input carries session_id, transcript_path, tool_name, tool_input; ORCH_TASK_ID names the bus task (see .claude/hooks/_lib.sh task_id and scope-guard.sh). Build on E2 (T-0214) orchestrator/jev.py:\n1. .claude/hooks/jev-gate.sh: exits 0 immediately when task_id is empty (Planner session), when pool.toml [jev].enabled is false, or when tool_name is a bus MCP tool; otherwise pipes the hook JSON to `uv run python -m orchestrator.jev_gate` with a 3 s wall clock, treating any non-zero/timeout as allow (fail-open). Registered in .claude/settings.json PreToolUse for matcher Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch after guardrails.sh.\n2. orchestrator/jev_gate.py main(): state = {task: title, spec (first 1500 chars), acceptance, scope, role}, recent = last 20 tool calls from transcript_path (tool name + jev.redact(input) truncated to 300 chars each, plus whether each returned an error), proposed = {tool_name, redacted input}. Questions: needed (noul: 'Does the agent need this tool call to satisfy the acceptance criteria, given what it has already read or run?', criteria true/false), redundant (noul: 'Does this call repeat an earlier call whose result the agent already has, with no intervening change to that file or command?'), destructive (noul: 'Would this call delete, overwrite, force-push, or exfiltrate data outside the task scope?'). One ask() with the three questions.\n3. Decision: mode from [jev].gate_mode = \"log\" | \"block\" (default log). In block mode: exit 2 with a one-line reason when P(redundant) >= 0.85 or P(needed) <= 0.15 with confidence >= 0.6 ('jev-gate: this call repeats <tool> on <path>; use the result you already have' / 'jev-gate: not needed for the acceptance criteria; continue with <next criterion>'). destructive is logged only (guardrails.sh owns blocking). Never block the tests-green script, git commit, or bus_post_result.\n4. Log every scored call to .orchestrator/runs/jev-gate.jsonl: {ts, task, session, tool, p_needed, p_redundant, p_destructive, confidence, mode, blocked, latency_ms}. ask() returning None logs {scored: false} and allows.\nTests in tests/test_jev_gate.py with jev.ask monkeypatched: log mode never blocks; block mode blocks a redundant Read and allows a needed one; protected calls never block; missing transcript allows; hook script exits 0 for the Planner (no task id) via subprocess.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_log_mode_never_blocks, ::test_block_mode_blocks_redundant_read, ::test_block_mode_allows_needed_call, ::test_protected_calls_never_block, ::test_missing_transcript_allows, ::test_hook_exits_zero_without_task pass",
+    ".claude/settings.json registers .claude/hooks/jev-gate.sh under PreToolUse and tests/test_hooks.py still passes",
+    "Every scored call appends one line to .orchestrator/runs/jev-gate.jsonl in the tests",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    ".claude/hooks/jev-gate.sh",
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py",
+    ".claude/settings.json",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [
+    "T-0214"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789817003.9151099,
+      "pipeline": {
+        "spec_review_at": 1789817003.915058
+      }
+    },
+    {
+      "ts": 1789817157.696733,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev.py",
+          "issue": "Spec's log path .orchestrator/runs/jev-gate.jsonl contradicts jev.py's own docstring (line ~10), which already reserves .orchestrator/runs/jev/gate.jsonl for this exact E3 gate feature to avoid cluttering the flat runs/ dir that cli.cost() and scorecard glob.",
+          "severity": "high",
+          "line": 9
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "Spec asks for 'last 20 tool calls from transcript_path' with per-call error status but gives no transcript JSONL schema, and no existing code in the repo parses one (grep for transcript_path found nothing). Correlating tool_use/tool_result blocks to detect errors is nontrivial and unspecified.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": ".claude/hooks/jev-gate.sh",
+          "issue": "The 'skip when tool_name is a bus MCP tool' exit is unreachable given the registered matcher (Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch never matches mcp__bus__* tool names), so it's dead code outside of directly-invoked tests.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789817185.882615,
+      "pipeline": {
+        "spec_review_at": 1789817003.915058,
+        "spec_review_held_at": 1789817185.882559
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789817238.913814,
+      "status": "failed",
+      "hold_reason": null,
+      "reason": "superseded by E3 v2 (next id after T-0228): spec review risks folded in (runs/jev/gate.jsonl path, transcript JSONL schema, dead bus-tool branch). Mark done+merged_into goal/T-0201 when v2 merges."
+    },
+    {
+      "ts": 1789829049.23701,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "E3 chain landed via T-0237 merge (2267c62)"
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789817003.915058,
+    "spec_review_held_at": 1789817185.882559
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev.py",
+      "issue": "Spec's log path .orchestrator/runs/jev-gate.jsonl contradicts jev.py's own docstring (line ~10), which already reserves .orchestrator/runs/jev/gate.jsonl for this exact E3 gate feature to avoid cluttering the flat runs/ dir that cli.cost() and scorecard glob.",
+      "severity": "high",
+      "line": 9
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "Spec asks for 'last 20 tool calls from transcript_path' with per-call error status but gives no transcript JSONL schema, and no existing code in the repo parses one (grep for transcript_path found nothing). Correlating tool_use/tool_result blocks to detect errors is nontrivial and unspecified.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": ".claude/hooks/jev-gate.sh",
+      "issue": "The 'skip when tool_name is a bus MCP tool' exit is unreachable given the registered matcher (Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch never matches mcp__bus__* tool names), so it's dead code outside of directly-invoked tests.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": null,
+  "reason": "E3 chain landed via T-0237 merge (2267c62)",
+  "merged_into": "goal/T-0201"
+}

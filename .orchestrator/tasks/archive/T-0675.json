@@ -1,0 +1,682 @@
+{
+  "id": "T-0675",
+  "created_at": 1789997986.718612,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 5,
+  "title": "Q1: orchestrator/planner_taxonomy.py \u2014 decision taxonomy for Planner invocations (purpose over complexity), pure and testable (P2)",
+  "spec": "Why: decision.py routes points by kind (held/scouts_done/closable) and risk, but nothing names the PURPOSE of a Planner decision; the router (Q4), telemetry (Q2) and Planner scorecard (Q5) need a stable decision_type to group by (brief .orchestrator/planner-routing-program.md P2).\nWhat: new pure module orchestrator/planner_taxonomy.py; no bus reads, no config reads, inputs never mutated.\n- DECISION_TYPES = (\"initial_goal_plan\", \"scout_results\", \"held_task\", \"architectural_replan\", \"fix_strategy\", \"closable_goal\", \"retrospective\", \"ambiguous_requirement\", \"other\").\n- classify(point, ctx, *, goal=None, task=None) -> {\"decision_type\", \"architectural\": bool, \"ambiguous\": bool, \"risk_class\": \"none\"|\"low\"|\"high\", \"signals\": [str], \"band\", \"task_class\"}. point is planner_runs' dict {goal_id, kind, payload_key, task_id?}; ctx is decision.route's ctx (see orchestrator/decision.py docstring and planner_runs.build_ctx lines 1002-1062); goal/task are bus task dicts or None.\n- Rules, first match wins: kind \"retrospective\" -> retrospective. kind \"scouts_done\": ctx.scout_count == 0 -> initial_goal_plan, else scout_results. kind \"held\": ctx.signature_repeated or ctx.spec_review_request_changes >= 2 or ctx.auto_fix_rounds_used >= ctx.auto_fix_rounds -> architectural_replan; else ctx.failing_ids non-empty or ctx.in_scope_review_comments -> fix_strategy; else held_task. kind \"closable\" -> closable_goal. Unknown kind -> other. After that, ambiguous_requirement overrides initial_goal_plan/scout_results when the goal text (title + spec) carries ambiguity markers: two or more of the tokens \"or\", \"either\", \"unclear\", \"tbd\", \"?\", \"conflict\", \"maybe\", \"alternatively\" (case-insensitive, whole words, \"?\" counted per occurrence), or ctx.get(\"ambiguous\") is True; signals records which markers fired.\n- architectural = attribution.task_class(task or goal) in (\"architectural\", \"security\") or (complexity >= 7) or ctx.touches_interfaces or ctx.touches_migrations or decision_type == architectural_replan; use task complexity for held, goal complexity otherwise.\n- risk_class: high when ctx.touches_auth or ctx.touches_data_deletion or ctx.security_trigger or task_class == \"security\"; low when ctx.touches_interfaces or ctx.touches_migrations or ctx.semantic_trigger; else none. Missing ctx fields count as False/0 and add signal \"unknown:<field>\" (never raise).\n- band via attribution.band(complexity); task_class via attribution.task_class(task or goal) guarded so a missing pool.toml never raises (attribution already guards).\n- explain(classification) -> one line string \"type=... arch=... risk=... signals=a,b\".\nDocstring states purpose-over-complexity with the example: a complexity 8 closable_goal is routine, a complexity 6 ambiguous_requirement is not.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_taxonomy.py::test_held_with_failing_tests_is_fix_strategy \u2014 held ctx with failing_ids and no risk flags classifies fix_strategy, architectural False, risk none",
+    "tests/test_planner_taxonomy.py::test_repeated_signature_is_architectural_replan \u2014 held ctx with signature_repeated True classifies architectural_replan and architectural True regardless of complexity 3",
+    "tests/test_planner_taxonomy.py::test_scouts_done_without_scouts_is_initial_goal_plan \u2014 scout_count 0 gives initial_goal_plan; scout_count 2 gives scout_results",
+    "tests/test_planner_taxonomy.py::test_ambiguity_markers_override_to_ambiguous_requirement \u2014 goal spec 'use redis or postgres, unclear which?' classifies ambiguous_requirement with signals naming the markers; a plain spec does not",
+    "tests/test_planner_taxonomy.py::test_risk_and_missing_fields_never_raise \u2014 touches_auth True gives risk high; a ctx missing every optional field classifies without raising and lists unknown:<field> signals; closable kind gives closable_goal at complexity 8 with architectural True"
+  ],
+  "scope": [
+    "orchestrator/planner_taxonomy.py",
+    "tests/test_planner_taxonomy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/decision.py",
+      "orchestrator/planner_runs.py",
+      "orchestrator/attribution.py",
+      "tests/test_decision.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "DECISION_TYPES tuple of 9 names; classify(point, ctx, *, goal=None, task=None) -> {decision_type, architectural: bool, ambiguous: bool, risk_class: none|low|high, signals: [str], band, task_class}; explain(classification) -> str; pure, never raises on missing ctx fields"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0675",
+  "codex_thread": "01a0c432-54cd-72f0-aff6-f10aa7507cf7",
+  "result": {
+    "summary": "Implemented purpose-first Planner decision taxonomy with guarded classification, ambiguity/risk signals, and explanation output.\n\n- Files: `orchestrator/planner_taxonomy.py`, `tests/test_planner_taxonomy.py`\n- Gate: **PASS** \u2014 946 tests\n- Commit: `7a33df667b46db6465223d3e69cb3eabd9d8da41`\n- Failures-only output: empty\n- Worktree: clean",
+    "executed_by": "codex:sol",
+    "thread": "01a0c432-54cd-72f0-aff6-f10aa7507cf7",
+    "usage": {
+      "input_tokens": 264283,
+      "cached_input_tokens": 238976,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 4919,
+      "reasoning_output_tokens": 1050,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998014.713374,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322
+      }
+    },
+    {
+      "ts": 1789998014.7147331,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678
+      }
+    },
+    {
+      "ts": 1789998015.484747,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481
+      }
+    },
+    {
+      "ts": 1789998027.7248042,
+      "packet_meta": {
+        "chars": 2294,
+        "est_tokens": 573,
+        "hash": "a806f5c3f712",
+        "version": "a806f5c3f712",
+        "base": "6014a4217082",
+        "sources": "pool.toml@8ed1226e6850 gotchas@8b9199f0fa65 memory@notes",
+        "policy_version": "8ed1226e6850",
+        "gotchas": "8b9199f0fa65"
+      }
+    },
+    {
+      "ts": 1789998027.726133,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0675",
+      "claimed_at": 1789998027.726014
+    },
+    {
+      "ts": 1789998027.726896,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789998227.342713,
+      "codex_thread": "01a0c432-54cd-72f0-aff6-f10aa7507cf7",
+      "codex_thread_head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+    },
+    {
+      "ts": 1789998227.3491998,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1789998227.352212,
+      "status": "done",
+      "result": {
+        "summary": "Implemented purpose-first Planner decision taxonomy with guarded classification, ambiguity/risk signals, and explanation output.\n\n- Files: `orchestrator/planner_taxonomy.py`, `tests/test_planner_taxonomy.py`\n- Gate: **PASS** \u2014 946 tests\n- Commit: `7a33df667b46db6465223d3e69cb3eabd9d8da41`\n- Failures-only output: empty\n- Worktree: clean",
+        "executed_by": "codex:sol",
+        "thread": "01a0c432-54cd-72f0-aff6-f10aa7507cf7",
+        "usage": {
+          "input_tokens": 264283,
+          "cached_input_tokens": 238976,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 4919,
+          "reasoning_output_tokens": 1050,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998236.1118238,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789998329.35065,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789998329.5589492,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        }
+      }
+    },
+    {
+      "ts": 1789998329.635211,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        },
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+      }
+    },
+    {
+      "ts": 1789998329.6423502,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        },
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+        "gated_at_done": 1789998329.6420941
+      }
+    },
+    {
+      "ts": 1789998502.268061,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789998519.6972969,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        },
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+        "gated_at_done": 1789998329.6420941,
+        "merged_at": 1789998519.697161,
+        "merged_at_lease": 1789999419.697161
+      }
+    },
+    {
+      "ts": 1789998611.306842,
+      "status": "done",
+      "merged_into": "goal/T-0674",
+      "sha": "d81ad31750b446b938c25d2fda2f465057215f24",
+      "merged_at": 1789998611.306248,
+      "changed_files": [
+        "orchestrator/planner_taxonomy.py",
+        "tests/test_planner_taxonomy.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        },
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+        "gated_at_done": 1789998329.6420941,
+        "merged_at": 1789998519.697161,
+        "merged_at_lease": 1789999419.697161
+      }
+    },
+    {
+      "ts": 1789998611.7257102,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        },
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+        "gated_at_done": 1789998329.6420941,
+        "merged_at": 1789998519.697161,
+        "merged_at_lease": 1789999419.697161,
+        "accepted_at": 1789998611.725413
+      }
+    },
+    {
+      "ts": 1789998611.812465,
+      "pipeline": {
+        "first_ready_at": 1789998014.713322,
+        "dispatched_at": 1789998014.714678,
+        "dispatched_at_lease": 1789998914.714678,
+        "dispatched_at_done": 1789998015.484481,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0416666666666667
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789998329.350552,
+        "gated_at_lease": 1789999229.350552,
+        "first_green_at": 1789998329.350104,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0675",
+          "goal_head": "goal/T-0674",
+          "moved_count": 3,
+          "stale_paths": [
+            ".orchestrator/plan.md",
+            ".orchestrator/planner-routing-program.md",
+            ".orchestrator/prompts/planner-shadow.md"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1789998329.5586429,
+          "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+        },
+        "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+        "gated_at_done": 1789998329.6420941,
+        "merged_at": 1789998519.697161,
+        "merged_at_lease": 1789999419.697161,
+        "accepted_at": 1789998611.725413,
+        "merged_at_done": 1789998611.812326
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789998014.713322,
+    "dispatched_at": 1789998014.714678,
+    "dispatched_at_lease": 1789998914.714678,
+    "dispatched_at_done": 1789998015.484481,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "c62b3872928a77af97bc2cdbbfdc9c89b25ae120",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0416666666666667
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789998329.350552,
+    "gated_at_lease": 1789999229.350552,
+    "first_green_at": 1789998329.350104,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0675",
+      "goal_head": "goal/T-0674",
+      "moved_count": 3,
+      "stale_paths": [
+        ".orchestrator/plan.md",
+        ".orchestrator/planner-routing-program.md",
+        ".orchestrator/prompts/planner-shadow.md"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1789998329.5586429,
+      "head": "7a33df667b46db6465223d3e69cb3eabd9d8da41"
+    },
+    "reviewed_sha": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+    "gated_at_done": 1789998329.6420941,
+    "merged_at": 1789998519.697161,
+    "merged_at_lease": 1789999419.697161,
+    "accepted_at": 1789998611.725413,
+    "merged_at_done": 1789998611.812326
+  },
+  "packet_meta": {
+    "chars": 2294,
+    "est_tokens": 573,
+    "hash": "a806f5c3f712",
+    "version": "a806f5c3f712",
+    "base": "6014a4217082",
+    "sources": "pool.toml@8ed1226e6850 gotchas@8b9199f0fa65 memory@notes",
+    "policy_version": "8ed1226e6850",
+    "gotchas": "8b9199f0fa65"
+  },
+  "claimed_at": 1789998027.726014,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "7a33df667b46db6465223d3e69cb3eabd9d8da41",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0674",
+  "sha": "d81ad31750b446b938c25d2fda2f465057215f24",
+  "merged_at": 1789998611.306248,
+  "changed_files": [
+    "orchestrator/planner_taxonomy.py",
+    "tests/test_planner_taxonomy.py"
+  ]
+}

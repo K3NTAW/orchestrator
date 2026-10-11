@@ -1,0 +1,151 @@
+{
+  "id": "T-0615",
+  "created_at": 1789975951.5052621,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R5: orchestrator/sched_scorecard.py \u2014 scheduling scorecard: predicted vs actual interference, stale outcomes, duration error, queue time and heuristic validation (AP P14)",
+  "spec": "Why: waves.jsonl records predicted interference and priorities (daemon.dispatch wave_row: ready, running, baseline_order, wave, deferred, predicted [{a,b,level,reasons}], priority {tid: critical_path.explain}, applied), stale.jsonl records stale checks, dispatch.jsonl records skip reasons, and merge.merge fails tasks with reason rebase_conflict \u2014 but nothing joins predictions to outcomes, so the heuristics are unvalidated (AP P14; brief P9).\nWhat: new pure module orchestrator/sched_scorecard.py reading via schedlog.read_with_malformed and the tasks dir under root; no daemon edits.\n- pair_outcomes(root) -> rows per predicted pair {a, b, level, predicted_reasons, both_ran_concurrently (both dispatched before either gated), actual_conflict (either task later reason rebase_conflict / hold merge conflict / stale row action rebase_conflict), stale_event (stale row risk high for either), fix_round (any fix-round child via constraints.fix_round_for), serialized (pair appeared in deferred with hard:/soft: reason)}.\n- task_outcomes(root) -> per execute task {queue_wait_s (dispatched_at - first_ready_at or created), predicted_duration_s (from the latest waves row priority[tid].est_duration_s), actual_duration_s (duration.actual_s), error (duration.prediction_error), critical_path_s (priority), accepted (merged_into set), fix_rounds, total_tokens/usd from runs rows for the task lineage when present}.\n- build(root=STATE) -> card {\"hard_conflict_precision\": conflicts among concurrently-run hard-predicted pairs / such pairs or None, \"soft_conflict_usefulness\": conflict rate of concurrently-run soft pairs vs none-level pairs, \"unnecessary_serialization\": serialized pairs whose tasks' changed files (task.changed_files or scope literals) were disjoint / serialized pairs, \"conflict_rate\", \"stale_work_rate\", \"duration_mape\" and n, \"median_queue_wait_s\", \"goal_latency_s\" per goal from tasks (min created to max merged), \"accepted_cost_usd\" sum, \"n_waves\", \"n_pairs\", \"malformed\"}; None for undefined metrics, never a fabricated 0.\n- format(card) -> text table; every metric line shows n.\nDepends on R1 duration.actual_s/prediction_error (import orchestrator.duration).",
+  "inputs": [
+    "T-0572"
+  ],
+  "acceptance": [
+    "tests/test_sched_scorecard.py::test_predicted_hard_pair_that_conflicted_counts_toward_precision \u2014 a waves row predicting hard for (A,B), both dispatched concurrently, B later failed rebase_conflict: hard_conflict_precision 1.0 with n 1",
+    "tests/test_sched_scorecard.py::test_stale_outcomes_are_attributed_to_pairs_and_rate \u2014 stale rows with risk high for a predicted pair set stale_event True and stale_work_rate reflects it",
+    "tests/test_sched_scorecard.py::test_duration_prediction_error_uses_priority_estimate_and_actual \u2014 predicted 1200 s, actual 600 s yields per-task error ratio 2.0 and duration_mape over tasks with both values",
+    "tests/test_sched_scorecard.py::test_malformed_telemetry_is_tolerated_and_counted \u2014 broken lines in waves.jsonl and stale.jsonl are skipped, card.malformed counts them, undefined metrics are None not 0",
+    "tests/test_sched_scorecard.py::test_unnecessary_serialization_detects_disjoint_deferred_pairs \u2014 a soft-deferred pair whose changed files were disjoint counts as unnecessary serialization 1.0"
+  ],
+  "scope": [
+    "orchestrator/sched_scorecard.py",
+    "tests/test_sched_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0615",
+  "codex_thread": null,
+  "result": {
+    "summary": "Ran the full test_sched_scorecard.py suite (7 tests, including all 5 named acceptance tests) against HEAD 7a6ac55: all pass. Traced pair_outcomes/task_outcomes/build logic by hand for each acceptance scenario (hard-conflict precision, stale attribution, duration MAPE via duration.actual_s/prediction_error, malformed-line tolerance via schedlog.read_with_malformed, disjoint-file serialization detection) and confirmed the computed values match expected results (e.g. ratio 2.0, precision 1.0/n=1, malformed=2, undefined metrics return None not 0). Scope is respected \u2014 only orchestrator/sched_scorecard.py and tests/test_sched_scorecard.py touched, no daemon edits. Noted but not flagging: _sched_rows temporarily mutates the module-global schedlog.SCHED_DIR under a local lock that daemon.py's schedlog.append() doesn't share, which would be a real race only if this scorecard build were invoked concurrently in-process with the daemon (it's normally a separate CLI invocation, so not a practical issue). No security concerns \u2014 module only reads local task/JSONL files, no external input or shell/network calls.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "1386bed6e89b",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789975951.506281,
+      "reviewed_sha": "7a6ac55644a6f5e68b82d874232e0449a2f77336"
+    },
+    {
+      "ts": 1789975953.94161,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0615",
+      "claimed_at": 1789975953.941283
+    },
+    {
+      "ts": 1789975953.9425201,
+      "account": "B"
+    },
+    {
+      "ts": 1789975954.295003,
+      "pid": 19112,
+      "account": "B"
+    },
+    {
+      "ts": 1789976059.02643,
+      "status": "done",
+      "result": {
+        "summary": "Ran the full test_sched_scorecard.py suite (7 tests, including all 5 named acceptance tests) against HEAD 7a6ac55: all pass. Traced pair_outcomes/task_outcomes/build logic by hand for each acceptance scenario (hard-conflict precision, stale attribution, duration MAPE via duration.actual_s/prediction_error, malformed-line tolerance via schedlog.read_with_malformed, disjoint-file serialization detection) and confirmed the computed values match expected results (e.g. ratio 2.0, precision 1.0/n=1, malformed=2, undefined metrics return None not 0). Scope is respected \u2014 only orchestrator/sched_scorecard.py and tests/test_sched_scorecard.py touched, no daemon edits. Noted but not flagging: _sched_rows temporarily mutates the module-global schedlog.SCHED_DIR under a local lock that daemon.py's schedlog.append() doesn't share, which would be a real race only if this scorecard build were invoked concurrently in-process with the daemon (it's normally a separate CLI invocation, so not a practical issue). No security concerns \u2014 module only reads local task/JSONL files, no external input or shell/network calls.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "1386bed6e89b",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789976059.027669,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789976059.0608819,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "7a6ac55644a6f5e68b82d874232e0449a2f77336",
+        "packet_version": "1386bed6e89b",
+        "review_pass_index": 2,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "7a6ac55644a6f5e68b82d874232e0449a2f77336",
+      "packet_version": "1386bed6e89b",
+      "review_pass_index": 2,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "7a6ac55644a6f5e68b82d874232e0449a2f77336",
+  "claimed_at": 1789975953.941283,
+  "account": "B",
+  "pid": 19112,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "7a6ac55644a6f5e68b82d874232e0449a2f77336",
+    "packet_version": "1386bed6e89b",
+    "review_pass_index": 2,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "1386bed6e89b",
+  "review_pass_index": 2,
+  "reviews_expected": 1
+}

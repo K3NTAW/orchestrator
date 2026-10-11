@@ -1,0 +1,166 @@
+{
+  "id": "T-0805",
+  "created_at": 1790087594.832335,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: daemon dispatch: a render error on the main execute path must hold the task visibly (R22 gap)",
+  "spec": "Observed 2026-09-22 14:12Z on T-0773: its spec quoted literal double-brace placeholders, so spawn.render(\"execute\", ...) raised ValueError unfilled_placeholder inside daemon.dispatch's main loop (daemon.py ~853-856: `packet = spawn.packet(...)`, `prompt = spawn.render(\"execute\", ...)`, `spawn_async(_dispatch_worker, ...)`, `complete(t[\"id\"], \"dispatched_at\")`). The exception escaped the per-task block: dispatched_at stayed stamped, no event, no hold, the task sat \"queued\" and was silently re-attempted every lease (three memory-recall rows, no execute rows). R22 (T-0755/T-0757) added render-error holds for _dispatch_fresh_fix and spawn.run_worker but not this path.\nDo: wrap the packet build + render + spawn_async of the main execute dispatch path in try/except; on exception call hold_failed(t[\"id\"], \"dispatch_error\", \"dispatch\", e) (existing helper at daemon.py ~484) so the task is held with hold_reason \"dispatch failed: ValueError\" and pipeline.dispatch_error carries the message, never leaving dispatched_at stamped on a task that did not launch (clear it in the same locked update). Also make _dispatch_worker (daemon.py ~496-535) handle every executor.start status: \"held\"/\"budget\" \u2192 clear dispatched_at and set status queued with pipeline.hold_note (held) so the next tick retries; \"refused\"/\"incompatible\" \u2192 post_result failed with the reason; \"fallback\" \u2192 leave as is (the Claude worker owns the task). Today only done/failed are handled and any other status leaves the task queued with dispatched_at stamped.\nTests (unittest): tests/test_daemon.py::test_dispatch_render_error_holds_task (an execute task whose spec contains a literal double-brace token: after one tick the task is held with hold_reason starting \"dispatch failed\" and pipeline.dispatch_error mentions unfilled_placeholder; dispatched_at is not set), tests/test_daemon.py::test_dispatch_worker_handles_non_terminal_start_statuses (executor.start patched to return {\"status\": \"held\", ...} then {\"status\": \"refused\", \"reason\": \"x\"}: first leaves the task queued without dispatched_at and with a hold_note, second posts a failed result with the reason). Keep all existing daemon tests green.",
+  "inputs": [
+    "T-0801"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_render_error_holds_task passes",
+    "tests/test_daemon.py::test_dispatch_worker_handles_non_terminal_start_statuses passes",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0805",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified by running the full test suite in the T-0801 worktree (`python3 -m unittest tests.test_daemon`): all 209 tests pass, including the two new acceptance tests (test_dispatch_render_error_holds_task, test_dispatch_worker_handles_non_terminal_start_statuses) and the pre-existing test_dispatch_worker_leaves_held. The dispatch() try/except correctly wraps packet build + render + spawn_async and only stamps dispatched_at after that block succeeds; hold_failed's conditional pop of dispatched_at is scoped to error_key=='dispatch_error' and doesn't affect the other three callers (spec_review_error, gated_error, merged_error). _dispatch_worker now handles held/budget (requeue + hold_note, clearing dispatched_at), refused/incompatible (post failed result), and fallback (no-op) exactly as specified. No security concerns for this control-flow-only change to internal dispatch retry logic.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "a65a31c2a462",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790087594.833643,
+      "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3"
+    },
+    {
+      "ts": 1790087738.824453,
+      "pipeline": {
+        "respawned_at": 1790087738.761373
+      }
+    },
+    {
+      "ts": 1790089359.759725,
+      "pipeline": {
+        "respawned_at": 1790089359.68878,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790089366.781129,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0805",
+      "claimed_at": 1790089366.776635
+    },
+    {
+      "ts": 1790089366.783144,
+      "account": "B"
+    },
+    {
+      "ts": 1790089368.053986,
+      "pid": 27079,
+      "account": "B"
+    },
+    {
+      "ts": 1790089512.4001641,
+      "status": "done",
+      "result": {
+        "summary": "Verified by running the full test suite in the T-0801 worktree (`python3 -m unittest tests.test_daemon`): all 209 tests pass, including the two new acceptance tests (test_dispatch_render_error_holds_task, test_dispatch_worker_handles_non_terminal_start_statuses) and the pre-existing test_dispatch_worker_leaves_held. The dispatch() try/except correctly wraps packet build + render + spawn_async and only stamps dispatched_at after that block succeeds; hold_failed's conditional pop of dispatched_at is scoped to error_key=='dispatch_error' and doesn't affect the other three callers (spec_review_error, gated_error, merged_error). _dispatch_worker now handles held/budget (requeue + hold_note, clearing dispatched_at), refused/incompatible (post failed result), and fallback (no-op) exactly as specified. No security concerns for this control-flow-only change to internal dispatch retry logic.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "a65a31c2a462",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790089512.401608,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790089512.4733949,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+        "packet_version": "a65a31c2a462",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+      "packet_version": "a65a31c2a462",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+  "pipeline": {
+    "respawned_at": 1790089359.68878,
+    "respawn_count": 1
+  },
+  "claimed_at": 1790089366.776635,
+  "account": "B",
+  "pid": 27079,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "033023e9df953841675a03a61896c5336e9e10f3",
+    "packet_version": "a65a31c2a462",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "a65a31c2a462",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,161 @@
+{
+  "id": "T-0220",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "E1 v2: review policy \u2014 no code review by default, one cheap review only for security-touching diffs, fail-closed diff, spec review stays (supersedes T-0210 after spec review T-0219)",
+  "spec": "User decision 2026-09-19: code reviews cost 44-45 percent of the last two goals and the human reviews every PR; keep spec review (from complexity 6) and drop code review except when the merged diff touches a security-sensitive path. Change orchestrator/daemon.py (goal/T-0201 version, P4 T-0205 merged) and .orchestrator/pool.toml [review]. Spec review T-0219 risks folded in (items 2, 5, 6).\n1. pool.toml [review] gains code_review = \"security_paths\" (allowed: never | security_paths | always; always = today's D1 behaviour), security_paths = [globs] and security_review_tier = \"sonnet\". Default globs: orchestrator/daemon.py, orchestrator/merge.py, orchestrator/bus.py, orchestrator/executor.py, orchestrator/serve.py, orchestrator/goals.py, orchestrator/spawn.py, orchestrator/pool.py, orchestrator/install.py, orchestrator/planner_runs.py, orchestrator/jev*.py, .claude/hooks/**, .claude/settings.json, .orchestrator/pool.toml, .orchestrator/protected-paths.txt, .mcp*.json, Dockerfile, docker-compose*.yml, pyproject.toml, uv.lock.\n2. New helper changed_paths(t) -> list[str] | None in daemon.py: runs git diff --name-only <base>..HEAD in the worktree, where base is the first of goal/<parent>, origin/main, main that resolves (same fallback order reconcile_dead uses; factor the shared lookup into one helper). Returns None on any failure (non-git worktree, no base, git error). None is fail-CLOSED: treated as a security match with review_reason 'diff_unavailable', so plumbing errors never merge unreviewed work.\n3. gate(): after a green gate, with code_review=never: merge directly (reviews_expected 0) unless orphaned. With security_paths: match changed_paths() against the globs with fnmatch on the repo-relative path (** matches any depth); no match -> merge directly; match or None -> exactly one review on security_review_tier, switched to the other Claude tier when the executor was that same model (never self-review); the review prompt gets the security checklist regardless of complexity. With always: current D1 behaviour untouched. Orphaned results always get exactly one review. Stamp pipeline.review_reason = 'none' | 'security_paths:<first matching glob>' | 'diff_unavailable' | 'always' | 'orphaned' and pipeline.reviews_expected accordingly.\n4. merge_reviewed(): honour reviews_expected 0 (nothing to wait for) and 1. _load_review_cfg(): the three new keys with type checks; an unknown code_review value falls back to \"always\" (safest) and notifies once; security_paths must be a list of strings.\n5. Tests (tests/test_daemon.py): monkeypatch daemon.changed_paths in the new tests, and add an autouse-free fixture helper so the existing gate/review tests that use a plain tempdir worktree set code_review=\"always\" (or patch changed_paths to return a non-security path) and stay green with minimal edits; state in the summary which existing tests were adjusted and why. New tests: c5 non-security diff merges with zero review tasks; diff touching orchestrator/serve.py opens one sonnet review with the checklist; sonnet-executed security diff gets an opus review; changed_paths None -> one review with review_reason diff_unavailable; code_review=always reproduces the two-review test; orphaned still one review; bad code_review value falls back to always.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_no_review_for_non_security_diff, ::test_one_review_for_security_path, ::test_security_review_never_self_model, ::test_diff_unavailable_fails_closed, ::test_code_review_always_keeps_two_reviews, ::test_orphaned_still_one_review, ::test_bad_code_review_value_falls_back_to_always pass",
+    "pool.toml [review] carries code_review, security_paths (including daemon.py, merge.py, bus.py, executor.py) and security_review_tier with a comment naming the 2026-09-19 decision",
+    "pipeline.review_reason and pipeline.reviews_expected are stamped on every gated task in the tests",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0205"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "spec_review_waived": "Planner 2026-09-19: T-0219 risks folded into v2"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0220",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed as `d8531a3` on `task/T-0220`. Here's the summary.\n\n## Summary\n\nImplemented the 2026-09-19 review-policy decision: code review now only fires when the merged diff touches a security-sensitive path (spec review is untouched).\n\n**Files changed:** `orchestrator/daemon.py`, `.orchestrator/pool.toml`, `tests/test_daemon.py`\n\n- `pool.toml [review]` gained `code_review` (`never`/`security_paths`/`always`), `security_paths` globs, `security_review_tier`, with a comment naming the decision.\n- `daemon.py`: added `_resolve_base` (factored out of `reconcile_dead`'s `goal/<parent> \u2192 origin/main \u2192 main` merge-base lookup) and `changed_paths(t)`, which runs `git diff --name-only` against that base and returns `None` on any failure (fail-closed). `gate()` now routes through `_review_plan(t)`, which returns `(n_reviews, review_reason)`: orphaned always \u2192 1 review; `never` \u2192 0; `security_paths` \u2192 glob match or unavailable diff \u2192 1 review on `security_review_tier` (swapped off the executor's own tier, complexity bumped to force spawn.py's hardcoded checklist cutoff) or 0 on no match; `always` \u2192 the untouched pre-2026-09-19 complexity split. Both fields are stamped into `pipeline` on every gate. `_load_review_cfg` validates the three new keys and falls back an unknown `code_review` value to `\"always\"` with a one-time notify.\n- `test_daemon.py`: added a `review_pool(code_review)` helper and pinned ~14 existing gate/review tests to `code_review=\"always\"` (they exercise the old complexity-driven split against a plain, non-git tempdir worktree, so they'd otherwise be at the mercy of whatever git state a sibling test left in the shared `TMP` sandbox). Added the 7 required new tests for the security_paths policy.\n\n**Test output:** `uv run python -m unittest discover -s tests` \u2192 319 tests, all green. `.claude/hooks/tests-green.sh` exits 0. No failures.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789811748.473618,
+      "pipeline": {
+        "spec_review_at": 1789811748.473433,
+        "spec_review_by": "planner-waiver: T-0219 risks folded into v2"
+      }
+    },
+    {
+      "ts": 1789813089.808686,
+      "spec_review_verdict": "approve",
+      "spec_review_note": "Planner waiver 2026-09-19: T-0219 risks folded into v2; the running daemon dispatches only on verdict=approve"
+    },
+    {
+      "ts": 1789813093.545429,
+      "pipeline": {
+        "spec_review_at": 1789811748.473433,
+        "spec_review_by": "planner-waiver: T-0219 risks folded into v2",
+        "dispatched_at": 1789813093.545376
+      }
+    },
+    {
+      "ts": 1789813093.577354,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789813093.5804029,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789813094.707842,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0220",
+      "claimed_at": 1789813094.707326
+    },
+    {
+      "ts": 1789813094.709601,
+      "account": "B"
+    },
+    {
+      "ts": 1789813094.717616,
+      "pid": 80336,
+      "account": "B"
+    },
+    {
+      "ts": 1789813859.645935,
+      "status": "done",
+      "result": {
+        "summary": "Committed as `d8531a3` on `task/T-0220`. Here's the summary.\n\n## Summary\n\nImplemented the 2026-09-19 review-policy decision: code review now only fires when the merged diff touches a security-sensitive path (spec review is untouched).\n\n**Files changed:** `orchestrator/daemon.py`, `.orchestrator/pool.toml`, `tests/test_daemon.py`\n\n- `pool.toml [review]` gained `code_review` (`never`/`security_paths`/`always`), `security_paths` globs, `security_review_tier`, with a comment naming the decision.\n- `daemon.py`: added `_resolve_base` (factored out of `reconcile_dead`'s `goal/<parent> \u2192 origin/main \u2192 main` merge-base lookup) and `changed_paths(t)`, which runs `git diff --name-only` against that base and returns `None` on any failure (fail-closed). `gate()` now routes through `_review_plan(t)`, which returns `(n_reviews, review_reason)`: orphaned always \u2192 1 review; `never` \u2192 0; `security_paths` \u2192 glob match or unavailable diff \u2192 1 review on `security_review_tier` (swapped off the executor's own tier, complexity bumped to force spawn.py's hardcoded checklist cutoff) or 0 on no match; `always` \u2192 the untouched pre-2026-09-19 complexity split. Both fields are stamped into `pipeline` on every gate. `_load_review_cfg` validates the three new keys and falls back an unknown `code_review` value to `\"always\"` with a one-time notify.\n- `test_daemon.py`: added a `review_pool(code_review)` helper and pinned ~14 existing gate/review tests to `code_review=\"always\"` (they exercise the old complexity-driven split against a plain, non-git tempdir worktree, so they'd otherwise be at the mercy of whatever git state a sibling test left in the shared `TMP` sandbox). Added the 7 required new tests for the security_paths policy.\n\n**Test output:** `uv run python -m unittest discover -s tests` \u2192 319 tests, all green. `.claude/hooks/tests-green.sh` exits 0. No failures.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789813916.366991,
+      "pipeline": {
+        "spec_review_at": 1789811748.473433,
+        "spec_review_by": "planner-waiver: T-0219 risks folded into v2",
+        "dispatched_at": 1789813093.545376,
+        "gated_at": 1789813916.366763
+      }
+    },
+    {
+      "ts": 1789814219.666903,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789814249.831372,
+      "pipeline": {
+        "spec_review_at": 1789811748.473433,
+        "spec_review_by": "planner-waiver: T-0219 risks folded into v2",
+        "dispatched_at": 1789813093.545376,
+        "gated_at": 1789813916.366763,
+        "review_held_at": 1789814249.83127
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789815576.534015,
+      "merged_into": "goal/T-0201",
+      "merged_via": "ancestor"
+    },
+    {
+      "ts": 1789815598.3269792,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "E1 chain landed via T-0225 merge (d8531a3, 6005a54, fix round 2)"
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789811748.473433,
+    "spec_review_by": "planner-waiver: T-0219 risks folded into v2",
+    "dispatched_at": 1789813093.545376,
+    "gated_at": 1789813916.366763,
+    "review_held_at": 1789814249.83127
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_note": "Planner waiver 2026-09-19: T-0219 risks folded into v2; the running daemon dispatches only on verdict=approve",
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789813094.707326,
+  "account": "B",
+  "pid": 80336,
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0201",
+  "merged_via": "ancestor",
+  "reason": "E1 chain landed via T-0225 merge (d8531a3, 6005a54, fix round 2)"
+}

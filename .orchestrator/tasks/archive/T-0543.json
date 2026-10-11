@@ -1,0 +1,181 @@
+{
+  "id": "T-0543",
+  "created_at": 1789949902.31128,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S4b v3: stale-work detection before review \u2014 record when the goal branch moved across a task's surface after its base, optional rebase and re-gate behind [scheduler].stale_rebase, never discarding work",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P12 (cheap deterministic checks; rebase/revalidate before expensive review when stale risk is high; never silently discard work; record stale events) and P14 (record predicted vs actual for scheduler learning). Base goal/T-0503 with S3 v4 (T-0541) merged: daemon has schedlog, _load_scheduler_cfg (mode, soft_conflict_policy, max_wave), waves, critical path. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: daemon.gate runs tests-green on a done execute task's worktree and, on green, merge_reviewed/_merge_reviewed_one decides direct merge or _open_reviews; changed_paths(task) (daemon.py:21, gitutil) lists the task's diff paths against its base; merge.merge (merge.py:25-60) rebases onto the goal branch only at merge time, after reviews, and marks conflicts failed with reason rebase_conflict; _resolve_base/_merged_target give the goal branch goal/<parent>.\n1. gitutil.moved_paths(base_ref, target_ref, git=...) -> sorted list of paths changed between the merge-base of the two refs and target_ref (git merge-base, then git diff --name-only); on git failure raise a documented exception (or return None) so the caller can record risk unknown.\n2. daemon.stale_check(task) -> {\"base\", \"goal_head\", \"moved_count\", \"stale_paths\", \"risk\"}: goal branch = the task's merge target; moved = moved_paths(task branch, goal branch); surface = literal scope paths plus changed_paths(task); stale_paths = moved entries equal to a surface literal or fnmatching a surface glob; risk none when empty, high when any stale path is also in changed_paths(task) (both sides changed the same file), else low; unknown on git failure. Called once per task right after its gate turns green and before reviews are opened or a direct merge is attempted (idempotent: skip when pipeline.stale_check already exists for the current head); stamps pipeline.stale_check = {...checked_at, head} and appends runs/sched/stale.jsonl {\"ts\",\"task\",\"goal_id\",\"base\",\"goal_head\",\"moved_count\",\"stale_paths\",\"risk\",\"action\"} with action \"recorded\". Never blocks the pipeline.\n3. [scheduler].stale_rebase = false (add to the table in pool.toml with a comment). When true and risk is high: run git rebase <goal branch> inside the task worktree; on conflict abort the rebase, hold the task with hold_reason \"stale_rebase_conflict\" and resume_hint {\"conflicts\": [...]} (commits are never discarded), action \"rebase_conflict\"; on success clear the gate stamps so the next tick re-gates the rebased head before reviews, action \"rebased\", pipeline.stale_check.rebased_to = new head. merge.merge's own rebase stays as the final safety.\n4. README Pipeline paragraph: two sentences on stale checks and the stale_rebase switch.\n5. Tests: tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base (new file, reuse the git sandbox helpers of tests/test_merge.py or tests/_harness.py); tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, ::test_stale_check_low_when_scope_overlaps_moved_paths, ::test_stale_check_high_when_changed_file_moved, ::test_stale_check_records_row_and_stamp_before_reviews, ::test_stale_rebase_conflict_holds_never_discards, ::test_stale_rebase_success_regates_before_reviews. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, tests/test_daemon.py::test_stale_check_low_when_scope_overlaps_moved_paths, tests/test_daemon.py::test_stale_check_high_when_changed_file_moved and tests/test_daemon.py::test_stale_check_records_row_and_stamp_before_reviews pass: after a green gate and before reviews or a direct merge every execute task gets pipeline.stale_check and one stale.jsonl row with risk none, low, high or unknown; a git failure yields unknown and never blocks",
+    "tests/test_daemon.py::test_stale_rebase_conflict_holds_never_discards and tests/test_daemon.py::test_stale_rebase_success_regates_before_reviews pass: with stale_rebase true a high-risk task is rebased and re-gated before reviews, or held with hold_reason stale_rebase_conflict and a conflicts resume_hint; the default false changes nothing but the record; no commit or branch is deleted",
+    "tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base passes",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains seven tests"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gitutil.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_daemon.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [
+    "T-0541"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/merge.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/spawn.py",
+      "tests/test_merge.py",
+      "tests/_harness.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "gitutil.moved_paths(base_ref, target_ref) -> [paths]; daemon.stale_check(task) -> {base, goal_head, moved_count, stale_paths, risk}; stale.jsonl row {ts, task, goal_id, base, goal_head, moved_count, stale_paths, risk, action recorded|rebased|rebase_conflict}; pipeline.stale_check mirrors it; [scheduler].stale_rebase default false; hold_reason stale_rebase_conflict",
+    "supersedes": "T-0528"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by S4b v4 after spec review T-0545 request_changes (git-failure test, stale_rebase read via _load_scheduler_cfg with the defaults test updated, cwd on moved_paths, insertion point pinned after the gated_at stamp); no code was written",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1789950780.152375,
+      "pipeline": {
+        "spec_review_at": 1789950780.1523268,
+        "spec_review_at_lease": 1789951680.1523268
+      }
+    },
+    {
+      "ts": 1789950780.158308,
+      "pipeline": {
+        "spec_review_at": 1789950780.1523268,
+        "spec_review_at_lease": 1789951680.1523268,
+        "spec_review_at_done": 1789950780.1582131
+      }
+    },
+    {
+      "ts": 1789950997.599544,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "Acceptance bullet 1 claims 'a git failure yields unknown and never blocks', but none of the six named tests (test_stale_check_none_when_goal_unmoved/_low_when_scope_overlaps_moved_paths/_high_when_changed_file_moved/_records_row_and_stamp_before_reviews, stale_rebase_conflict_holds_never_discards, stale_rebase_success_regates_before_reviews) exercise a git failure. This acceptance claim has no test that can verify it.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "test_scheduler_cfg_defaults (lines 189-193) asserts daemon._load_scheduler_cfg(pool) == {'mode':'shadow','soft_conflict_policy':'defer','max_wave':0} via assertEqual. The spec's new [scheduler].stale_rebase key isn't assigned a reader: if the executor threads it through _load_scheduler_cfg's defaults dict (daemon.py:597), the natural place given that function is the established 'read scheduler policy' abstraction, this exact-equality test breaks and isn't in the scope's test list to update. If read directly off pool.cfg instead, the config-loading convention is inconsistent with the rest of [scheduler].",
+          "severity": "high",
+          "line": 597
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "issue": "gitutil.moved_paths(base_ref, target_ref, git=...) has no worktree/cwd parameter, but every sibling helper in this file (_git_in(worktree, *args), _resolve_base(worktree, parent), changed_paths(t, ...) which reads t['worktree']) requires one because subprocess.run needs a cwd. daemon.stale_check's usage ('moved_paths(task branch, goal branch)') also omits it. Branch refs are shared across git worktrees so it can technically run from any worktree (e.g. ROOT), but the spec never says which, leaving the default git= callable's cwd unspecified.",
+          "severity": "med",
+          "line": 4
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "gate()'s stale_rebase success path must 'clear the gate stamps so the next tick re-gates the rebased head' -- that only makes sense if stale_check/rebase runs after stamp(t['id'],'gated_at',pipeline_fields=green_fields) succeeds (line ~1112-1114) and before the merge/_open_reviews call (line ~1121), so there is something to clear. The spec doesn't pin this down, and placing the check earlier (right after the tests-green.sh call at line 1100) would leave nothing stamped yet, making 'clear the gate stamps' a no-op.",
+          "severity": "low",
+          "line": 1108
+        }
+      ]
+    },
+    {
+      "ts": 1789950998.378439,
+      "pipeline": {
+        "spec_review_at": 1789950780.1523268,
+        "spec_review_at_lease": 1789951680.1523268,
+        "spec_review_at_done": 1789950780.1582131,
+        "spec_review_held_at": 1789950998.378389
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789950999.013827,
+      "pipeline": {
+        "spec_review_at": 1789950780.1523268,
+        "spec_review_at_lease": 1789951680.1523268,
+        "spec_review_at_done": 1789950780.1582131,
+        "spec_review_held_at": 1789950998.378389,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789950999.039099,
+      "pipeline": {
+        "spec_review_at": 1789950780.1523268,
+        "spec_review_at_lease": 1789951680.1523268,
+        "spec_review_at_done": 1789950780.1582131,
+        "spec_review_held_at": 1789950998.378389,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789950998.378439": true
+        }
+      }
+    },
+    {
+      "ts": 1789951040.695282,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by S4b v4 after spec review T-0545 request_changes (git-failure test, stale_rebase read via _load_scheduler_cfg with the defaults test updated, cwd on moved_paths, insertion point pinned after the gated_at stamp); no code was written",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789950780.1523268,
+    "spec_review_at_lease": 1789951680.1523268,
+    "spec_review_at_done": 1789950780.1582131,
+    "spec_review_held_at": 1789950998.378389,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789950998.378439": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "Acceptance bullet 1 claims 'a git failure yields unknown and never blocks', but none of the six named tests (test_stale_check_none_when_goal_unmoved/_low_when_scope_overlaps_moved_paths/_high_when_changed_file_moved/_records_row_and_stamp_before_reviews, stale_rebase_conflict_holds_never_discards, stale_rebase_success_regates_before_reviews) exercise a git failure. This acceptance claim has no test that can verify it.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "test_scheduler_cfg_defaults (lines 189-193) asserts daemon._load_scheduler_cfg(pool) == {'mode':'shadow','soft_conflict_policy':'defer','max_wave':0} via assertEqual. The spec's new [scheduler].stale_rebase key isn't assigned a reader: if the executor threads it through _load_scheduler_cfg's defaults dict (daemon.py:597), the natural place given that function is the established 'read scheduler policy' abstraction, this exact-equality test breaks and isn't in the scope's test list to update. If read directly off pool.cfg instead, the config-loading convention is inconsistent with the rest of [scheduler].",
+      "severity": "high",
+      "line": 597
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "issue": "gitutil.moved_paths(base_ref, target_ref, git=...) has no worktree/cwd parameter, but every sibling helper in this file (_git_in(worktree, *args), _resolve_base(worktree, parent), changed_paths(t, ...) which reads t['worktree']) requires one because subprocess.run needs a cwd. daemon.stale_check's usage ('moved_paths(task branch, goal branch)') also omits it. Branch refs are shared across git worktrees so it can technically run from any worktree (e.g. ROOT), but the spec never says which, leaving the default git= callable's cwd unspecified.",
+      "severity": "med",
+      "line": 4
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "gate()'s stale_rebase success path must 'clear the gate stamps so the next tick re-gates the rebased head' -- that only makes sense if stale_check/rebase runs after stamp(t['id'],'gated_at',pipeline_fields=green_fields) succeeds (line ~1112-1114) and before the merge/_open_reviews call (line ~1121), so there is something to clear. The spec doesn't pin this down, and placing the check earlier (right after the tests-green.sh call at line 1100) would leave nothing stamped yet, making 'clear the gate stamps' a no-op.",
+      "severity": "low",
+      "line": 1108
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

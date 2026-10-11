@@ -1,0 +1,97 @@
+{
+  "id": "T-0409",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4 fix round 6: executor tracks the fallback worker threads it spawns so tests (and shutdown) can join them; the reservation hand-off test joins the thread instead of racing the next test on the shared state file (review T-0406)",
+  "spec": "STEP 0: the worktree must contain ade6b74, 530c2ab, c1ba47c, aca3bb2, d54104f, a214aaf and f3ef147 (T-0362 lineage through T-0404) in git log; never drop or amend them.\nReview T-0406 on T-0404, one high finding: the full gate fails intermittently (exit 2 reproduced) in tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes with AssertionError 'T-0010' unexpectedly found in the reservation set. Root cause: executor._exhausted() starts the fallback worker with threading.Thread(daemon=True).start() and never joins or exposes it; in the full suite a still-running thread from an earlier test writes the shared reservation PERSIST file after a later test has recreated it and reused the same sequential task id.\nFix: (1) executor keeps a registry of fallback worker threads it starts (module-level list or a small helper: executor.fallback_threads(), executor.join_fallback_threads(timeout)); _exhausted appends the thread; the registry drops finished threads. (2) The test suite's executor tests join the registry in tearDown (or the harness base class does) so no background worker outlives its test; the hand-off test asserts the reservation is present while the worker is blocked on an event, then releases the event, joins, and asserts a single release. (3) daemon shutdown (the stop path added in T-0386) joins the registry with a bounded timeout so the process does not exit mid-write. No behaviour change for production dispatch otherwise. Prove it: python -m unittest tests.test_executor twice, then .claude/hooks/tests-green.sh from the worktree root twice in a row, exit 0 both times. git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0408"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f3ef147 and the rest of the T-0362 lineage below your commit",
+    "tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes passes deterministically (two consecutive full-suite runs) and joins the worker thread through the executor registry",
+    "executor exposes the fallback thread registry and a bounded join used by the tests' tearDown and by the daemon stop path (grep)",
+    "tests/test_executor.py::test_refused_or_exception_path_releases_immediately, ::test_exhausted_hold_releases_dispatch_reservation, ::test_fallback_claude_when_codex_cooling and tests/test_daemon.py::test_reservation_owner_matches_running_executor, ::test_failed_dispatch_stamp_releases_reservation still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "tests/test_executor.py",
+    "tests/_harness.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0409",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 550,
+        "issue": "dispatch() defaults account_id to the literal placeholder string 'codex' (and 'claude' at line 547) when pick_executor()/pick() returns None, instead of passing None through. When Codex is globally available (_codex_available True, so fallback=False) but pick_executor() returns None for this specific task, account_id='codex' flows through _dispatch_worker -> executor.start(executor_id='codex') -> since 'codex' isn't a real key in pool.executors, pick_executor is re-run (likely None again) -> _exhausted(pool, t, account_id='codex'). Because account_id is truthy, _exhausted does `next(a for a in pool.accounts if a.id == account_id)` instead of the correct `pool.pick('execute')` fallback, and no account is ever literally named 'codex', so acct is always None even when a real Claude account has headroom. The task is incorrectly held with 'no Claude fallback for complexity N' although on_exhausted=fallback_claude and a Claude account was available. Before this diff, executor.start(task_id, prompt) passed no executor_id, so _exhausted got account_id=None and correctly ran pool.pick('execute'). Fix: leave account_id (and executor_id) unset/None when the picker returns None, rather than substituting a fake id, so _exhausted's real fallback-account lookup still runs.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789910640.427938,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0409",
+      "claimed_at": 1789910640.42754
+    },
+    {
+      "ts": 1789910640.429218,
+      "account": "B"
+    },
+    {
+      "ts": 1789910640.4654,
+      "pid": 22732,
+      "account": "B"
+    },
+    {
+      "ts": 1789910898.2524228,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 550,
+            "issue": "dispatch() defaults account_id to the literal placeholder string 'codex' (and 'claude' at line 547) when pick_executor()/pick() returns None, instead of passing None through. When Codex is globally available (_codex_available True, so fallback=False) but pick_executor() returns None for this specific task, account_id='codex' flows through _dispatch_worker -> executor.start(executor_id='codex') -> since 'codex' isn't a real key in pool.executors, pick_executor is re-run (likely None again) -> _exhausted(pool, t, account_id='codex'). Because account_id is truthy, _exhausted does `next(a for a in pool.accounts if a.id == account_id)` instead of the correct `pool.pick('execute')` fallback, and no account is ever literally named 'codex', so acct is always None even when a real Claude account has headroom. The task is incorrectly held with 'no Claude fallback for complexity N' although on_exhausted=fallback_claude and a Claude account was available. Before this diff, executor.start(task_id, prompt) passed no executor_id, so _exhausted got account_id=None and correctly ran pool.pick('execute'). Fix: leave account_id (and executor_id) unset/None when the picker returns None, rather than substituting a fake id, so _exhausted's real fallback-account lookup still runs.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789910898.25497,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789910640.42754,
+  "account": "B",
+  "pid": 22732,
+  "review_verdict": "request_changes"
+}

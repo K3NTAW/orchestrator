@@ -1,0 +1,173 @@
+{
+  "id": "T-0659",
+  "created_at": 1789983536.703466,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R15b v3: gate/merge/executor integration \u2014 stale.py evidence in the gate, merged_at and changed_files stamped by merge(), gate stamps cleared on fix-round replies, allocation and active Jev routing hooks in executor.start, scout reuse check in spawn_scout",
+  "spec": "v3 after spec reviews T-0655 and T-0657 (executor.start derives the ready set and priorities itself; hooks live inside the branch that picks an executor; skipped-scout results are real findings). Why: merged pure modules need their call sites: daemon.stale_check/_record_stale_check/_stale_rebase (orchestrator/daemon.py:1152-1223 on goal/T-0561 after the R15a merge) only knows path signals; merge.merge (orchestrator/merge.py:25-99) stamps no merged_at (merge wait undefined for Planner merges, AP P0 gap) and no changed_files (stale.overlapping_merge floor); executor.post_tool_result with replace_result=True (executor.py:215-247) leaves pipeline.gated_at set so gate() skips a task fixed by codex_reply (Planner had to clear it by hand on T-0570/T-0574 today); executor.start (executor.py:249-300) picks executors without allocation or active Jev adjustment; mcp.spawn_scout (mcp.py:75-77) launches without the scout_evidence reuse check.\nWhat. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in the named file; no pytest fixtures; use the daemon test harness in tests/_harness.py.\n1. Stale: daemon.stale_check(task) delegates to stale.evidence(task, graph_links=stale.load_links(), graph=interference.load_graph(), tasks=bus.read(role='execute')) and returns its dict (today's keys base, goal_head, moved_count, stale_paths, risk remain; signals/risk_reasons/graph added); _record_stale_check writes stale.row(...) with action recorded; _stale_rebase writes rows with action rebased/rebase_conflict; risk 'medium' is treated like 'low' for the stale_rebase decision (only high rebases).\n2. merge.merge: on status merged, bus.update also sets merged_at=time.time() (top-level, mirrored into pipeline.merged_at when absent) and changed_files = git diff --name-only previous_sha..sha (bounded to 500 paths). scorecard.parallelism merge_wait_s must read either location (read stamp helper accepts pipeline or top-level; already does per _stamp \u2014 verify with a test).\n3. executor.post_tool_result(replace_result=True): pop pipeline keys gated_at, gated_at_lease, gated_at_done and hold_reason/resume_hint gate residue, so gate() re-runs on the new head; record pipeline.regated_by='codex_reply'.\n4. executor.start: inside the existing `else` branch that runs when no executor_id was supplied (executor.py:270-274), immediately after scores = scorecard.scores(...) and before pool.pick_executor is used for the final pick, so a caller-supplied executor_id path is untouched and scores is always defined: if [jev.routing].mode == active: routing = jev_route.shadow_context(t, pool) and scores = jev_route.active_scores(t, pool, routing['eligible'], routing['classification'], routing['evidence'], scores). Then if [allocation].mode != off: build the ranking inputs from the bus inside executor.start (no daemon import, daemon imports executor): graph = {x['id']: x for x in bus.read(role='execute', compact=False) if not x.get('merged_into') and x.get('status') != 'failed'} plus the task itself; durations = duration.durations_for(list(graph.values())); ready_ids = [x['id'] for x in graph.values() if x['status'] in ('queued', 'running') and bus.ready(x)] with the task id included; priority = critical_path.explain(t['id'], graph, durations); ready_priorities = [critical_path.explain(i, graph, durations)['critical_path_s'] for i in ready_ids]; eligible_ids = [e.id for e in pool.eligible_executors('execute', t['complexity'], t)]; ev = allocation.evidence_for(eligible_ids, scorecard.task_class(t)); baseline = pool.pick_executor('execute', t['complexity'], scores=scores, task=t); choice = allocation.choose(t, eligible_ids, baseline=baseline.id, priority=priority, ready_priorities=ready_priorities, evidence=ev); allocation.record(t['id'], choice); in active mode ex = pool.executors[choice['executor']], in shadow ex stays baseline. Any exception in these hooks -> baseline pick, hook error text stored in the run row (bus.log_run field allocation_error) and dispatch continues.\n5. mcp.spawn_scout(task_id): before _bg, check = scout_evidence.reuse_check(task spec, objective=constraints.objective, head_sha=HEAD); scout_evidence.record_decision(...); when check['sufficient'] and constraints.force is not true, return {'task': id, 'status': 'skipped: reusable evidence', 'hits': check['hits']} and post the task result as done with result = {'summary': 'reused evidence: ' + ', '.join(hit ids), 'findings': [{'finding': hit['title'], 'source': hit['id'], 'confidence': 0.8, 'relevance': 'reused', 'unresolved': ''} for each fresh hit] (the shape scout_evidence.normalize_findings accepts), 'reused_evidence': check['hits'], 'provenance': ['repo']}; otherwise spawn as today.\nSafety: security review path and reviews_expected untouched; allocation never returns an ineligible executor; all hooks fail open to today's behaviour.",
+  "inputs": [
+    "T-0658"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_returns_extended_evidence_and_only_high_rebases \u2014 stale_check output has signals and risk_reasons; a medium risk never triggers _stale_rebase",
+    "tests/test_merge.py::test_merge_stamps_merged_at_and_changed_files \u2014 a successful merge leaves merged_at and a changed_files list on the task",
+    "tests/test_executor.py::test_reply_result_clears_gate_stamps_for_regating \u2014 post_tool_result with replace_result removes gated_at keys and sets regated_by",
+    "tests/test_executor.py::test_start_uses_allocation_only_in_active_mode_and_fails_open \u2014 with two concurrently ready execute tasks of different critical-path length on the bus, shadow mode keeps the baseline executor and writes an allocation decision row whose candidates carry non_critical_factor for the shorter task; active mode uses the chosen eligible executor for the critical one; a raising allocation.choose falls back to baseline and records allocation_error",
+    "tests/test_executor.py::test_start_applies_active_jev_scores_only_when_mode_active \u2014 with [jev.routing].mode active the scores passed to pick_executor are the adjusted ones; in shadow they are unchanged",
+    "tests/test_mcp.py::test_spawn_scout_skips_when_reusable_evidence_is_sufficient \u2014 sufficient fresh evidence returns skipped with hits and posts a done result whose findings each carry finding, source, confidence and relevance (normalize_findings keeps them all) plus reused_evidence; force true spawns anyway",
+    "tests/test_executor.py::test_start_with_explicit_executor_id_skips_routing_hooks \u2014 start(task, prompt, executor_id='sol') never calls jev_route or allocation and uses the given executor"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py",
+    "tests/test_executor.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0659",
+  "codex_thread": null,
+  "result": {
+    "summary": "All 7 named acceptance tests pass, and the full suite (930 tests) is green with no regressions. Verified stale.evidence delegation, merge_at/changed_files stamping (pipeline+top-level read), gate-stamp clearing on codex_reply, jev/allocation routing hooks skipped for explicit executor_id, and scout_evidence reuse-skip/force/fail-open paths all match the spec and tests. One low-severity note left inline about an edge case in executor.start's exception fallback (jev-active scores get dropped, not just the allocation adjustment, if a later hook raises) \u2014 untested, fails open safely, not blocking.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 281,
+        "issue": "baseline_scores is snapshotted before the jev-active-mode adjustment runs, so if allocation.choose (or anything after the jev block) raises, the except-block fallback re-picks the executor using pre-jev scores rather than the scores that were actually in effect at the point 'ex' was last successfully computed. This silently discards a successful active-JEV routing decision whenever the allocation hook fails afterward. No acceptance test covers jev-active + allocation-failure together, so this is unverified. Given the fail-open contract is ambiguous ('revert to non-experimental baseline' is a defensible reading), this is a low-severity observation, not a blocking defect.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "bfe0b9b5d67c",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789983536.704714,
+      "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+    },
+    {
+      "ts": 1789983540.142524,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0659",
+      "claimed_at": 1789983540.142076
+    },
+    {
+      "ts": 1789983540.1439629,
+      "account": "B"
+    },
+    {
+      "ts": 1789983540.7375581,
+      "pid": 34549,
+      "account": "B"
+    },
+    {
+      "ts": 1789983815.469811,
+      "status": "done",
+      "result": {
+        "summary": "All 7 named acceptance tests pass, and the full suite (930 tests) is green with no regressions. Verified stale.evidence delegation, merge_at/changed_files stamping (pipeline+top-level read), gate-stamp clearing on codex_reply, jev/allocation routing hooks skipped for explicit executor_id, and scout_evidence reuse-skip/force/fail-open paths all match the spec and tests. One low-severity note left inline about an edge case in executor.start's exception fallback (jev-active scores get dropped, not just the allocation adjustment, if a later hook raises) \u2014 untested, fails open safely, not blocking.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 281,
+            "issue": "baseline_scores is snapshotted before the jev-active-mode adjustment runs, so if allocation.choose (or anything after the jev block) raises, the except-block fallback re-picks the executor using pre-jev scores rather than the scores that were actually in effect at the point 'ex' was last successfully computed. This silently discards a successful active-JEV routing decision whenever the allocation hook fails afterward. No acceptance test covers jev-active + allocation-failure together, so this is unverified. Given the fail-open contract is ambiguous ('revert to non-experimental baseline' is a defensible reading), this is a low-severity observation, not a blocking defect.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "bfe0b9b5d67c",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789983815.4721432,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789983815.5237298,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+        "packet_version": "bfe0b9b5d67c",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+      "packet_version": "bfe0b9b5d67c",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+  "claimed_at": 1789983540.142076,
+  "account": "B",
+  "pid": 34549,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+    "packet_version": "bfe0b9b5d67c",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "bfe0b9b5d67c",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

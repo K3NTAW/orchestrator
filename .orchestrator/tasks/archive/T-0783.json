@@ -1,0 +1,155 @@
+{
+  "id": "T-0783",
+  "created_at": 1790083130.627451,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P26 + P23/24/25: decision-log kinds for the context program and off/shadow/active feature modes for context_router, tool_disclosure, conditional_instructions (config + promotion only, no behaviour)",
+  "spec": "Program brief: .orchestrator/roadmap-context.md sections P23-P26, P30. This task adds the vocabulary and the switches only; no packet, tool or prompt behaviour changes.\n1. orchestrator/decision_log.py KINDS (line 12): append \"context_selection\", \"evidence_reuse\", \"retrieval\", \"tool_disclosure\", \"instruction_loading\", \"model_routing\", \"planner_routing\", \"scheduling\", \"action_gate\", \"workflow_strategy\", \"handoff\". Keep every existing kind (routing, wave, capacity, ... planner_route) so old rows still validate. Add a module constant CONTEXT_KINDS = the eleven new names, and a module docstring line mapping the new generic kinds to the legacy ones they generalise (model_routing~routing, scheduling~wave/jev_sched, workflow_strategy~strategy, planner_routing~planner_route) so nobody double-logs: legacy call sites keep their kinds; new context-program code uses the new kinds. record() unchanged otherwise (candidates, hard_constraints, deterministic, historical, jev, selected, rejected, reason, mode, extra: that is already the P26 shape).\n2. .orchestrator/pool.toml: add three tables after [speculation]:\n   [context_router]  mode = \"shadow\"   # P23: off | shadow | active; shadow computes and logs the routed packet without changing what the model sees\n   [tool_disclosure] mode = \"shadow\"   # P24\n   [instructions]    mode = \"shadow\"   # P25: conditional instruction modules; fundamental safety rules are never conditional\n   Each with a one-line comment carrying the date 2026-09-22 and the revert path (set back to \"off\"). Keep the file's existing style (bare TOML, comments on their own line or trailing).\n3. orchestrator/promotion.py FEATURES: add (\"context_router\", table \"context_router\", key \"mode\", modes off/shadow/active, default \"shadow\", evidence \"context_router\"), (\"tool_disclosure\", table \"tool_disclosure\", ...default \"shadow\", evidence \"tool_disclosure\"), (\"conditional_instructions\", table \"instructions\", key \"mode\", ..., default \"shadow\", evidence \"conditional_instructions\"). In the evidence loader (the function around lines 140-200 that switches on feature) return {\"n\": 0} for the three new features with a comment \"evidence arrives with P27/P28 context scorecards\" so `orchestrator promotion` reports them as stay/insufficient_evidence instead of raising. promotion.report() and format_report must list them.\n4. Add a helper `promotion.mode(feature, cfg=None)` returning just the mode string (reads pool.toml when cfg is None via the existing loader pattern in the file) so future feature code asks one function. If an equivalent public helper already exists, reuse it and document that instead of adding one.\n5. tests: tests/test_decision_log.py::test_context_program_kinds_record (record() accepts each CONTEXT_KIND and still rejects an unknown kind; legacy kinds still accepted); tests/test_promotion.py::test_context_features_default_shadow (the three features are in FEATURES with default shadow, and evaluate(feature, {\"n\": 0}) recommends stay with insufficient_evidence; report() lists them). Existing tests/test_promotion.py line 94 iterates FEATURES and must still pass.\n6. docs/context-economy/02-modes.md (new, \u226460 lines): the three switches, what shadow means for each, the eleven kinds and which phase logs them, and the revert path.\nDo not touch spawn.py, executor.py, daemon.py, prompts. Do not ask questions; decide and note the decision in the result.",
+  "inputs": [
+    "T-0772"
+  ],
+  "acceptance": [
+    "tests/test_decision_log.py::test_context_program_kinds_record passes",
+    "tests/test_promotion.py::test_context_features_default_shadow passes",
+    "decision_log.KINDS contains the eleven new kinds and all legacy kinds; decision_log.CONTEXT_KINDS exists",
+    "pool.toml has [context_router], [tool_disclosure], [instructions] tables with mode = \"shadow\"; `uv run orchestrator promotion` lists context_router, tool_disclosure, conditional_instructions as stay",
+    "docs/context-economy/02-modes.md exists; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_decision_log.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/02-modes.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0783",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified against T-0772 commit 5efc8b5. decision_log.py: CONTEXT_KINDS holds exactly the eleven new kinds, KINDS = legacy + CONTEXT_KINDS (all legacy preserved), module docstring maps generic->legacy kinds, record() still raises ValueError on unknown kind. promotion.py: FEATURES gains context_router/tool_disclosure/conditional_instructions, all default shadow; collect() returns {\"n\":0} early for the three (before reaching the planner_routing branch, so no exceptions); report()/format_report() iterate FEATURES generically so the new entries appear automatically; added mode(feature, cfg=None) helper loading pool.toml via tomllib when cfg is omitted. pool.toml: three new tables (context_router, tool_disclosure, instructions) each mode=\"shadow\" with 2026-09-22 dated comments and an off-revert path, no duplicate table names. docs/context-economy/02-modes.md (30 lines, within the 60-line cap) covers the three switches, the eleven kinds/legacy mapping, and the revert path. tests/test_decision_log.py::test_context_program_kinds_record and tests/test_promotion.py::test_context_features_default_shadow match the acceptance criteria; the pre-existing test_registry_defaults_and_invalid_config (iterating FEATURES, requiring collect(...)['n']==0) still passes since the new features short-circuit collect() to {'n':0}. Gate already green (gate_reds=0) per packet. No scope creep: only the six listed files touched, no changes to spawn.py/executor.py/daemon.py/prompts. No security concerns \u2014 additive config/vocabulary, defaults are inert (shadow), no secrets or executable behavior changes.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "48e5aa581b5f",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790083130.628774,
+      "reviewed_sha": "5efc8b59b4164d7659c0863d501c43ac93b1def2"
+    },
+    {
+      "ts": 1790083134.603349,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0783",
+      "claimed_at": 1790083134.6028821
+    },
+    {
+      "ts": 1790083134.605145,
+      "account": "B"
+    },
+    {
+      "ts": 1790083135.395297,
+      "pid": 98112,
+      "account": "B"
+    },
+    {
+      "ts": 1790083225.287761,
+      "status": "done",
+      "result": {
+        "summary": "Verified against T-0772 commit 5efc8b5. decision_log.py: CONTEXT_KINDS holds exactly the eleven new kinds, KINDS = legacy + CONTEXT_KINDS (all legacy preserved), module docstring maps generic->legacy kinds, record() still raises ValueError on unknown kind. promotion.py: FEATURES gains context_router/tool_disclosure/conditional_instructions, all default shadow; collect() returns {\"n\":0} early for the three (before reaching the planner_routing branch, so no exceptions); report()/format_report() iterate FEATURES generically so the new entries appear automatically; added mode(feature, cfg=None) helper loading pool.toml via tomllib when cfg is omitted. pool.toml: three new tables (context_router, tool_disclosure, instructions) each mode=\"shadow\" with 2026-09-22 dated comments and an off-revert path, no duplicate table names. docs/context-economy/02-modes.md (30 lines, within the 60-line cap) covers the three switches, the eleven kinds/legacy mapping, and the revert path. tests/test_decision_log.py::test_context_program_kinds_record and tests/test_promotion.py::test_context_features_default_shadow match the acceptance criteria; the pre-existing test_registry_defaults_and_invalid_config (iterating FEATURES, requiring collect(...)['n']==0) still passes since the new features short-circuit collect() to {'n':0}. Gate already green (gate_reds=0) per packet. No scope creep: only the six listed files touched, no changes to spawn.py/executor.py/daemon.py/prompts. No security concerns \u2014 additive config/vocabulary, defaults are inert (shadow), no secrets or executable behavior changes.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "48e5aa581b5f",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790083225.28916,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790083225.3534641,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "5efc8b59b4164d7659c0863d501c43ac93b1def2",
+        "packet_version": "48e5aa581b5f",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "5efc8b59b4164d7659c0863d501c43ac93b1def2",
+      "packet_version": "48e5aa581b5f",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "5efc8b59b4164d7659c0863d501c43ac93b1def2",
+  "claimed_at": 1790083134.6028821,
+  "account": "B",
+  "pid": 98112,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "5efc8b59b4164d7659c0863d501c43ac93b1def2",
+    "packet_version": "48e5aa581b5f",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "48e5aa581b5f",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

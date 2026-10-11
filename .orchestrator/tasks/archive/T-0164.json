@@ -1,0 +1,229 @@
+{
+  "id": "T-0164",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): D1 fix round 4 on task/T-0160 \u2014 delta 8a82703..2f37982 (T-0160, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0160 delta: `git diff 8a82703 2f37982` in worktree wt/T-0160 (orchestrator/daemon.py, tests/test_daemon.py, .orchestrator/pool.toml, README.md, CLAUDE.md, .orchestrator/prompts/planner.md). Fix round for review T-0159; confirm each item resolved: (1) merge_reviewed now sweeps done+gated+unmerged execute tasks and, when every review failed or was held (or approvals plus live reviews can no longer reach reviews_expected), holds the task with a hold_reason naming the review ids and notifies once; approve/merge paths unchanged; tests a (two failed reviews, c7) and b (single failed review, c4) present; (2) avoid_account removed from gate() and tests, second_review kept; pool.toml comment and README say both reviews may share an account; (3) CLAUDE.md step 7 and prompts/planner.md carry the identical new 7-10 sentence and test_planner_md_matches_claude_md_lists is green; (4) README states the orphaned single-review exception. Also confirm reconcile_dead and the orphaned gate branch are intact and no shell strings come from config. Run `uv run python -m unittest tests.test_daemon tests.test_goals -q` once. This is the third opus review of D1 (T-0150, T-0159): approve unless a defect would stall or mis-merge tasks in production; list smaller points as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0160"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the four T-0159 items confirmed resolved or named unresolved with evidence",
+    "No regression of reconcile_dead / orphaned branch"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "CLAUDE.md",
+    ".orchestrator/prompts/planner.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0120",
+      "T-0151",
+      "T-0154",
+      "T-0157",
+      "T-0160"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0164",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 430,
+        "issue": "`first = stuck[0]` with stuck possibly empty -> IndexError; tick() swallows it, so merge_reviewed stops for ALL tasks that tick. bus.STATUSES = {queued,held,running,done,failed}: the buckets are not exhaustive over `done` -- a review done with an off-vocabulary verdict ('changes_requested', 'approve with nits'; spawn.py:265 only requires the key to exist, never validates its value) is in none of them. Reproduced: c7 Codex-executed task, r1 done+approve, r2 done+verdict='changes_requested' -> IndexError. Second trigger: reviews_expected() recomputed from live config at merge time while gate() froze the review count, so lowering [review].two_reviews_from after a gate gives approved=1, needed=2, pending=[], stuck=[] -- same crash (also reproduced).",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 433,
+        "issue": "Same root cause, non-crashing branch: no approvals and no failed/held sibling holds the task with hold_reason 'reviews failed: ' naming nothing. Reproduced on a c5 task whose only review is done with an unrecognised verdict. A reviewer that meant request_changes is silently not treated as one.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 414,
+        "issue": "reviews_expected(t) is read live at merge time, but the number of reviews gate() opened is frozen behind the one-shot gated_at stamp. Any change to two_reviews_from between the two desynchronises them: needed=2 with one review that can never gain a sibling = permanent wait, or the crash above. Persist the count at gate time (pipeline.reviews_expected).",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 389,
+        "issue": "The `or src.get(\"review_verdict\")` fallback is unsafe with two reviews: spawn.py:281 writes each verdict onto src, so a review done without its own review_verdict inherits its sibling's and counts as an approval -- merging on one real approve. Restrict the src fallback to len(reviews)==1.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 402,
+        "issue": "Behaviour change not in the spec: the sweep requires pipeline.gated_at, where the old loop merged on approve regardless. A Planner-spawned review on a done, never-gated execute task now approves and never merges, with no hold and no notify -- the same silent-stall class T-0159 item 1 named.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 327,
+        "issue": "constraints.second_review is set by gate() (daemon.py:364) and read by nothing -- grep finds only the writer, the docstring and this assertion. Same inert-field-with-a-green-test pattern T-0159 item 4 flagged for avoid_account.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 401,
+        "issue": "Efficiency: filter order is stale -> already_merged -> gated_at, and already_merged() shells out to git for every done execute task, every tick, now in both gate() and merge_reviewed(). Check the cheap conditions first.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789742119.819836,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0164",
+      "claimed_at": 1789742119.819224
+    },
+    {
+      "ts": 1789742119.8619058,
+      "pid": 53445,
+      "account": "B"
+    },
+    {
+      "ts": 1789742400.897165,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "summary": "All five T-0159 items are resolved (1 sweep over execute tasks; 2 avoid_account dropped; 3 CLAUDE.md/planner.md wording synced and byte-identical, test_planner_md_matches_claude_md_lists green; 4 assertion replaced with assertNotIn; 5 README orphaned clause). Full suite 169 tests OK, tests-green.sh exit 0, orphaned/reconcile_dead path intact (test_orphaned_high_complexity_merges_on_single_approve). But the new merge_reviewed sweep has a reachable IndexError: a done review whose verdict is neither 'approve' nor 'request_changes' (or a pool.toml threshold change after gate()) leaves stuck==[] while approved is non-empty, so stuck[0] raises; tick() swallows it and the whole merge stage stops for every task that tick. Reproduced.",
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ],
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 430,
+            "issue": "`first = stuck[0]` with stuck possibly empty -> IndexError, caught by tick()'s per-stage try/except, so merge_reviewed aborts for ALL tasks that tick (silent stall, stderr only). bus.STATUSES = {queued,held,running,done,failed}; the four buckets (request_changes / approved / pending / stuck) are NOT exhaustive over `done`: a review that is done with an off-vocabulary verdict ('changes_requested', 'REQUEST_CHANGES', 'approve with nits' - spawn.py:265 only requires the key to exist, never validates its value) falls into none of them. Reproduced: complexity-7 Codex-executed task, r1 done+approve, r2 done+review_verdict='changes_requested' -> `BOOM merge_reviewed raised: IndexError list index out of range`. Second trigger with in-vocabulary verdicts: reviews_expected() is recomputed from live config at merge time while gate() froze the number of reviews it opened, so lowering [review].two_reviews_from in pool.toml after a task was gated gives approved=1, needed=2, pending=[], stuck=[] - same crash (reproduced). Guard the empty case and classify done-but-unrecognised verdicts explicitly.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 433,
+            "issue": "Same root cause, non-crashing branch: with no approvals and no failed/held sibling, the task is held with hold_reason 'reviews failed: ' - an empty list naming nothing. Reproduced on a complexity-5 task whose single review is done with verdict 'approve with nits': status=held, hold_reason='reviews failed: '. The Planner gets a hold with no pointer to what to re-spec, and a reviewer that meant request_changes is silently not treated as one.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 414,
+            "issue": "reviews_expected(t) is read from the live [review] config at merge time, but the number of review tasks gate() opened was fixed at gate time behind a one-shot gated_at stamp. Any edit to two_reviews_from (or to a task's orphaned flag) between the two desynchronises them: needed=2 with one review that can never gain a sibling (gate() will not re-run) = permanent wait, or the crash above. Persist the expected count on the task at gate time (e.g. pipeline.reviews_expected) and read that in merge_reviewed.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 389,
+            "issue": "The `or src.get(\"review_verdict\")` fallback is unsafe now that a task can carry two reviews: spawn.py:281 writes each review's verdict onto src, so a second review that is done without its own review_verdict inherits its sibling's verdict from src and is counted as an approval. With needed=2 that merges on one real approve. The legacy-data justification in the docstring only applies to the single-review era; restrict the src fallback to len(reviews)==1.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 402,
+            "issue": "Behaviour change not in the spec: the sweep now requires pipeline.gated_at on the source task, where the old review-driven loop merged on approve regardless. A review the Planner spawns by hand (spawn_review) on a done execute task the daemon never gated will now approve and never merge, with no hold and no notify - the same silent-stall class T-0159 item 1 named. Either keep the gated_at requirement and notify on approve-without-gate, or drop it.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 327,
+            "issue": "`constraints.second_review` is set by gate() (daemon.py:364) and read by nothing - grep over the repo finds only the writer, the docstring and this assertion. That is the same inert-field-with-a-green-test pattern T-0159 item 4 flagged for avoid_account, one field later; the test docstring's 'so a later spawn change can steer routing off it' is speculative. Either wire it into spawn.run_worker's routing or drop the field and the assertion.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 401,
+            "issue": "Efficiency: the filter order is stale -> already_merged -> gated_at, and already_merged() shells out to git (branch_exists + merge-base) for every done execute task on the bus, every tick, in gate() and now again in merge_reviewed(). Check the cheap pipeline.gated_at / reviews-exist conditions before the git ancestry probe.",
+            "severity": "low"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1789742416.620992,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 430,
+            "issue": "`first = stuck[0]` with stuck possibly empty -> IndexError; tick() swallows it, so merge_reviewed stops for ALL tasks that tick. bus.STATUSES = {queued,held,running,done,failed}: the buckets are not exhaustive over `done` -- a review done with an off-vocabulary verdict ('changes_requested', 'approve with nits'; spawn.py:265 only requires the key to exist, never validates its value) is in none of them. Reproduced: c7 Codex-executed task, r1 done+approve, r2 done+verdict='changes_requested' -> IndexError. Second trigger: reviews_expected() recomputed from live config at merge time while gate() froze the review count, so lowering [review].two_reviews_from after a gate gives approved=1, needed=2, pending=[], stuck=[] -- same crash (also reproduced).",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 433,
+            "issue": "Same root cause, non-crashing branch: no approvals and no failed/held sibling holds the task with hold_reason 'reviews failed: ' naming nothing. Reproduced on a c5 task whose only review is done with an unrecognised verdict. A reviewer that meant request_changes is silently not treated as one.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 414,
+            "issue": "reviews_expected(t) is read live at merge time, but the number of reviews gate() opened is frozen behind the one-shot gated_at stamp. Any change to two_reviews_from between the two desynchronises them: needed=2 with one review that can never gain a sibling = permanent wait, or the crash above. Persist the count at gate time (pipeline.reviews_expected).",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 389,
+            "issue": "The `or src.get(\"review_verdict\")` fallback is unsafe with two reviews: spawn.py:281 writes each verdict onto src, so a review done without its own review_verdict inherits its sibling's and counts as an approval -- merging on one real approve. Restrict the src fallback to len(reviews)==1.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 402,
+            "issue": "Behaviour change not in the spec: the sweep requires pipeline.gated_at, where the old loop merged on approve regardless. A Planner-spawned review on a done, never-gated execute task now approves and never merges, with no hold and no notify -- the same silent-stall class T-0159 item 1 named.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 327,
+            "issue": "constraints.second_review is set by gate() (daemon.py:364) and read by nothing -- grep finds only the writer, the docstring and this assertion. Same inert-field-with-a-green-test pattern T-0159 item 4 flagged for avoid_account.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 401,
+            "issue": "Efficiency: filter order is stale -> already_merged -> gated_at, and already_merged() shells out to git for every done execute task, every tick, now in both gate() and merge_reviewed(). Check the cheap conditions first.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789742416.6241012,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789742119.819224,
+  "pid": 53445,
+  "account": "B",
+  "review_verdict": "request_changes"
+}

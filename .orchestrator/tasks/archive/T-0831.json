@@ -1,0 +1,1039 @@
+{
+  "id": "T-0831",
+  "created_at": 1790095727.615532,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "P14/P15/P16/P29 handoff economics, shadow: handoff scorecard from run logs and planner telemetry, expected_route_cost per executor and task class, a shadow \"handoff\" decision at executor pick time; routing unchanged (v3)",
+  "spec": "Facts (Planner grep, provenance repo): execute runs log per round (bus.log_run rows role execute with task, tier/executor, usage tokens, usd); fix rounds are tasks with constraints.fix_round_for and pipeline.resume {\"mode\": \"resume\"|\"fresh\"} (daemon dispatch ~838-850); resume rounds send only a delta (executor.reply, ~416-428), fresh rounds resend the full packet + repair delta (executor.py ~185-197); attribution.lineage(task) walks a lineage; scorecard.by_task/by_goal aggregate cost; planner_telemetry.record_launch/record_usage rows carry launch_id, goal_id, kind, decision_type and tokens for headless Planner launches including escalation launches (planner_packet builds the escalation packet \u22646000 chars); executor.start picks the executor via pool.pick_executor + allocation (executor.py 276-323); decision_log kind \"handoff\" exists since T-0772.\nDo:\n1. orchestrator/handoff_scorecard.py (new). `lineage_rows(root)` groups execute run rows by lineage root (attribution.lineage) and orders rounds; per lineage: first_executor, executors_by_round, rounds, resume_rounds, fresh_rounds, tokens_by_round, first_pass (rounds == 1 and merged), accepted (merged_into set), accepted_tokens, accepted_usd, reconstruction_tokens = sum over fresh rounds of that round's packet tokens (context.presented_tokens when present, else input tokens minus cache reads as a bounded proxy, flagged estimated=True), handoff_pairs = [(from_executor, to_executor, reason)] where reason is the fix-round kind (gate_red / review / conflict) from the fix task's hold cause.\n2. `by_start(root)`: per (first_executor, task_class): n, first_pass_rate, avg_rounds, avg_accepted_tokens, avg_accepted_usd, avg_reconstruction_tokens. `expected_route_cost(task_class, executor, root, cfg)` = avg first-round cost for that executor and class + P(fix | executor, class) \u00d7 (avg fix-round cost + avg reconstruction) + P(handoff to another executor) \u00d7 avg cost of the destination's rounds; every term reports its n; below min_samples (cfg [promotion] min_samples, default 20) the function returns {\"insufficient\": True, \"n\": n} and never a number.\n3. `recommendation(task_class, root, cfg)`: among executors with sufficient samples, the one with the lowest expected_route_cost; \"start_strong\" flag when the cheapest-first executor (lowest first-round cost) is not the lowest expected_route_cost. Pure reporting.\n4. Planner side (P15): `planner_handoffs(root)` from planner_telemetry rows: per escalation launch (kind or decision_type marking an escalation from the default tier to the escalation tier): tokens before escalation on the source launch, escalation packet tokens (from the launch payload size when recorded, else estimated from the packet cap and flagged), tokens after on the destination launch, and whether the goal was accepted; summary counts and averages; no routing change. If the telemetry rows lack a field needed, report it as unmeasured in the output rather than guessing.\n5. Shadow decision (P16): in executor.start, after the executor is chosen and before launch, when [handoff] mode (add `[handoff] mode = \"shadow\"` to pool.toml with a dated comment, and the feature \"handoff_routing\" to promotion.FEATURES with evidence loader returning {\"n\": lineage count}) is shadow or active: record decision_log.record(kind=\"handoff\", subject=task id, candidates=eligible executor ids, hard_constraints=[pool constraints text], deterministic={\"baseline\": chosen executor, \"expected_route_cost\": {executor: value or insufficient}, \"task_class\": ...}, historical={\"n\": ...}, selected=chosen executor (unchanged), reason=\"shadow: routing unchanged\", mode=mode). Never raises into start (try/except + one notify line). Active is treated as shadow with a one-time warning.\n6. CLI: `orchestrator scorecard --handoffs` prints by_start, recommendations and the Planner handoff summary; JSON with --json.\nTests (unittest): tests/test_handoff_scorecard.py::test_lineage_rows_orders_rounds_and_counts_resume_vs_fresh, ::test_expected_route_cost_insufficient_below_min_samples, ::test_start_strong_flag_when_cheap_first_costs_more_overall, ::test_planner_handoffs_reports_unmeasured_fields; tests/test_executor.py::test_start_records_handoff_decision_in_shadow_without_changing_executor (executor patched; the chosen executor equals the baseline pick and one decision row of kind handoff exists). docs/context-economy/08-handoffs.md (\u226470 lines): formulas, fields, what is estimated, revert path ([handoff] mode off).\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-22 18:20) after spec review T-0813, binding on top of v1:\n- Step 4 (P15): an escalation launch is a planner_telemetry record_launch row whose route == \"escalate\" (route/tier fields on the row), i.e. routed to [planner.routing].escalation_tier while the goal's classification would route to default_tier. Pre-escalation token counts (the default-tier shadow decision) come from planner_shadow's own log (planner_shadow.record, keyed by launch_id/goal_id; see planner_runs._previous_shadow) joined by goal_id; when no shadow row exists the before-tokens field is reported as unmeasured, never estimated.\n- Step 5: the evidence loader is a new `if feature == \"handoff_routing\":` branch inside promotion.collect() (the flat per-feature dispatch; FEATURES' \"evidence\" key is descriptive only), returning {\"n\": number of lineages with \u22651 completed round} plus reason \"shadow_quality_unmeasured\".\n- tests/test_handoff_scorecard.py::test_planner_handoffs_reports_unmeasured_fields must build one record_launch row with route == \"escalate\" and no shadow row, and assert before_tokens is reported unmeasured while after tokens come from record_usage.\n\nSPEC v3 (2026-09-22 19:20) after spec review T-0818 (round 2; three mechanical clarifications folded in, further review waived by the Planner, verdict set to approve):\n- executor.start: the handoff decision recomputes `pool.eligible_executors(\"execute\", t[\"complexity\"], t)` on its own, independent of the allocation-mode branch and of an explicit executor_id override, so candidates and the baseline pick are always populated; the chosen executor is whatever start() is about to launch.\n- handoff_pairs reason mapping, explicit: gate_red when hold_reason == \"gate_red\"; review when hold_reason starts with \"review request_changes\"; conflict when \"conflict\" is in hold_reason (matches failures.failure_kind); everything else buckets to \"other\" and is reported with the raw hold_reason text, never dropped and never raised on.\n- Docs: numbering is deliberate; 07 is docs/context-economy/07-instructions.md from T-0814 (in flight). Keep 08-handoffs.md.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_handoff_scorecard.py::test_lineage_rows_orders_rounds_and_counts_resume_vs_fresh passes",
+    "tests/test_handoff_scorecard.py::test_expected_route_cost_insufficient_below_min_samples passes",
+    "tests/test_handoff_scorecard.py::test_start_strong_flag_when_cheap_first_costs_more_overall passes",
+    "tests/test_handoff_scorecard.py::test_planner_handoffs_reports_unmeasured_fields passes",
+    "tests/test_executor.py::test_start_records_handoff_decision_in_shadow_without_changing_executor passes",
+    "pool.toml has [handoff] mode = \"shadow\" and promotion.FEATURES has handoff_routing; `uv run orchestrator scorecard --handoffs` runs; docs/context-economy/08-handoffs.md exists; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/handoff_scorecard.py",
+    "orchestrator/executor.py",
+    "orchestrator/promotion.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_handoff_scorecard.py",
+    "tests/test_executor.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/08-handoffs.md"
+  ],
+  "depends_on": [
+    "T-0800"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0831",
+  "codex_thread": "01a0ca06-44ce-7a43-8bfe-dc8fb44e880c",
+  "result": {
+    "summary": "Implemented shadow handoff economics, planner telemetry reporting, promotion evidence, CLI support, configuration, documentation, and tests.\n\nGate: `.claude/hooks/tests-green.sh .` \u2014 **green**, 1,089 tests passed.  \nCommit: `5eca2249c897bd03e8ca8d460372cfb56d32cb7e`  \nFiles changed: 9 files, 430 insertions, 2 deletions.  \nFailures-only output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0ca06-44ce-7a43-8bfe-dc8fb44e880c",
+    "usage": {
+      "input_tokens": 1906548,
+      "cached_input_tokens": 1842688,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10891,
+      "reasoning_output_tokens": 1120,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790095727.617258,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 19:20: two spec-review rounds (T-0813, T-0818); round-2 clarifications folded into v3; further review waived"
+    },
+    {
+      "ts": 1790095778.8602839,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213
+      }
+    },
+    {
+      "ts": 1790095778.8617642,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691
+      }
+    },
+    {
+      "ts": 1790095780.999867,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802
+      }
+    },
+    {
+      "ts": 1790095803.551371,
+      "packet_meta": {
+        "chars": 1841,
+        "est_tokens": 460,
+        "hash": "657575c42d38",
+        "version": "657575c42d38",
+        "base": "e8c4687d6d62",
+        "sources": "pool.toml@958205df7bf1 gotchas@9cdd6bbf6561 memory@notes",
+        "policy_version": "958205df7bf1",
+        "gotchas": "9cdd6bbf6561"
+      }
+    },
+    {
+      "ts": 1790095803.552922,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0831",
+      "claimed_at": 1790095803.552706
+    },
+    {
+      "ts": 1790095803.554165,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790096321.2230709,
+      "codex_thread": "01a0ca06-44ce-7a43-8bfe-dc8fb44e880c",
+      "codex_thread_head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+    },
+    {
+      "ts": 1790096321.228864,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790096321.2322829,
+      "status": "done",
+      "result": {
+        "summary": "Implemented shadow handoff economics, planner telemetry reporting, promotion evidence, CLI support, configuration, documentation, and tests.\n\nGate: `.claude/hooks/tests-green.sh .` \u2014 **green**, 1,089 tests passed.  \nCommit: `5eca2249c897bd03e8ca8d460372cfb56d32cb7e`  \nFiles changed: 9 files, 430 insertions, 2 deletions.  \nFailures-only output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0ca06-44ce-7a43-8bfe-dc8fb44e880c",
+        "usage": {
+          "input_tokens": 1906548,
+          "cached_input_tokens": 1842688,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10891,
+          "reasoning_output_tokens": 1120,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790096341.92767,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790096469.678441,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790096470.245933,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        }
+      }
+    },
+    {
+      "ts": 1790096470.352132,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+      }
+    },
+    {
+      "ts": 1790096470.365275,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142
+      }
+    },
+    {
+      "ts": 1790096638.719583,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "review_held_at": 1790096638.719404
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-0835"
+    },
+    {
+      "ts": 1790096640.870108,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "review_held_at": 1790096638.719404,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790096641.393436,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "review_held_at": 1790096638.719404,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true
+        }
+      }
+    },
+    {
+      "ts": 1790097788.0109792,
+      "status": "done",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true
+        }
+      }
+    },
+    {
+      "ts": 1790097801.6405718,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true
+        },
+        "review_held_at": 1790097801.640333
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-0835"
+    },
+    {
+      "ts": 1790097803.6065788,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true,
+          "1790097801.6405718": true
+        },
+        "review_held_at": 1790097801.640333
+      }
+    },
+    {
+      "ts": 1790100308.403681,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790100322.249949,
+      "status": "done",
+      "hold_reason": null,
+      "reason": "Planner 20:15: review T-0835 approved after a hand re-spawn; releasing the reviews-failed hold for the merge stage"
+    },
+    {
+      "ts": 1790100325.996827,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true,
+          "1790097801.6405718": true
+        },
+        "review_held_at": 1790097801.640333,
+        "merged_at": 1790100325.9965599,
+        "merged_at_lease": 1790101225.9965599
+      }
+    },
+    {
+      "ts": 1790100456.523615,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "sha": "0f550d782cb76b2e041dddac9e820ad045d8b645",
+      "merged_at": 1790100456.522261,
+      "changed_files": [
+        ".orchestrator/pool.toml",
+        "docs/context-economy/08-handoffs.md",
+        "orchestrator/cli.py",
+        "orchestrator/executor.py",
+        "orchestrator/handoff_scorecard.py",
+        "orchestrator/promotion.py",
+        "tests/test_executor.py",
+        "tests/test_handoff_scorecard.py",
+        "tests/test_promotion.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true,
+          "1790097801.6405718": true
+        },
+        "review_held_at": 1790097801.640333,
+        "merged_at": 1790100325.9965599,
+        "merged_at_lease": 1790101225.9965599
+      }
+    },
+    {
+      "ts": 1790100457.212884,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true,
+          "1790097801.6405718": true
+        },
+        "review_held_at": 1790097801.640333,
+        "merged_at": 1790100325.9965599,
+        "merged_at_lease": 1790101225.9965599,
+        "accepted_at": 1790100457.212309
+      }
+    },
+    {
+      "ts": 1790100457.351168,
+      "pipeline": {
+        "first_ready_at": 1790095778.860213,
+        "dispatched_at": 1790095778.861691,
+        "dispatched_at_lease": 1790096678.861691,
+        "dispatched_at_done": 1790095780.9997802,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "4abbef317a071fff269d52d768d830081d96c19d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.07
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790096469.678259,
+        "gated_at_lease": 1790097369.678259,
+        "first_green_at": 1790096469.6771672,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0831",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790096470.245297,
+          "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+        },
+        "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+        "gated_at_done": 1790096470.3651142,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790096638.719583": true,
+          "1790097801.6405718": true
+        },
+        "review_held_at": 1790097801.640333,
+        "merged_at": 1790100325.9965599,
+        "merged_at_lease": 1790101225.9965599,
+        "accepted_at": 1790100457.212309,
+        "merged_at_done": 1790100457.3509078
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 20:15: review T-0835 approved after a hand re-spawn; releasing the reviews-failed hold for the merge stage",
+  "pipeline": {
+    "first_ready_at": 1790095778.860213,
+    "dispatched_at": 1790095778.861691,
+    "dispatched_at_lease": 1790096678.861691,
+    "dispatched_at_done": 1790095780.9997802,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "4abbef317a071fff269d52d768d830081d96c19d",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.07
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790096469.678259,
+    "gated_at_lease": 1790097369.678259,
+    "first_green_at": 1790096469.6771672,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0831",
+      "goal_head": "goal/T-0760",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790096470.245297,
+      "head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e"
+    },
+    "reviewed_sha": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+    "gated_at_done": 1790096470.3651142,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790096638.719583": true,
+      "1790097801.6405718": true
+    },
+    "review_held_at": 1790097801.640333,
+    "merged_at": 1790100325.9965599,
+    "merged_at_lease": 1790101225.9965599,
+    "accepted_at": 1790100457.212309,
+    "merged_at_done": 1790100457.3509078
+  },
+  "packet_meta": {
+    "chars": 1841,
+    "est_tokens": 460,
+    "hash": "657575c42d38",
+    "version": "657575c42d38",
+    "base": "e8c4687d6d62",
+    "sources": "pool.toml@958205df7bf1 gotchas@9cdd6bbf6561 memory@notes",
+    "policy_version": "958205df7bf1",
+    "gotchas": "9cdd6bbf6561"
+  },
+  "claimed_at": 1790095803.552706,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "5eca2249c897bd03e8ca8d460372cfb56d32cb7e",
+  "hold_reason": null,
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0760",
+  "sha": "0f550d782cb76b2e041dddac9e820ad045d8b645",
+  "merged_at": 1790100456.522261,
+  "changed_files": [
+    ".orchestrator/pool.toml",
+    "docs/context-economy/08-handoffs.md",
+    "orchestrator/cli.py",
+    "orchestrator/executor.py",
+    "orchestrator/handoff_scorecard.py",
+    "orchestrator/promotion.py",
+    "tests/test_executor.py",
+    "tests/test_handoff_scorecard.py",
+    "tests/test_promotion.py"
+  ]
+}

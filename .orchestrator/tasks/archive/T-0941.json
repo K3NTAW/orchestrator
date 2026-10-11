@@ -1,0 +1,168 @@
+{
+  "id": "T-0941",
+  "created_at": 1790118164.8492851,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S8: learned skill proposals: detect repeated successful procedures across tasks, synthesise an evidence-backed draft skill into the quarantine store (never active), with source tasks, counterexamples and confidence; one-off behaviour never becomes a candidate",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P20, P21, P22 (version on change), P36 learned-skills tests (P37 stage 8). Depends on T-0938 (skill_scorecard.usage_rows with lineage outcomes and dimensions) and T-0884 (discovery store STATE/skills/discovered.json + quarantine dir, provenance_info, inspect gate). Facts: run rows carry role, task, skills_used, context (packet sections), outcome; the Jev gate log carries per-call tool/tool_target per task; memory holds dated decisions and gotchas; the Planner writes specs with recurring instruction sentences; fix rounds carry failure kinds.\nDo:\n1. orchestrator/skill_learning.py (new). `patterns(root, since_s=None, min_support=3)` mines three deterministic sources: (a) tool-call sequences per task from the gate log (tool + normalised target: path stem, script path, command verb) collapsed into an ordered signature per role; (b) recurring instruction sentences across execute/scout/review specs (sentences \u2265 8 words appearing in \u2265 min_support distinct tasks, case-folded); (c) recurring fix strategies (fix-round specs whose Planner note or failure kind repeats). A pattern qualifies only when it appears in \u2265 min_support distinct tasks of which \u2265 80% reached merged/accepted; each pattern records support tasks, success count, failures (tasks where it appeared and the lineage failed: the counterexamples), roles, task classes, and confidence = successes / support capped by min(1, support / 10).\n2. `propose(pattern, root)` synthesises a draft SKILL.md in the P6 structure (Trigger from the task classes and title keywords of the support tasks; Objective from the shared spec sentence; Procedure from the tool sequence rendered as steps; Tools from the sequence; Evidence requirements from the packet sections those tasks used most; Output contract from the role's result shape; Stop conditions and Failure/recovery from the fix-round evidence) plus frontmatter provenance \"learned\" and a `provenance_info` block {source_tasks, successes, failures, procedure_signature, confidence, synthesised_at}. The draft is written ONLY to STATE/skills/quarantine/learned/<slug>/SKILL.md and registered in discovered.json with state \"discovered\" then \"quarantined\" (P2 transitions with reason \"learned proposal\"), never under skills/ and never active; the inspect gate (T-0884) applies before any transition into testing. A proposal is refused (reason recorded) when support < min_support or confidence < 0.6.\n3. Re-proposal and versions: proposing the same procedure_signature again updates the existing learned record (history entry, new content_hash version) instead of creating a duplicate; a pattern whose later evidence drops below the thresholds marks the record \"stale evidence\" in history.\n4. CLI: `orchestrator skills learn [--since 30d] [--min-support 3] [--propose]` lists qualifying patterns; with --propose writes the drafts and prints the ids. `orchestrator skills show <id>` renders the draft with its evidence block.\n5. docs/skill-intelligence/09-learned.md (\u226470 lines): the three pattern sources, thresholds, what a draft contains, the path to shadow/active (inspect \u2192 testing \u2192 S10 promotion), what is never automatic, revert path (delete the quarantine folder entries).\nTests (unittest, `import _harness` first; fixtures seed gate rows, specs and run rows in the harness root): tests/test_skill_learning.py::test_repeated_successful_sequence_becomes_pattern_with_support_and_counterexamples, ::test_one_off_behaviour_never_qualifies, ::test_propose_writes_quarantined_draft_never_active (draft under the quarantine dir; skills_registry.candidates never returns it; state quarantined), ::test_reproposal_updates_version_not_duplicate, ::test_low_confidence_refused_with_reason, ::test_cli_learn_lists_and_proposes. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_skill_learning.py::test_repeated_successful_sequence_becomes_pattern_with_support_and_counterexamples passes",
+    "tests/test_skill_learning.py::test_one_off_behaviour_never_qualifies passes",
+    "tests/test_skill_learning.py::test_propose_writes_quarantined_draft_never_active passes",
+    "tests/test_skill_learning.py::test_reproposal_updates_version_not_duplicate passes",
+    "tests/test_skill_learning.py::test_low_confidence_refused_with_reason passes",
+    "tests/test_skill_learning.py::test_cli_learn_lists_and_proposes passes",
+    "docs/skill-intelligence/09-learned.md exists; `uv run orchestrator skills learn` runs; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/skill_learning.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    "tests/test_skill_learning.py",
+    "docs/skill-intelligence/09-learned.md"
+  ],
+  "depends_on": [
+    "T-0938"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790118826.5570471,
+      "pipeline": {
+        "first_ready_at": 1790118826.557012
+      }
+    },
+    {
+      "ts": 1790118826.622559,
+      "pipeline": {
+        "first_ready_at": 1790118826.557012,
+        "spec_review_at": 1790118826.622512,
+        "spec_review_at_lease": 1790119726.622512
+      }
+    },
+    {
+      "ts": 1790118826.629308,
+      "pipeline": {
+        "first_ready_at": 1790118826.557012,
+        "spec_review_at": 1790118826.622512,
+        "spec_review_at_lease": 1790119726.622512,
+        "spec_review_at_done": 1790118826.629194
+      }
+    },
+    {
+      "ts": 1790119001.002608,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/skill_learning.py",
+          "issue": "confidence = successes/support capped by min(1, support/10) means confidence can never reach the 0.6 acceptance threshold unless support >= 6, even for a pattern with 100% success. That contradicts the stated default min_support=3 (and the CLI's --min-support 3 default): a perfectly consistent pattern with support=3,4,5 is mathematically refused regardless of success rate, so the 'qualifies at >=min_support with >=80% success' rule and the 0.6 confidence cutoff are inconsistent with each other.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/skill_discovery.py",
+          "issue": "_store() dedups by iterating every existing record and reading r['provenance_info']['source_repo']/['source_path'] (lines ~200-201). Learned proposals are specified to carry a different provenance_info shape ({source_tasks, successes, failures, procedure_signature, confidence, synthesised_at}) with no source_repo/source_path keys. If propose() reuses _store (as the P2/discovered.json/quarantine wording implies) this will KeyError against every pre-existing external/repository record already in discovered.json the moment a learned candidate is stored, or vice versa. The spec does not say whether propose() extends _store with a learned branch or writes an independent path, and scope excludes skill_scorecard.py even though outcome/acceptance attribution for arbitrary specs (not just skills_used runs) likely needs that lineage logic.",
+          "severity": "high",
+          "line": 200
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "`orchestrator skills show <id>` already exists (sksub.add_parser('show') at line 188, handled at line 280) as a generic registry-record dump. Item 4 of the spec asks to add 'orchestrator skills show <id>' again for rendering the learned draft with its evidence block \u2014 argparse will raise on a duplicate subparser name if implemented literally as a new parser, and the spec never states whether this is meant to reuse the existing generic show (relying on provenance_info already being dumped) or needs distinct output.",
+          "severity": "med",
+          "line": 188
+        }
+      ]
+    },
+    {
+      "ts": 1790119034.859574,
+      "pipeline": {
+        "first_ready_at": 1790118826.557012,
+        "spec_review_at": 1790118826.622512,
+        "spec_review_at_lease": 1790119726.622512,
+        "spec_review_at_done": 1790118826.629194,
+        "spec_review_held_at": 1790119034.859524
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790119036.308195,
+      "pipeline": {
+        "first_ready_at": 1790118826.557012,
+        "spec_review_at": 1790118826.622512,
+        "spec_review_at_lease": 1790119726.622512,
+        "spec_review_at_done": 1790118826.629194,
+        "spec_review_held_at": 1790119034.859524,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790119036.699279,
+      "pipeline": {
+        "first_ready_at": 1790118826.557012,
+        "spec_review_at": 1790118826.622512,
+        "spec_review_at_lease": 1790119726.622512,
+        "spec_review_at_done": 1790118826.629194,
+        "spec_review_held_at": 1790119034.859524,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790119034.859574": true
+        }
+      }
+    },
+    {
+      "ts": 1790119045.238558,
+      "status": "failed",
+      "reason": "superseded 08:30 by T-0951 (spec v2 after T-0949: confidence formula, dedicated learned store path, reuse skills show)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790118826.557012,
+    "spec_review_at": 1790118826.622512,
+    "spec_review_at_lease": 1790119726.622512,
+    "spec_review_at_done": 1790118826.629194,
+    "spec_review_held_at": 1790119034.859524,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790119034.859574": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/skill_learning.py",
+      "issue": "confidence = successes/support capped by min(1, support/10) means confidence can never reach the 0.6 acceptance threshold unless support >= 6, even for a pattern with 100% success. That contradicts the stated default min_support=3 (and the CLI's --min-support 3 default): a perfectly consistent pattern with support=3,4,5 is mathematically refused regardless of success rate, so the 'qualifies at >=min_support with >=80% success' rule and the 0.6 confidence cutoff are inconsistent with each other.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/skill_discovery.py",
+      "issue": "_store() dedups by iterating every existing record and reading r['provenance_info']['source_repo']/['source_path'] (lines ~200-201). Learned proposals are specified to carry a different provenance_info shape ({source_tasks, successes, failures, procedure_signature, confidence, synthesised_at}) with no source_repo/source_path keys. If propose() reuses _store (as the P2/discovered.json/quarantine wording implies) this will KeyError against every pre-existing external/repository record already in discovered.json the moment a learned candidate is stored, or vice versa. The spec does not say whether propose() extends _store with a learned branch or writes an independent path, and scope excludes skill_scorecard.py even though outcome/acceptance attribution for arbitrary specs (not just skills_used runs) likely needs that lineage logic.",
+      "severity": "high",
+      "line": 200
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "`orchestrator skills show <id>` already exists (sksub.add_parser('show') at line 188, handled at line 280) as a generic registry-record dump. Item 4 of the spec asks to add 'orchestrator skills show <id>' again for rendering the learned draft with its evidence block \u2014 argparse will raise on a duplicate subparser name if implemented literally as a new parser, and the spec never states whether this is meant to reuse the existing generic show (relying on provenance_info already being dumped) or needs distinct output.",
+      "severity": "med",
+      "line": 188
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 08:30 by T-0951 (spec v2 after T-0949: confidence formula, dedicated learned store path, reuse skills show)"
+}

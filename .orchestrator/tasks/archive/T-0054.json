@@ -1,0 +1,109 @@
+{
+  "id": "T-0054",
+  "parent": "T-0043",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "Review C-C (T-0050) with security checklist: daemon autonomous dispatch, gate, review, merge; bus lock",
+  "spec": "Adversarial review of the commit(s) on task/T-0050 (your worktree is based on that branch; verify `grep -n \"def tick\" orchestrator/daemon.py` and `grep -n locked orchestrator/bus.py` first). Apply skills/review/adversarial-review/references/security-checklist.md: this code dispatches executors, runs the test gate and merges without a human in the loop. Focus: (1) idempotency: every stage guarded by a pipeline stamp written under the lock; two ticks in a row never double-dispatch, double-review or double-merge; (2) dispatch conditions: unmet depends_on never dispatched; complexity \u22655 waits for spec_review_verdict approve; a spec_review task is created exactly once; (3) gate red or review request_changes \u2192 task held with hold_reason, notify called, nothing merged; (4) merge only via merge.merge (serial lock) into goal/<parent>, never main; (5) the flock: no deadlock between bus.locked() and merge.lock; lock released on exceptions; (6) the daemon never kills or re-spawns a task whose pid is alive; tick work bounded; (7) tests monkeypatch executor.start/spawn.run_worker/merge.merge/subprocess.run and cover all five scenarios; (8) anything the daemon reads from task json that originated in worker output (verdicts, summaries) is treated as data, never as a command or path. Run `uv run python -m unittest discover -q tests` and report the result line. Return ONLY {\"verdict\":\"approve|request_changes\",\"comments\":[...]} under 3,000 chars.",
+  "inputs": [
+    "T-0050"
+  ],
+  "acceptance": [
+    "verdict with line-anchored comments; security checklist items cited",
+    "idempotency and dispatch conditions checked with concrete inputs",
+    "test result line reported; result under 3,000 chars"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/cli.py",
+    "tests/test_daemon.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0054",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 64,
+        "issue": "dispatch() calls executor.start(t['id'], prompt) inline instead of via spawn_async() (as this same file already does for spec_review/review at lines 73,95). executor.start -> _run does a blocking subprocess.run with a timeout up to 900-1800s. Since this call sits inside the 'for t in bus.read(...)' loop, tick() blocks for the full duration of the first dispatched execute task before it can dispatch a second one, or even reach gate()/merge_reviewed()/the cooldown notifications later in the same tick(). free_slots() (lines 40-44) computes an N-slot budget implying N concurrent dispatches per tick, but the loop can in practice only ever start 1 before stalling. Concurrency checklist item 9. Tests never catch this because executor.start is monkeypatched to a synchronous no-op lambda, so the blocking behavior is never exercised.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 88,
+        "issue": "gate() stamps 'gated_at' before the merge/review side effect (line 91: merge.merge, or 93: bus.create_task) runs, and neither this function nor tick()/main() (lines 129-154) catch exceptions. merge.merge() calls spawn.git(...,check=True) which raises RuntimeError on git failure, and subprocess.run with a cwd that no longer exists (e.g. the worktree was removed between 'done' and gate() running) raises FileNotFoundError outright. Either propagates uncaught through gate->tick->main, killing the whole daemon process, not just this task. On restart, gate() re-reads this task, sees pipeline.gated_at already set and merged_into never set, and permanently skips it (line 80) -- silently orphaned, no notify(). Same stamp-before-action ordering at lines 61-64 (dispatched_at before executor.start) and 122-123 (merged_at before merge.merge). Idempotency/error-handling checklist items 8-9.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 102,
+        "issue": "notify() (pre-existing, unchanged) builds an AppleScript literal via f-string interpolation into 'osascript -e'; this diff newly feeds it git-derived text via report_merge()'s r.get('reason','') (merge.py's ff.stderr) and task titles. A quote or 'do shell script' sequence in that text breaks out of the literal and runs arbitrary local commands. Not introduced by this diff, but it's what wires automated, unreviewed merge output into that sink. Checklist injection line.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789673270.279796,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0054",
+      "claimed_at": 1789673270.279697
+    },
+    {
+      "ts": 1789673270.308254,
+      "pid": 13619,
+      "account": "A"
+    },
+    {
+      "ts": 1789673520.990499,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 64,
+            "issue": "dispatch() calls executor.start(t['id'], prompt) inline instead of via spawn_async() (as this same file already does for spec_review/review at lines 73,95). executor.start -> _run does a blocking subprocess.run with a timeout up to 900-1800s. Since this call sits inside the 'for t in bus.read(...)' loop, tick() blocks for the full duration of the first dispatched execute task before it can dispatch a second one, or even reach gate()/merge_reviewed()/the cooldown notifications later in the same tick(). free_slots() (lines 40-44) computes an N-slot budget implying N concurrent dispatches per tick, but the loop can in practice only ever start 1 before stalling. Concurrency checklist item 9. Tests never catch this because executor.start is monkeypatched to a synchronous no-op lambda, so the blocking behavior is never exercised.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 88,
+            "issue": "gate() stamps 'gated_at' before the merge/review side effect (line 91: merge.merge, or 93: bus.create_task) runs, and neither this function nor tick()/main() (lines 129-154) catch exceptions. merge.merge() calls spawn.git(...,check=True) which raises RuntimeError on git failure, and subprocess.run with a cwd that no longer exists (e.g. the worktree was removed between 'done' and gate() running) raises FileNotFoundError outright. Either propagates uncaught through gate->tick->main, killing the whole daemon process, not just this task. On restart, gate() re-reads this task, sees pipeline.gated_at already set and merged_into never set, and permanently skips it (line 80) -- silently orphaned, no notify(). Same stamp-before-action ordering at lines 61-64 (dispatched_at before executor.start) and 122-123 (merged_at before merge.merge). Idempotency/error-handling checklist items 8-9.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 102,
+            "issue": "notify() (pre-existing, unchanged) builds an AppleScript literal via f-string interpolation into 'osascript -e'; this diff newly feeds it git-derived text via report_merge()'s r.get('reason','') (merge.py's ff.stderr) and task titles. A quote or 'do shell script' sequence in that text breaks out of the literal and runs arbitrary local commands. Not introduced by this diff, but it's what wires automated, unreviewed merge output into that sink. Checklist injection line.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789673270.279697,
+  "pid": 13619,
+  "account": "A"
+}

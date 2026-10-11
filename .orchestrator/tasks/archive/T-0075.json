@@ -1,0 +1,315 @@
+{
+  "id": "T-0075",
+  "parent": "T-0073",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C2: orchestrator portability \u2014 everything that assumes macOS, this laptop, a TTY or the `f` tool, and what a headless Linux host needs to run Planner-less goals",
+  "spec": "Read-only scout over /Users/k3ntaw/code/orchestrator (main checkout is on goal/T-0065). Read orchestrator/*.py (spawn.py run_claude and secrets_for_role, executor.py _run, daemon.py notify, pool.py, bus.py state branch mirroring, install.py), .claude/hooks/*.sh (planner-mode.sh temp paths, guardrails.sh, _lib.sh, tests-green.sh), .orchestrator/pool.toml ([secrets.*] commands sourcing f.sh, config_dir paths, codex home), README.md, pyproject.toml. Report: (1) every macOS- or laptop-specific assumption with path:line: osascript/notify, /private/tmp and /var/folders, ~/.claude-a and ~/.claude-b config dirs, ~/.codex, `f tok get` secret commands, uv on PATH, gh CLI, git identity; (2) what a headless Linux host must have installed (claude CLI version pinned in README, codex CLI, uv, node, gh, git) and how each is authenticated non-interactively: read the claude CLI's own help for setup-token or CLAUDE_CODE_OAUTH_TOKEN (run `claude --help` and `claude setup-token --help`; do not run setup-token itself) and codex's for `codex login --with-api-key` or device flow; (3) whether the Planner role is required to run a goal at all, or whether bus_create_task + daemon + spawn can be driven by a script given a plan (i.e. what a start_goal(repo, goal) entry point would call, citing daemon.tick, spawn.run_worker, bus.create_task); (4) how state is kept per target repo (ORCH_ROOT, .orchestrator/, wt/) and what a multi-repo host needs. Cite path:line, one confidence per finding. Do not edit anything.",
+  "inputs": [],
+  "acceptance": [
+    "Result lists every host assumption with path:line",
+    "Result names the non-interactive auth path for claude and codex CLIs with the command help it read",
+    "Result states what a start_goal entry point would call today and what is missing"
+  ],
+  "scope": [
+    "/Users/k3ntaw/code/orchestrator/**"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0075",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "notify() shells out to macOS osascript for desktop notifications; gated by sys.platform==\"darwin\" so it silently no-ops on Linux (both-accounts-cooling and budget alerts never reach a human on a headless host).",
+        "evidence": [
+          "orchestrator/daemon.py:16",
+          "orchestrator/daemon.py:18",
+          "orchestrator/daemon.py:21-23"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "guardrails.sh's recursive-rm allowlist and planner-mode.sh's allowed_path both hardcode macOS-only temp dirs (/private/tmp, /private/var/folders, /var/folders) alongside /tmp; a Linux host's mktemp under /tmp still passes but the macOS-specific branches are dead weight, and any Linux TMPDIR outside /tmp is only covered via the ${TMPDIR} fallback, which is unset by default.",
+        "evidence": [
+          ".claude/hooks/guardrails.sh:36",
+          ".claude/hooks/planner-mode.sh:17",
+          ".claude/hooks/planner-mode.sh:19",
+          ".claude/hooks/planner-mode.sh:40"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "guardrails.sh's recursive-rm check anchors the only non-tmp allowed target at canon(~/code) \u2014 a personal laptop convention for where repos live, not derived from ORCH_ROOT or any config.",
+        "evidence": [
+          ".claude/hooks/guardrails.sh:36",
+          ".claude/hooks/guardrails.sh:40-42"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Secrets for scout/review roles are fetched by sourcing a personal shell tool (~/.config/f/f.sh) and calling `f tok get <name> --reveal`; f is not part of this repo and protected-paths.txt lists ~/.config/f right next to ~/Library/Keychains, and guardrails.sh separately blocks macOS `security` (Keychain) subcommands \u2014 together implying the secrets backend is macOS Keychain via a laptop-only CLI with no documented Linux equivalent.",
+        "evidence": [
+          ".orchestrator/pool.toml:142-146",
+          "orchestrator/spawn.py:78-85",
+          ".orchestrator/protected-paths.txt:10-11",
+          ".claude/hooks/guardrails.sh:25"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Phase 0 setup requires an interactive TTY: `CLAUDE_CONFIG_DIR=~/.claude-a claude` then the interactive `/login` slash command for each of two accounts, plus interactive `codex login`; none of this is scriptable as written.",
+        "evidence": [
+          "README.md:16-19"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "`f orch [goal]` is documented as the way to launch the Planner but `f` is an external launcher not present in this repo (found only referenced in README/CLAUDE.md/hooks, never defined here) \u2014 a Linux host needs that launcher reproduced or replaced by a direct `claude -p` invocation.",
+        "evidence": [
+          "README.md:26",
+          "CLAUDE.md (wt/T-0075) header comment",
+          "orchestrator/spawn.py:99-113"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "The only container definition in the repo (.devcontainer) is scoped to sandboxing the Codex *executor*, not the Planner/daemon process, and is currently unused because pool.toml sets dangerous_full_access=true (codex runs with sandbox/approvals bypassed on the host directly).",
+        "evidence": [
+          ".devcontainer/devcontainer.json:1-9",
+          ".orchestrator/pool.toml:29",
+          "orchestrator/executor.py:49-51"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "CLAUDE_CONFIG_DIR itself is not OS-specific and works fine headless once accounts are pre-authenticated; the actual portability gap is in how each account gets authenticated (see next finding), not the env var mechanism.",
+        "evidence": [
+          "orchestrator/spawn.py:105",
+          "README.md:104"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Non-interactive claude auth path: `claude setup-token` produces a long-lived token (its own --help: \"Set up a long-lived authentication token (requires Claude subscription)\") meant to back CLAUDE_CODE_OAUTH_TOKEN; separately, `--bare` mode's help states Anthropic auth in that mode is strictly ANTHROPIC_API_KEY or apiKeyHelper (OAuth/keychain never read) \u2014 either path avoids the interactive /login used in README Phase 0. Not run here per task instructions, only its help text was inspected.",
+        "evidence": [
+          "cli:claude setup-token --help",
+          "cli:claude --help (--bare section)",
+          "README.md:16-17"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Is `f` (the ~/.config/f/f.sh launcher and `f tok get` secret command) documented anywhere with a portable/Linux equivalent, or is it purely a personal macOS Keychain wrapper?",
+      "Does the Planner's own PR-opening step (CLAUDE.md step 8, `gh pr create`) have any non-interactive gh auth setup expected on a fresh host, or was that always assumed pre-authenticated?",
+      "Is there a target git identity (user.name/user.email) meant to be set per-account config_dir, or globally on the host, for commits made by execute-role Claude/Codex workers?"
+    ],
+    "suggested_next": [
+      "Have a scout trace how `f orch` resolves (search ~/dotfiles or shell rc files referenced by CLAUDE.md) to confirm whether it's reproducible without the personal `f` tool.",
+      "Spec a `start_goal(repo, goal)` entry point that: registers ORCH_ROOT per repo (no shared process-global), runs install.py if unscaffolded, and either calls the Planner headlessly via `claude -p --agents ...` with the orchestrate skill, or accepts pre-synthesized specs and drives bus.create_task + daemon.tick directly for complexity<=3 (Claude-free) goals.",
+      "Replace notify()'s osascript-only path with a cross-platform hook (webhook/Slack/log line) so headless Linux hosts get the both-accounts-cooling and budget alerts README.md documents."
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 13179,
+      "trimmed": {
+        "findings": 14
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789731866.053078,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0075",
+      "claimed_at": 1789731866.05272
+    },
+    {
+      "ts": 1789731866.090712,
+      "pid": 67830,
+      "account": "A"
+    },
+    {
+      "ts": 1789732023.035187,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "notify() shells out to macOS osascript for desktop notifications; gated by sys.platform==\"darwin\" so it silently no-ops on Linux (both-accounts-cooling and budget alerts never reach a human on a headless host).",
+            "evidence": [
+              "orchestrator/daemon.py:16",
+              "orchestrator/daemon.py:18",
+              "orchestrator/daemon.py:21-23"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "guardrails.sh's recursive-rm allowlist and planner-mode.sh's allowed_path both hardcode macOS-only temp dirs (/private/tmp, /private/var/folders, /var/folders) alongside /tmp; a Linux host's mktemp under /tmp still passes but the macOS-specific branches are dead weight, and any Linux TMPDIR outside /tmp is only covered via the ${TMPDIR} fallback, which is unset by default.",
+            "evidence": [
+              ".claude/hooks/guardrails.sh:36",
+              ".claude/hooks/planner-mode.sh:17",
+              ".claude/hooks/planner-mode.sh:19",
+              ".claude/hooks/planner-mode.sh:40"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "guardrails.sh's recursive-rm check anchors the only non-tmp allowed target at canon(~/code) \u2014 a personal laptop convention for where repos live, not derived from ORCH_ROOT or any config.",
+            "evidence": [
+              ".claude/hooks/guardrails.sh:36",
+              ".claude/hooks/guardrails.sh:40-42"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Secrets for scout/review roles are fetched by sourcing a personal shell tool (~/.config/f/f.sh) and calling `f tok get <name> --reveal`; f is not part of this repo and protected-paths.txt lists ~/.config/f right next to ~/Library/Keychains, and guardrails.sh separately blocks macOS `security` (Keychain) subcommands \u2014 together implying the secrets backend is macOS Keychain via a laptop-only CLI with no documented Linux equivalent.",
+            "evidence": [
+              ".orchestrator/pool.toml:142-146",
+              "orchestrator/spawn.py:78-85",
+              ".orchestrator/protected-paths.txt:10-11",
+              ".claude/hooks/guardrails.sh:25"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Phase 0 setup requires an interactive TTY: `CLAUDE_CONFIG_DIR=~/.claude-a claude` then the interactive `/login` slash command for each of two accounts, plus interactive `codex login`; none of this is scriptable as written.",
+            "evidence": [
+              "README.md:16-19"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "`f orch [goal]` is documented as the way to launch the Planner but `f` is an external launcher not present in this repo (found only referenced in README/CLAUDE.md/hooks, never defined here) \u2014 a Linux host needs that launcher reproduced or replaced by a direct `claude -p` invocation.",
+            "evidence": [
+              "README.md:26",
+              "CLAUDE.md (wt/T-0075) header comment",
+              "orchestrator/spawn.py:99-113"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "The only container definition in the repo (.devcontainer) is scoped to sandboxing the Codex *executor*, not the Planner/daemon process, and is currently unused because pool.toml sets dangerous_full_access=true (codex runs with sandbox/approvals bypassed on the host directly).",
+            "evidence": [
+              ".devcontainer/devcontainer.json:1-9",
+              ".orchestrator/pool.toml:29",
+              "orchestrator/executor.py:49-51"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "CLAUDE_CONFIG_DIR itself is not OS-specific and works fine headless once accounts are pre-authenticated; the actual portability gap is in how each account gets authenticated (see next finding), not the env var mechanism.",
+            "evidence": [
+              "orchestrator/spawn.py:105",
+              "README.md:104"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Non-interactive claude auth path: `claude setup-token` produces a long-lived token (its own --help: \"Set up a long-lived authentication token (requires Claude subscription)\") meant to back CLAUDE_CODE_OAUTH_TOKEN; separately, `--bare` mode's help states Anthropic auth in that mode is strictly ANTHROPIC_API_KEY or apiKeyHelper (OAuth/keychain never read) \u2014 either path avoids the interactive /login used in README Phase 0. Not run here per task instructions, only its help text was inspected.",
+            "evidence": [
+              "cli:claude setup-token --help",
+              "cli:claude --help (--bare section)",
+              "README.md:16-17"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Is `f` (the ~/.config/f/f.sh launcher and `f tok get` secret command) documented anywhere with a portable/Linux equivalent, or is it purely a personal macOS Keychain wrapper?",
+          "Does the Planner's own PR-opening step (CLAUDE.md step 8, `gh pr create`) have any non-interactive gh auth setup expected on a fresh host, or was that always assumed pre-authenticated?",
+          "Is there a target git identity (user.name/user.email) meant to be set per-account config_dir, or globally on the host, for commits made by execute-role Claude/Codex workers?"
+        ],
+        "suggested_next": [
+          "Have a scout trace how `f orch` resolves (search ~/dotfiles or shell rc files referenced by CLAUDE.md) to confirm whether it's reproducible without the personal `f` tool.",
+          "Spec a `start_goal(repo, goal)` entry point that: registers ORCH_ROOT per repo (no shared process-global), runs install.py if unscaffolded, and either calls the Planner headlessly via `claude -p --agents ...` with the orchestrate skill, or accepts pre-synthesized specs and drives bus.create_task + daemon.tick directly for complexity<=3 (Claude-free) goals.",
+          "Replace notify()'s osascript-only path with a cross-platform hook (webhook/Slack/log line) so headless Linux hosts get the both-accounts-cooling and budget alerts README.md documents."
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 13179,
+          "trimmed": {
+            "findings": 14
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789731866.05272,
+  "pid": 67830,
+  "account": "A"
+}

@@ -1,0 +1,52 @@
+{
+  "id": "T-1715",
+  "created_at": 1791392647.242955,
+  "parent": "T-1705",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "daemon ticks take minutes and block the bus: time each stage, find the long holder, keep lock/transaction sections short",
+  "spec": "Evidence 2026-10-07 (all three repos):\n- After a restart the orchestrator daemon (pid 18845) printed nothing for 7+ min at ~23% CPU while holding\n  .orchestrator/bus.lock (lsof); queued eligible tasks (daemon.eligible returned them) were not dispatched for ~10 min.\n- At 18:56 the Deskmere and AI Apprentice daemons (restarted by the watchdog at 18:15) ran at ~20% CPU in state R for\n  41 min; AI Apprentice's last run row was 17:18 with tasks T-0352/T-0363 ready; Deskmere's T-0610..T-0614 (depends_on\n  empty) were never dispatched.\n- A standalone `bus.read()` in ai-apprentice (363 rows) took 331 s while that daemon ran; decision_points() took 0.5 s.\n- Before that, Planner bus writes (bus.update) in luna-inbox blocked > 120 s.\n- T-1710's summary: tick() renders packets synchronously (git subprocesses, memory recall, TOML parsing), 0.7-1.2 s per\n  dispatch even in tests.\npy-spy needs root on macOS, so the cause is not yet located.\n\nDo:\n1. Instrument orchestrator/daemon.py tick(): measure every stage (tally_planner, sweep_leases, the running-task reconcile\n   loop, worker_registry.reconcile, memory_hot.build, dispatch, steering_tick, gate, merge_reviewed, auto_fix_round,\n   planner_runs, ship_tick) and print one line `[daemon] slow stage <name> <seconds>s` for any stage over 5 s, plus a\n   per-tick total when over 30 s. Also time bus.locked() hold durations and SQLite transaction spans in orchestrator/bus.py\n   and log any hold over 5 s with the caller (function name).\n2. Reproduce on a copy: copy /Users/k3ntaw/code/ai-apprentice/.orchestrator (read only source; copy into a temp dir) and\n   run one tick against the copy with ORCH_ROOT pointing there and spawning stubbed out; report the slow stages.\n3. Fix the cause so (a) no bus lock or SQLite write transaction is held across subprocess calls, git commands, network or\n   model calls, or packet rendering, and (b) one tick on the ai-apprentice copy finishes in under 30 s. Name the cause in\n   the commit message.\nTests (tests/test_daemon.py, tests/test_bus.py): test_slow_stage_is_logged, test_bus_lock_not_held_across_subprocess\n(a stage that runs a subprocess does so outside bus.locked()), test_read_does_not_wait_for_long_writer (a reader returns\nwithin 2 s while another connection holds a write transaction open, i.e. WAL or no long transactions).\nRun: PYTHONPATH=tests uv run python -m unittest tests.test_daemon tests.test_bus. Commit on the task branch.",
+  "inputs": [],
+  "acceptance": [
+    "slow stages and long bus holds are logged with names",
+    "the cause is named in the commit message",
+    "one tick on the ai-apprentice copy finishes in under 30 s",
+    "the three named tests pass",
+    "tests.test_daemon and tests.test_bus pass"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_bus.py"
+  ],
+  "depends_on": [
+    "T-1709"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 5400,
+    "task_class": "debugging",
+    "route": "full",
+    "read_scope": [
+      "/Users/k3ntaw/code/ai-apprentice/.orchestrator/**"
+    ]
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791439088.402248,
+      "status": "superseded",
+      "hold_reason": "refiled as T-1726 with the measured cause (per-row flock, in-loop bus.read)"
+    }
+  ],
+  "hold_reason": "refiled as T-1726 with the measured cause (per-row flock, in-loop bus.read)"
+}

@@ -1,0 +1,125 @@
+{
+  "id": "T-0264",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "G1a: every run row carries goal_id and normalised token buckets (uncached input, cache read, cache write, output, reasoning) through one bus.normalize_usage(); Jev usage rows carry task and goal ids",
+  "spec": "Scout T-0261 (goal/T-0260): bus.log_run appends any fields (bus.py about line 206); spawn.py logs usd, turns, input/output/cache_read/cache_creation tokens for Claude runs (about line 171); executor.py Codex rows carry input_tokens, output_tokens and cached_input_tokens mapped to cache_read_input_tokens, never usd and never reasoning (executor._tokens about line 65 and its three log_run calls); jev._log_usage rows (runs/jev/<date>.jsonl) carry caller, input_tokens, model, latency_ms, ok, votes but no task or goal id (jev.py about line 151). Nothing in the repo mentions reasoning tokens.\nChange:\n1. bus.normalize_usage(provider, usage) -> dict with keys input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens. Claude usage: input_tokens is uncached input, cache_read_input_tokens and cache_creation_input_tokens map to the cache buckets, output_tokens to output, reasoning 0 unless a reasoning field exists. Codex --json usage: input_tokens includes cached_input_tokens, so input_uncached = input_tokens - cached_input_tokens, cache_read = cached_input_tokens, cache_write 0, output = output_tokens, reasoning = reasoning_output_tokens if present (kept as its own bucket, not added again to output; document the assumption that Codex folds reasoning into output_tokens and record reasoning_output_tokens only as an informational bucket that total_tokens excludes). total_tokens = input_uncached + cache_read + cache_write + output.\n2. bus.log_run: when a task id is given, add goal_id = the task's parent (or the task id itself for a goal task) and provider; call sites in spawn.py and executor.py pass the raw usage through normalize_usage and log the normalised keys next to the raw ones (raw keys stay for old readers).\n3. jev._log_usage: add task (ORCH_TASK_ID or the caller-supplied task id) and goal_id (parent lookup via bus, fail-open when the bus is unavailable) to every usage row; jev_gate and jev_rank pass the task id they already know.\n4. Tests in tests/test_bus.py: test_normalize_usage_claude, test_normalize_usage_codex (cached subtracted, reasoning separate), test_log_run_adds_goal_id; tests/test_jev.py: test_usage_row_has_task_and_goal. Keep every existing test green.",
+  "inputs": [
+    "T-0261"
+  ],
+  "acceptance": [
+    "tests/test_bus.py::test_normalize_usage_claude, ::test_normalize_usage_codex, ::test_log_run_adds_goal_id pass",
+    "tests/test_jev.py::test_usage_row_has_task_and_goal passes",
+    "a Claude run row and a Codex run row written through spawn.py and executor.py both contain goal_id, provider and the six normalised token keys (proven by tests with monkeypatched subprocess output)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/jev.py",
+    "tests/test_bus.py",
+    "tests/test_jev.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0264",
+  "codex_thread": "01a0bb0e-d492-7503-843b-34911b8d1eaf",
+  "result": {
+    "summary": "Codex (sol) committed 4945f86 in wt/T-0264: bus.normalize_usage(provider, usage) with the six token buckets (Codex cached input subtracted from input, reasoning kept separate and excluded from total); bus.log_run adds goal_id and provider; spawn.py and executor.py pass usage through the normaliser; jev._log_usage rows carry task and goal_id. Tests added in tests/test_bus.py and tests/test_jev.py. tests-green.sh wt/T-0264 exited 0 (Planner, 21:33). Note: the call-site proof is by the three-line changes in spawn.py and executor.py plus the normaliser tests, not by a subprocess-mocked integration test (acceptance 3 partially met). Posted by hand.",
+    "executed_by": "codex:sol",
+    "sha": "4945f86",
+    "confidence": 0.85,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789844705.17093,
+      "pipeline": {
+        "dispatched_at": 1789844705.17088
+      }
+    },
+    {
+      "ts": 1789844706.2290401,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0264",
+      "claimed_at": 1789844706.22877
+    },
+    {
+      "ts": 1789844706.2302341,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789844909.0970519,
+      "codex_thread": "01a0bb0e-d492-7503-843b-34911b8d1eaf"
+    },
+    {
+      "ts": 1789845060.480416,
+      "status": "done",
+      "result": {
+        "summary": "Codex (sol) committed 4945f86 in wt/T-0264: bus.normalize_usage(provider, usage) with the six token buckets (Codex cached input subtracted from input, reasoning kept separate and excluded from total); bus.log_run adds goal_id and provider; spawn.py and executor.py pass usage through the normaliser; jev._log_usage rows carry task and goal_id. Tests added in tests/test_bus.py and tests/test_jev.py. tests-green.sh wt/T-0264 exited 0 (Planner, 21:33). Note: the call-site proof is by the three-line changes in spawn.py and executor.py plus the normaliser tests, not by a subprocess-mocked integration test (acceptance 3 partially met). Posted by hand.",
+        "executed_by": "codex:sol",
+        "sha": "4945f86",
+        "confidence": 0.85,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789845116.579256,
+      "pipeline": {
+        "dispatched_at": 1789844705.17088,
+        "gated_at": 1789845116.579131,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789845292.7819278,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789845319.617522,
+      "pipeline": {
+        "dispatched_at": 1789844705.17088,
+        "gated_at": 1789845116.579131,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789845319.617453
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0278 (request_changes)"
+    },
+    {
+      "ts": 1789846260.783842,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "fix round T-0283 57d3c51 carries 4945f86",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789844705.17088,
+    "gated_at": 1789845116.579131,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789845319.617453
+  },
+  "claimed_at": 1789844706.22877,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0260",
+  "merged_via": "fix round T-0283 57d3c51 carries 4945f86"
+}

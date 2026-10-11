@@ -1,0 +1,177 @@
+{
+  "id": "T-0657",
+  "created_at": 1789982501.5024462,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: R15b v2: gate/merge/executor integration \u2014 stale.py evidence in the gate, merged_at and changed_files stamped by merge(), gate stamps cleared on fix-round replies, allocation and active Jev routing hooks in executor.start, scout reuse check in spawn_scout",
+  "spec": "v2 after spec review T-0655 (executor.start derives the ready set and priorities itself). Why: merged pure modules need their call sites: daemon.stale_check/_record_stale_check (orchestrator/daemon.py:1050-1097) only knows path signals; merge.merge (orchestrator/merge.py:25-99) stamps no merged_at (merge wait undefined for Planner merges, AP P0 gap) and no changed_files (stale.overlapping_merge floor); executor.post_tool_result with replace_result=True (executor.py:215-247) leaves pipeline.gated_at set so gate() skips a task fixed by codex_reply (Planner had to clear it by hand on T-0570/T-0574 today); executor.start (executor.py:249-300) picks executors without allocation or active Jev adjustment; mcp.spawn_scout (mcp.py:75-77) launches without the scout_evidence reuse check.\nWhat. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in the named file; no pytest fixtures; use the daemon test harness in tests/_harness.py.\n1. Stale: daemon.stale_check(task) delegates to stale.evidence(task, graph_links=stale.load_links(), graph=interference.load_graph(), tasks=bus.read(role='execute')) and returns its dict (today's keys base, goal_head, moved_count, stale_paths, risk remain; signals/risk_reasons/graph added); _record_stale_check writes stale.row(...) with action recorded; _stale_rebase writes rows with action rebased/rebase_conflict; risk 'medium' is treated like 'low' for the stale_rebase decision (only high rebases).\n2. merge.merge: on status merged, bus.update also sets merged_at=time.time() (top-level, mirrored into pipeline.merged_at when absent) and changed_files = git diff --name-only previous_sha..sha (bounded to 500 paths). scorecard.parallelism merge_wait_s must read either location (read stamp helper accepts pipeline or top-level; already does per _stamp \u2014 verify with a test).\n3. executor.post_tool_result(replace_result=True): pop pipeline keys gated_at, gated_at_lease, gated_at_done and hold_reason/resume_hint gate residue, so gate() re-runs on the new head; record pipeline.regated_by='codex_reply'.\n4. executor.start: after scores = scorecard.scores(...), if [jev.routing].mode == active: routing = jev_route.shadow_context(t, pool) and scores = jev_route.active_scores(t, pool, routing['eligible'], routing['classification'], routing['evidence'], scores). Then if [allocation].mode != off: build the ranking inputs from the bus inside executor.start (no daemon import, daemon imports executor): graph = {x['id']: x for x in bus.read(role='execute', compact=False) if not x.get('merged_into') and x.get('status') != 'failed'} plus the task itself; durations = duration.durations_for(list(graph.values())); ready_ids = [x['id'] for x in graph.values() if x['status'] in ('queued', 'running') and bus.ready(x)] with the task id included; priority = critical_path.explain(t['id'], graph, durations); ready_priorities = [critical_path.explain(i, graph, durations)['critical_path_s'] for i in ready_ids]; eligible_ids = [e.id for e in pool.eligible_executors('execute', t['complexity'], t)]; ev = allocation.evidence_for(eligible_ids, scorecard.task_class(t)); baseline = pool.pick_executor('execute', t['complexity'], scores=scores, task=t); choice = allocation.choose(t, eligible_ids, baseline=baseline.id, priority=priority, ready_priorities=ready_priorities, evidence=ev); allocation.record(t['id'], choice); in active mode ex = pool.executors[choice['executor']], in shadow ex stays baseline. Any exception in these hooks -> baseline pick, hook error text stored in the run row (bus.log_run field allocation_error) and dispatch continues.\n5. mcp.spawn_scout(task_id): before _bg, check = scout_evidence.reuse_check(task spec, objective=constraints.objective, head_sha=HEAD); scout_evidence.record_decision(...); when check['sufficient'] and constraints.force is not true, return {'task': id, 'status': 'skipped: reusable evidence', 'hits': check['hits']} and post the task result as done with the hits as findings (provenance repo, summary naming the reused ids); otherwise spawn as today.\nSafety: security review path and reviews_expected untouched; allocation never returns an ineligible executor; all hooks fail open to today's behaviour.",
+  "inputs": [
+    "T-0656"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_returns_extended_evidence_and_only_high_rebases \u2014 stale_check output has signals and risk_reasons; a medium risk never triggers _stale_rebase",
+    "tests/test_merge.py::test_merge_stamps_merged_at_and_changed_files \u2014 a successful merge leaves merged_at and a changed_files list on the task",
+    "tests/test_executor.py::test_reply_result_clears_gate_stamps_for_regating \u2014 post_tool_result with replace_result removes gated_at keys and sets regated_by",
+    "tests/test_executor.py::test_start_uses_allocation_only_in_active_mode_and_fails_open \u2014 with two concurrently ready execute tasks of different critical-path length on the bus, shadow mode keeps the baseline executor and writes an allocation decision row whose candidates carry non_critical_factor for the shorter task; active mode uses the chosen eligible executor for the critical one; a raising allocation.choose falls back to baseline and records allocation_error",
+    "tests/test_executor.py::test_start_applies_active_jev_scores_only_when_mode_active \u2014 with [jev.routing].mode active the scores passed to pick_executor are the adjusted ones; in shadow they are unchanged",
+    "tests/test_mcp.py::test_spawn_scout_skips_when_reusable_evidence_is_sufficient \u2014 sufficient fresh evidence returns skipped with hits and posts the scout result; force true spawns anyway"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py",
+    "tests/test_executor.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0657",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Spec cites daemon.stale_check/_record_stale_check/_stale_rebase at lines 1050-1097; those lines are actually _review_plan and _dirty_scope_paths. The real functions are at 1152 (stale_check), 1174 (_record_stale_check), and 1200 (_stale_rebase). A line-anchored edit or diff review against the stated range would land on the wrong code.",
+        "severity": "med",
+        "line": 1050
+      },
+      {
+        "path": "orchestrator/scout_evidence.py",
+        "issue": "reuse_check() returns hits shaped {id,title,date,layer,age_days,fresh,reason}. The spec says spawn_scout should post the skipped task's result with 'the hits as findings', but every findings consumer (scout_evidence.normalize_findings, used by overlap()/challenge flow/memory recall) requires each item to have finding/source keys and silently drops anything else. Posting hits verbatim under result['findings'] yields a result that looks done with 'reusable evidence' but contributes zero usable findings downstream -- a silent failure that defeats the point of the reuse skip.",
+        "severity": "high",
+        "line": 106
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "scores is only assigned inside the 'else' branch of 'if executor_id in pool.executors: ex = ... else: scores = scorecard.scores(...); ex = pool.pick_executor(...)'. The spec pins the jev_route/allocation hooks to 'after scores = scorecard.scores(...)' but doesn't say they must stay inside that else branch. If an implementer places them after the whole if/else, calling start() with an explicit executor_id (the Claude-fallback continuation path noted in the code's own finally-block comment) will hit a NameError on the undefined scores, or silently double-apply routing to a caller-pinned executor.",
+        "severity": "med",
+        "line": 266
+      }
+    ],
+    "suggested_spec_changes": [
+      "Correct the daemon.py citation to stale_check (1152-1171), _record_stale_check (1174-1197), _stale_rebase (1200-1223) instead of 1050-1097.",
+      "Specify the exact shape spawn_scout must post for a reusable-evidence skip: either map each reuse_check hit into a real finding ({finding, source: f'bus:{hit[\"id\"]}' or similar, confidence, relevance}) before writing result['findings'], or explicitly route the hits into a non-findings field (e.g. result['reused_evidence']) and state that normalize_findings-based consumers are not expected to see them.",
+      "State explicitly that the jev_route.shadow_context/active_scores and allocation.choose hooks in executor.start must be inserted inside the existing 'else' branch (the no-explicit-executor_id path), immediately after scores = scorecard.scores(...), so scores stays defined and a caller-supplied executor_id continues to bypass routing/allocation entirely as it does today."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789982504.326012,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0657",
+      "claimed_at": 1789982504.325563
+    },
+    {
+      "ts": 1789982504.327361,
+      "account": "B"
+    },
+    {
+      "ts": 1789982504.888646,
+      "pid": 94963,
+      "account": "B"
+    },
+    {
+      "ts": 1789982837.799647,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Spec cites daemon.stale_check/_record_stale_check/_stale_rebase at lines 1050-1097; those lines are actually _review_plan and _dirty_scope_paths. The real functions are at 1152 (stale_check), 1174 (_record_stale_check), and 1200 (_stale_rebase). A line-anchored edit or diff review against the stated range would land on the wrong code.",
+            "severity": "med",
+            "line": 1050
+          },
+          {
+            "path": "orchestrator/scout_evidence.py",
+            "issue": "reuse_check() returns hits shaped {id,title,date,layer,age_days,fresh,reason}. The spec says spawn_scout should post the skipped task's result with 'the hits as findings', but every findings consumer (scout_evidence.normalize_findings, used by overlap()/challenge flow/memory recall) requires each item to have finding/source keys and silently drops anything else. Posting hits verbatim under result['findings'] yields a result that looks done with 'reusable evidence' but contributes zero usable findings downstream -- a silent failure that defeats the point of the reuse skip.",
+            "severity": "high",
+            "line": 106
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "scores is only assigned inside the 'else' branch of 'if executor_id in pool.executors: ex = ... else: scores = scorecard.scores(...); ex = pool.pick_executor(...)'. The spec pins the jev_route/allocation hooks to 'after scores = scorecard.scores(...)' but doesn't say they must stay inside that else branch. If an implementer places them after the whole if/else, calling start() with an explicit executor_id (the Claude-fallback continuation path noted in the code's own finally-block comment) will hit a NameError on the undefined scores, or silently double-apply routing to a caller-pinned executor.",
+            "severity": "med",
+            "line": 266
+          }
+        ],
+        "suggested_spec_changes": [
+          "Correct the daemon.py citation to stale_check (1152-1171), _record_stale_check (1174-1197), _stale_rebase (1200-1223) instead of 1050-1097.",
+          "Specify the exact shape spawn_scout must post for a reusable-evidence skip: either map each reuse_check hit into a real finding ({finding, source: f'bus:{hit[\"id\"]}' or similar, confidence, relevance}) before writing result['findings'], or explicitly route the hits into a non-findings field (e.g. result['reused_evidence']) and state that normalize_findings-based consumers are not expected to see them.",
+          "State explicitly that the jev_route.shadow_context/active_scores and allocation.choose hooks in executor.start must be inserted inside the existing 'else' branch (the no-explicit-executor_id path), immediately after scores = scorecard.scores(...), so scores stays defined and a caller-supplied executor_id continues to bypass routing/allocation entirely as it does today."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789982837.80216,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec cites daemon.stale_check/_record_stale_check/_stale_rebase at lines 1050-1097; those lines are actually _review_plan and _dirty_scope_paths. The real functions are at 1152 (stale_check), 1174 (_record_stale_check), and 1200 (_stale_rebase). A line-anchored edit or diff review against the stated range would land on the wrong code.",
+          "severity": "med",
+          "line": 1050
+        },
+        {
+          "path": "orchestrator/scout_evidence.py",
+          "issue": "reuse_check() returns hits shaped {id,title,date,layer,age_days,fresh,reason}. The spec says spawn_scout should post the skipped task's result with 'the hits as findings', but every findings consumer (scout_evidence.normalize_findings, used by overlap()/challenge flow/memory recall) requires each item to have finding/source keys and silently drops anything else. Posting hits verbatim under result['findings'] yields a result that looks done with 'reusable evidence' but contributes zero usable findings downstream -- a silent failure that defeats the point of the reuse skip.",
+          "severity": "high",
+          "line": 106
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "scores is only assigned inside the 'else' branch of 'if executor_id in pool.executors: ex = ... else: scores = scorecard.scores(...); ex = pool.pick_executor(...)'. The spec pins the jev_route/allocation hooks to 'after scores = scorecard.scores(...)' but doesn't say they must stay inside that else branch. If an implementer places them after the whole if/else, calling start() with an explicit executor_id (the Claude-fallback continuation path noted in the code's own finally-block comment) will hit a NameError on the undefined scores, or silently double-apply routing to a caller-pinned executor.",
+          "severity": "med",
+          "line": 266
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789982504.325563,
+  "account": "B",
+  "pid": 94963,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec cites daemon.stale_check/_record_stale_check/_stale_rebase at lines 1050-1097; those lines are actually _review_plan and _dirty_scope_paths. The real functions are at 1152 (stale_check), 1174 (_record_stale_check), and 1200 (_stale_rebase). A line-anchored edit or diff review against the stated range would land on the wrong code.",
+      "severity": "med",
+      "line": 1050
+    },
+    {
+      "path": "orchestrator/scout_evidence.py",
+      "issue": "reuse_check() returns hits shaped {id,title,date,layer,age_days,fresh,reason}. The spec says spawn_scout should post the skipped task's result with 'the hits as findings', but every findings consumer (scout_evidence.normalize_findings, used by overlap()/challenge flow/memory recall) requires each item to have finding/source keys and silently drops anything else. Posting hits verbatim under result['findings'] yields a result that looks done with 'reusable evidence' but contributes zero usable findings downstream -- a silent failure that defeats the point of the reuse skip.",
+      "severity": "high",
+      "line": 106
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "scores is only assigned inside the 'else' branch of 'if executor_id in pool.executors: ex = ... else: scores = scorecard.scores(...); ex = pool.pick_executor(...)'. The spec pins the jev_route/allocation hooks to 'after scores = scorecard.scores(...)' but doesn't say they must stay inside that else branch. If an implementer places them after the whole if/else, calling start() with an explicit executor_id (the Claude-fallback continuation path noted in the code's own finally-block comment) will hit a NameError on the undefined scores, or silently double-apply routing to a caller-pinned executor.",
+      "severity": "med",
+      "line": 266
+    }
+  ]
+}

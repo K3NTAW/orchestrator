@@ -1,0 +1,119 @@
+{
+  "id": "T-0224",
+  "parent": "T-0201",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review: E1 fix round 1 (v2): security_paths cover the MCP surface, prompts and skills; NUL-safe diff; real git tests; empty list fails closed (from review T-0221)",
+  "spec": "Fix round on task/T-0220 (commit d8531a3, which sits on goal/T-0201 head 6358799). STEP 0, before anything else: your worktree was cut from goal/T-0201 and lacks that commit. Run `git reset --hard task/T-0220` in the worktree and confirm `git log --oneline -1` shows d8531a3; then work on top of it. Address the opus review T-0221 on orchestrator/daemon.py, .orchestrator/pool.toml and tests/test_daemon.py:\n1. pool.toml [review] security_paths adds orchestrator/mcp.py, orchestrator/bus_mcp.py, .orchestrator/prompts/**, skills/**, .claude/skills/**, .mcp.worker.json. Keep orchestrator/jev*.py with a comment that E2 (T-0214) adds the files. Mirror the same list in DEFAULT_SECURITY_PATHS.\n2. changed_paths(): run git diff --name-only -z <base>..HEAD and split on NUL so quoted or non-ASCII paths match the globs; still None on any failure.\n3. _review_plan(): under code_review=\"security_paths\" an empty or missing security_paths list fails closed: one review with review_reason 'security_paths_empty' and a one-time notify, never a silent \"none\".\n4. Tests over a real temporary git repo (init, commit on a goal/<parent> branch, cut a task branch, commit): a change under .claude/hooks/ matches; a change to a plain source file does not; a path with a space and an umlaut matches through -z; a non-git worktree returns None; empty security_paths yields reviews_expected 1 with review_reason security_paths_empty. Keep the monkeypatched tests as they are.\nOut of scope: CLAUDE.md / planner.md / README wording (T-0213 E1b does that after this merges). Commit on your task branch when green.",
+  "inputs": [
+    "T-0223"
+  ],
+  "acceptance": [
+    "git log on the task branch contains d8531a3 (E1 v2) below the fix commit",
+    "tests/test_daemon.py::test_changed_paths_real_repo_hook_matches, ::test_changed_paths_real_repo_source_no_match, ::test_changed_paths_quoted_path_matches, ::test_changed_paths_non_git_returns_none, ::test_empty_security_paths_fails_closed pass",
+    "pool.toml security_paths contains orchestrator/mcp.py, orchestrator/bus_mcp.py, .orchestrator/prompts/**, skills/**, .claude/skills/**",
+    "All tests from T-0220 still pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0224",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 151,
+        "issue": "changed_paths() runs `git diff --name-only -z` with git's default rename detection on, and --name-only prints only the NEW path for a rename. Verified in a scratch repo: `git mv .claude/hooks/a.sh moved.sh` yields exactly `moved.sh`. So renaming a guarded file out of a security glob (disabling .claude/hooks/tests-green.sh, moving orchestrator/merge.py) produces a diff matching nothing, _review_plan() returns (0,\"none\") and gate() auto-merges it unreviewed. A plain delete is caught (old path is printed); a rename is not. This defeats the fail-closed intent T-0221 was written for. Fix is one flag: add --no-renames (or -M0) to the diff invocation, and add a rename test alongside test_changed_paths_quoted_path_matches.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 465,
+        "issue": "The `security` flag covers only \"diff_unavailable\" and \"security_paths:*\", so the third fail-closed reason, \"security_paths_empty\", falls through to the code_review==\"always\" branch. Its review is created with tier=review_tier(t) and complexity=t[\"complexity\"] unbumped, so it never gets spawn.py's >=7 security checklist and does not honour security_review_tier \u2014 contrary to _review_plan()'s docstring, which presents all three as the same fail-closed outcome. test_empty_security_paths_fails_closed only asserts len(reviews)==1, so it passes without noticing.",
+        "severity": "low"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 53,
+        "issue": "security_paths enumerates orchestrator modules individually and omits two that are security-relevant: orchestrator/__init__.py (defines ROOT/STATE, i.e. where protected-paths.txt, pool.toml and the bus live) and orchestrator/cli.py (entry point wiring daemon/merge/install/serve). Under the new security_paths default a change to either merges with zero review. Consider `orchestrator/*.py` with explicit exclusions, or add these two.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789814772.5877068,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0224",
+      "claimed_at": 1789814772.587251
+    },
+    {
+      "ts": 1789814772.589838,
+      "account": "A"
+    },
+    {
+      "ts": 1789814772.640594,
+      "pid": 36073,
+      "account": "A"
+    },
+    {
+      "ts": 1789815063.740562,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 151,
+            "issue": "changed_paths() runs `git diff --name-only -z` with git's default rename detection on, and --name-only prints only the NEW path for a rename. Verified in a scratch repo: `git mv .claude/hooks/a.sh moved.sh` yields exactly `moved.sh`. So renaming a guarded file out of a security glob (disabling .claude/hooks/tests-green.sh, moving orchestrator/merge.py) produces a diff matching nothing, _review_plan() returns (0,\"none\") and gate() auto-merges it unreviewed. A plain delete is caught (old path is printed); a rename is not. This defeats the fail-closed intent T-0221 was written for. Fix is one flag: add --no-renames (or -M0) to the diff invocation, and add a rename test alongside test_changed_paths_quoted_path_matches.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 465,
+            "issue": "The `security` flag covers only \"diff_unavailable\" and \"security_paths:*\", so the third fail-closed reason, \"security_paths_empty\", falls through to the code_review==\"always\" branch. Its review is created with tier=review_tier(t) and complexity=t[\"complexity\"] unbumped, so it never gets spawn.py's >=7 security checklist and does not honour security_review_tier \u2014 contrary to _review_plan()'s docstring, which presents all three as the same fail-closed outcome. test_empty_security_paths_fails_closed only asserts len(reviews)==1, so it passes without noticing.",
+            "severity": "low"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 53,
+            "issue": "security_paths enumerates orchestrator modules individually and omits two that are security-relevant: orchestrator/__init__.py (defines ROOT/STATE, i.e. where protected-paths.txt, pool.toml and the bus live) and orchestrator/cli.py (entry point wiring daemon/merge/install/serve). Under the new security_paths default a change to either merges with zero review. Consider `orchestrator/*.py` with explicit exclusions, or add these two.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789815063.744116,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789814772.587251,
+  "account": "A",
+  "pid": 36073,
+  "review_verdict": "request_changes"
+}

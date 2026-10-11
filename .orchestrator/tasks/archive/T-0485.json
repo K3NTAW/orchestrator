@@ -1,0 +1,139 @@
+{
+  "id": "T-0485",
+  "parent": "T-0445",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 2,
+  "title": "P3 fix round 1: the route classification cache stores one entry per content key (not a single global slot) with per-entry TTL and pruning under the lock, so interleaved tasks of different shapes hit their own entries; [jev.routing] moves next to [jev] in pool.toml (review T-0484)",
+  "spec": "Fix round for T-0471 (P3) on task/T-0471 at 5e6e7a5, addressing review T-0484 (two findings). Work only in your own worktree and commit only on your own branch (git branch --show-current must print your task id); never write into another worktree.\n1. orchestrator/jev_route.py cache (around line 36, _cache_paths): .orchestrator/runs/jev/route_cache.json holds a dict keyed by the content key (sha1 over spec, acceptance, scope, complexity, task_class) -> {signals, confidence, saved_at, task}; reads and writes under the existing lock; a lookup hits only its own key when saved_at is within [jev.routing].cache_ttl_s; expired entries are pruned on write; the file is capped at [jev.routing].cache_max_entries (default 500) by dropping the oldest. Concurrent classify() calls for different tasks never evict each other. Test: test_cache_holds_entries_per_key_for_interleaved_tasks (task A miss, task B miss, task A hit, task B hit: exactly two jev.ask calls), test_cache_prunes_expired_and_caps_entries.\n2. .orchestrator/pool.toml: move the [jev.routing] table (with its comments) directly after the [jev] table and before any [secrets.*] table; values unchanged (mode = \"shadow\", cache_ttl_s = 86400) plus cache_max_entries = 500. Test: test_pool_toml_jev_routing_table_follows_jev (parse the file, assert key order or a simple line-index check).\nKeep every T-0471 test and existing tests green; full .claude/hooks/tests-green.sh exit 0; commit in your worktree with the task id including every named test; report sha and failures only.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_route.py::test_cache_holds_entries_per_key_for_interleaved_tasks, test_cache_prunes_expired_and_caps_entries, test_pool_toml_jev_routing_table_follows_jev pass",
+    "route_cache.json is a per-key dict with TTL and a size cap; [jev.routing] sits directly after [jev] in pool.toml with cache_max_entries = 500",
+    "all T-0471 tests and existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree; the commit is on this task's own branch"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_route.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "task_class": "routing",
+    "fix_round_for": "T-0471",
+    "review": "T-0484"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0485",
+  "codex_thread": "01a0c07c-32e4-7c02-a291-ccbc5ff3feae",
+  "result": {
+    "summary": "Summary: Implemented per-key Jev cache with TTL pruning and 500-entry cap; relocated `[jev.routing]`; added all named regression tests. Full hook passed: `tests-green: OK 725 5e6e7a5 117s`.\n\nFiles changed: 3 files, 70 insertions, 16 deletions.\n\nCommit: `416b97f357255d3e3ed82d01bd4acd7fe89ed40e` on `task/T-0485`.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c07c-32e4-7c02-a291-ccbc5ff3feae",
+    "usage": {
+      "input_tokens": 369424,
+      "cached_input_tokens": 336768,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 4270,
+      "reasoning_output_tokens": 915
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789935758.18333,
+      "pipeline": {
+        "dispatched_at": 1789935758.183275
+      }
+    },
+    {
+      "ts": 1789935759.798649,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0485",
+      "claimed_at": 1789935759.7983592
+    },
+    {
+      "ts": 1789935759.8001862,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789935965.061413,
+      "codex_thread": "01a0c07c-32e4-7c02-a291-ccbc5ff3feae"
+    },
+    {
+      "ts": 1789935965.064277,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented per-key Jev cache with TTL pruning and 500-entry cap; relocated `[jev.routing]`; added all named regression tests. Full hook passed: `tests-green: OK 725 5e6e7a5 117s`.\n\nFiles changed: 3 files, 70 insertions, 16 deletions.\n\nCommit: `416b97f357255d3e3ed82d01bd4acd7fe89ed40e` on `task/T-0485`.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c07c-32e4-7c02-a291-ccbc5ff3feae",
+        "usage": {
+          "input_tokens": 369424,
+          "cached_input_tokens": 336768,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 4270,
+          "reasoning_output_tokens": 915
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789936085.648905,
+      "pipeline": {
+        "dispatched_at": 1789935758.183275,
+        "gated_at": 1789936085.6488059,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789936285.5059671,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789936302.8889768,
+      "pipeline": {
+        "dispatched_at": 1789935758.183275,
+        "gated_at": 1789936085.6488059,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789936302.888895
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0486 (request_changes)"
+    },
+    {
+      "ts": 1789936592.9774568,
+      "status": "done",
+      "merged_into": "goal/T-0445",
+      "sha": "416b97f357255d3e3ed82d01bd4acd7fe89ed40e"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789935758.183275,
+    "gated_at": 1789936085.6488059,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789936302.888895
+  },
+  "claimed_at": 1789935759.7983592,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": "review request_changes: T-0486 (request_changes)",
+  "merged_into": "goal/T-0445",
+  "sha": "416b97f357255d3e3ed82d01bd4acd7fe89ed40e"
+}

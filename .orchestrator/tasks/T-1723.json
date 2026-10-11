@@ -1,0 +1,193 @@
+{
+  "id": "T-1723",
+  "created_at": 1791429609.486499,
+  "parent": "T-1705",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "daemon: run gates in the background so a 60-min gate no longer freezes dispatch, reviews and merges",
+  "spec": "Root cause of the 2026-10-07/08 stalls (Planner, 05:20): orchestrator/daemon.py gate() (line 1435) loops over done\nexecute tasks and calls gate.run_gate(...) synchronously (line ~1491) inside tick(). A Deskmere iOS gate runs 40-60 min and an\norchestrator full gate 20-45 min under load, so the whole tick blocks: dispatch, steering, merge_reviewed and planner_runs\ndo not run until the gate returns. Observed: luna T-0618/T-0611/T-0612 eligible (daemon.eligible returned them) but not\ndispatched for 40+ min while the daemon ran T-0616's gate; ai-apprentice idle for hours the same way.\nFix:\n1. gate() starts each gate in a background worker (thread or subprocess via the existing spawn_async pattern) and stamps\n   pipeline.gated_at (lease) immediately; the result is posted when the run ends (same status/hold logic as today:\n   green -> reviews/merge path, red -> gate_red hold, timeout -> gate_timeout hold, infra failure as today).\n2. Concurrency: [gate].max_parallel in pool.toml (default 1, so behaviour is serial but non-blocking); a repo may set 2.\n   Never two gates on the same worktree. A daemon restart reconciles gated_at leases without a live gate (re-gate).\n3. tick() returns within seconds while a gate runs; dispatch and merges keep working.\n4. Keep the bus lock out of the gate run (no bus.locked() or open write transaction across the subprocess).\nTests (tests/test_daemon.py): test_gate_runs_in_background_and_tick_returns, test_gate_result_posted_when_run_ends\n(green, red, timeout), test_gate_max_parallel_respected, test_restart_regates_orphaned_gate_lease.\nRun: PYTHONPATH=tests uv run python -m unittest tests.test_daemon tests.test_gate_timeout. Commit on the task branch.",
+  "inputs": [],
+  "acceptance": [
+    "tick() returns within 5 s while a gate is running",
+    "gate results post as before (green, red, timeout)",
+    "[gate].max_parallel respected, default 1",
+    "orphaned gate leases re-gate after a restart",
+    "the four named tests pass",
+    "tests.test_daemon and tests.test_gate_timeout pass"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gate.py",
+    "tests/test_daemon.py",
+    "tests/test_gate_timeout.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 5400,
+    "task_class": "debugging",
+    "route": "full"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791430696.477002,
+      "pipeline": {
+        "first_ready_at": 1791430696.476901
+      }
+    },
+    {
+      "ts": 1791430698.865607,
+      "pipeline": {
+        "first_ready_at": 1791430696.476901,
+        "spec_review_at": 1791430698.86511,
+        "spec_review_at_lease": 1791431598.86511
+      }
+    },
+    {
+      "ts": 1791430698.918942,
+      "pipeline": {
+        "first_ready_at": 1791430696.476901,
+        "spec_review_at": 1791430698.86511,
+        "spec_review_at_lease": 1791431598.86511,
+        "spec_review_at_done": 1791430698.9186208
+      }
+    },
+    {
+      "ts": 1791430850.387671,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1519,
+          "issue": "Stamping gated_at at gate start collides with how gated_at is used today. It currently means 'gate finished, reviews or merge stamped'. Other code treats it as gated: the dependent 'imminent' check (~887), inflight_claude_dispatches (~510), running-set filtering (~860), merge_pressure.py:95, speculation.py:218/221, duration.py:33 and the scorecards. A running gate would make dependents look gated or merge-ready, and would skew duration and scorecard data. The spec gives no way to tell a gate in flight from a gate finished.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1807,
+          "issue": "sweep_leases already handles expired gated_at leases, and it reads pipeline['reviews_expected'] unconditionally. A start-time stamp has no reviews_expected, so an expired lease for a live or orphaned gate raises KeyError. If it were fixed to re-gate instead, it would also have to check for a live gate worker. A live gate often outlives the 900 s STAGE_LEASE_S, since gates run 20-60 min. The sweep would then take the already_merged, merge or _open_reviews path, or re-gate in parallel, while the first gate is still running. The spec says leases are 'reconciled' but does not name this branch, and sweep_leases is not mentioned at all.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1557,
+          "issue": "stamp() returns False when the stage is already set, and the current tail of gate() relies on stamp(gated_at, ...) at completion (held, red, timeout, green). If start-time stamping uses the same key, every completion stamp fails and results are silently dropped. The spec needs a separate in-flight marker (for example pipeline.gate_started_at plus lease), or clear_stage followed by stamp, and a rule for which one marks completion. The 'results post as before' criterion cannot be met otherwise.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/gate.py",
+          "line": 0,
+          "issue": "No code path is named for tracking live gates. The spec does not say how gate() knows which gates are running (in-process registry or bus fields), how 'never two gates on the same worktree' is enforced, or how max_parallel is counted when the daemon restarts. An in-memory set that is never cleared when a worker raises would leak a slot and stop gating for good. The worker needs try/finally release, and it needs to hold_failed on exceptions, as the current inline code does (hold_failed 'gated_error').",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1521,
+          "issue": "The pre-gate work (gate_attempts increment, dirty check, already_merged git call, acceptance.missing_tests) and the whole post-gate tail (merged_into check, _hold_stale_high, _record_stale_check, _stale_rebase, report_merge/merge.merge, _open_reviews) are slow or git-heavy. The spec does not say which side of the thread boundary they run on. If the whole body goes into the worker, merge.merge and rebase run concurrently with tick()'s merge_reviewed and dispatch, with no serialization against them. Keep gate subprocess in the thread and post results from a tick-side reaper, or state clearly that the tail runs under bus.locked/merge serialization. Also, gate_attempts is bumped on each tick, so a task skipped for max_parallel would inflate it.",
+          "severity": "med"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "issue": "Acceptance 'tick() returns within 5 s' is a wall-clock bound, a pattern already flaky in this repo (T-1710 replaced it with an event-based check). The test should block run_gate on a threading.Event and assert tick returns while it is blocked, then release it and join. Result-posting tests also need a deterministic join (the thread, or a reaper called by the test) rather than sleeps. The 'timeout' case must cover the double-timeout hold with gate_timeouts accounting, as today.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1608,
+          "issue": "gate.run_gate and gate.settings are patched onto the gate function object, and existing tests patch daemon.gate.run_gate. Any restructuring (a worker function, a new registry) must keep that seam and its call signature, or tests in test_daemon and test_gate_timeout will break with no clear cause. test_gate_timeout is in scope but the spec gives no reason for touching it.",
+          "severity": "low"
+        },
+        {
+          "path": "pool.toml",
+          "line": 0,
+          "issue": "[gate].max_parallel is a new config key, but pool.toml is not in scope, and gate.settings() in gate.py is said to own the [gate] defaults. The spec should say that the default lives in code (gate.settings) and that no pool.toml edit is required. It also needs a bound check (>=1, int), since 0 or a bad value would silently stop all gating. There is no rollback story, such as a way to restore serial in-line behaviour.",
+          "severity": "low"
+        }
+      ]
+    },
+    {
+      "ts": 1791437032.033431,
+      "pipeline": {
+        "first_ready_at": 1791430696.476901,
+        "spec_review_at": 1791430698.86511,
+        "spec_review_at_lease": 1791431598.86511,
+        "spec_review_at_done": 1791430698.9186208,
+        "spec_review_held_at": 1791437032.031827
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1791437078.5156171,
+      "status": "superseded",
+      "hold_reason": "respec as T-1725 after spec review T-1724"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791430696.476901,
+    "spec_review_at": 1791430698.86511,
+    "spec_review_at_lease": 1791431598.86511,
+    "spec_review_at_done": 1791430698.9186208,
+    "spec_review_held_at": 1791437032.031827
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1519,
+      "issue": "Stamping gated_at at gate start collides with how gated_at is used today. It currently means 'gate finished, reviews or merge stamped'. Other code treats it as gated: the dependent 'imminent' check (~887), inflight_claude_dispatches (~510), running-set filtering (~860), merge_pressure.py:95, speculation.py:218/221, duration.py:33 and the scorecards. A running gate would make dependents look gated or merge-ready, and would skew duration and scorecard data. The spec gives no way to tell a gate in flight from a gate finished.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1807,
+      "issue": "sweep_leases already handles expired gated_at leases, and it reads pipeline['reviews_expected'] unconditionally. A start-time stamp has no reviews_expected, so an expired lease for a live or orphaned gate raises KeyError. If it were fixed to re-gate instead, it would also have to check for a live gate worker. A live gate often outlives the 900 s STAGE_LEASE_S, since gates run 20-60 min. The sweep would then take the already_merged, merge or _open_reviews path, or re-gate in parallel, while the first gate is still running. The spec says leases are 'reconciled' but does not name this branch, and sweep_leases is not mentioned at all.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1557,
+      "issue": "stamp() returns False when the stage is already set, and the current tail of gate() relies on stamp(gated_at, ...) at completion (held, red, timeout, green). If start-time stamping uses the same key, every completion stamp fails and results are silently dropped. The spec needs a separate in-flight marker (for example pipeline.gate_started_at plus lease), or clear_stage followed by stamp, and a rule for which one marks completion. The 'results post as before' criterion cannot be met otherwise.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/gate.py",
+      "line": 0,
+      "issue": "No code path is named for tracking live gates. The spec does not say how gate() knows which gates are running (in-process registry or bus fields), how 'never two gates on the same worktree' is enforced, or how max_parallel is counted when the daemon restarts. An in-memory set that is never cleared when a worker raises would leak a slot and stop gating for good. The worker needs try/finally release, and it needs to hold_failed on exceptions, as the current inline code does (hold_failed 'gated_error').",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1521,
+      "issue": "The pre-gate work (gate_attempts increment, dirty check, already_merged git call, acceptance.missing_tests) and the whole post-gate tail (merged_into check, _hold_stale_high, _record_stale_check, _stale_rebase, report_merge/merge.merge, _open_reviews) are slow or git-heavy. The spec does not say which side of the thread boundary they run on. If the whole body goes into the worker, merge.merge and rebase run concurrently with tick()'s merge_reviewed and dispatch, with no serialization against them. Keep gate subprocess in the thread and post results from a tick-side reaper, or state clearly that the tail runs under bus.locked/merge serialization. Also, gate_attempts is bumped on each tick, so a task skipped for max_parallel would inflate it.",
+      "severity": "med"
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "issue": "Acceptance 'tick() returns within 5 s' is a wall-clock bound, a pattern already flaky in this repo (T-1710 replaced it with an event-based check). The test should block run_gate on a threading.Event and assert tick returns while it is blocked, then release it and join. Result-posting tests also need a deterministic join (the thread, or a reaper called by the test) rather than sleeps. The 'timeout' case must cover the double-timeout hold with gate_timeouts accounting, as today.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1608,
+      "issue": "gate.run_gate and gate.settings are patched onto the gate function object, and existing tests patch daemon.gate.run_gate. Any restructuring (a worker function, a new registry) must keep that seam and its call signature, or tests in test_daemon and test_gate_timeout will break with no clear cause. test_gate_timeout is in scope but the spec gives no reason for touching it.",
+      "severity": "low"
+    },
+    {
+      "path": "pool.toml",
+      "line": 0,
+      "issue": "[gate].max_parallel is a new config key, but pool.toml is not in scope, and gate.settings() in gate.py is said to own the [gate] defaults. The spec should say that the default lives in code (gate.settings) and that no pool.toml edit is required. It also needs a bound check (>=1, int), since 0 or a bad value would silently stop all gating. There is no rollback story, such as a way to restore serial in-line behaviour.",
+      "severity": "low"
+    }
+  ],
+  "hold_reason": "respec as T-1725 after spec review T-1724"
+}

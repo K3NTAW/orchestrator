@@ -1,0 +1,194 @@
+{
+  "id": "T-0163",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "spec review: C-O7a: count the Planner's own usage from its transcripts into the pool, and `orchestrator pick planner` for the launcher",
+  "spec": "Why: the pool only counts tokens from worker JSON output (spawn.py run_claude usage), so the interactive Planner session, the largest consumer, is invisible; measured 2026-09-18: pool credited account A with 613k tokens while the Planner transcript of one session summed to about 7.8M by the same metric (input + output + cache_read/10). The user then hit the subscription limit with no warning and no switch. (1) pool.py: Pool.tally_planner(now=None): for each account, find transcripts under <config_dir>/projects/<encoded ORCH_ROOT>/*.jsonl (the encoding replaces '/' with '-', e.g. -Users-k3ntaw-code-orchestrator; derive it from ROOT, do not hardcode); read only lines of type \"assistant\" whose timestamp falls in the current day and in the current 5-hour window (window_started in pool_state); sum message.usage.input_tokens + output_tokens + cache_read_input_tokens // 10 exactly as run_claude does; store per account planner_day_tokens and planner_window_tokens plus a per-file byte offset in pool_state so each tick reads only appended bytes (files are append-only JSONL; a shrunken file resets its offset). Account.utilization and the daily-budget check include the planner numbers. Malformed lines are skipped, never fatal. (2) daemon.tick(): call pool.tally_planner() at the start of each tick, wrapped like the stages (a failure prints one stderr line). (3) status(): each account shows planner_day_tokens and the window utilization including them; `orchestrator status --plain` prints them too. (4) cli.py: `pick <role>` (role in planner|scout|review|execute) prints the id and config_dir of the account pool.pick(role) returns, or exits 3 with \"hold: no account with headroom\", so the launcher outside this repo can start the Planner on the right account. README.md: one paragraph \"Planner usage is counted from transcripts\" and the `pick planner` line under Run it. Tests: tests/test_pool.py builds a fake config_dir with two JSONL files (assistant lines in and out of the window, a malformed line, a user line), asserts the sums, the offset resume on a second call, the utilization change and the pick result flipping to B when A's planner usage crosses the cap; tests/test_cli.py covers pick output and exit 3.\n(Recreated from T-0107: re-pointed at the recreated C-O4)",
+  "inputs": [
+    "T-0118"
+  ],
+  "acceptance": [
+    "tests/test_pool.py: tally_sums_assistant_usage_in_window, tally_skips_malformed_and_user_lines, tally_resumes_from_offset, tally_raises_utilization_and_flips_pick; tests/test_cli.py: pick_prints_account_and_config_dir, pick_exits_3_when_none; all green",
+    "`orchestrator status --plain` shows planner_day_tokens per account after a tick in a test fixture",
+    "No transcript content other than usage numbers and timestamps is read into memory beyond the current line, and nothing from transcripts is written to the bus or logs",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_pool.py",
+    "tests/test_cli.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0163",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "Spec dictates deriving the transcript project-dir name from ROOT by only replacing '/' with '-'. Claude Code's actual convention also replaces '.' with '-' (visible in ~/.claude*/projects/ as e.g. '-Users-k3ntaw--claude-mem-observer-sessions' for path '/Users/k3ntaw/.claude-mem-observer-sessions'). Since this orchestrator is installed into arbitrary target repos via `orchestrator install /path/to/target`, any ROOT path containing a dot will hash to the wrong directory name and tally_planner will silently read zero lines from a directory that doesn't exist \u2014 exactly the 'no warning, no switch' failure the task exists to fix, just moved one layer down.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "Account.utilization() already resets window_tokens/window_started (and day_tokens/day) when the window/day rolls over. The spec's tally design is explicitly incremental \u2014 read only newly-appended bytes via a per-file byte offset and add their usage to planner_window_tokens/planner_day_tokens \u2014 but never says these two new counters get zeroed on the same rollover. Since old in-window lines are never re-read once the offset has passed them, nothing will ever subtract their contribution back out. Once real, planner_window_tokens is monotonically non-decreasing across window resets, permanently pinning utilization at/above cap (double counting of a kind: previous window's usage bleeds into every future window). Same problem for planner_day_tokens across day rollover. This is the state-that-never-decreases failure mode called out in the review brief.",
+        "severity": "high",
+        "line": 33
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "issue": "`pick <role>` is meant to let an external launcher choose an account before starting the interactive Planner \u2014 the exact gap this task exists to close. The spec only says daemon.tick() calls pool.tally_planner(); it never says the `pick` subcommand does. A standalone `orchestrator pick planner` run (the launcher's use case) will pick against whatever planner_* numbers happen to be sitting in pool_state.json from the last daemon tick \u2014 stale or, on a fresh install/daemon restart, absent \u2014 defeating the purpose for the one caller that matters most.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "Per-file byte offsets in pool_state persist forever once a transcript file is seen, including sessions Claude Code itself later rotates/deletes; nothing in the spec prunes offsets for files that no longer exist, so pool_state.json grows unboundedly over the life of an installation.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Replace the hand-rolled '/'\u2192'-' encoding with the exact algorithm Claude Code uses for its own ~/.claude*/projects/ directory names (both '/' and '.' \u2192 '-'), or avoid hand-encoding entirely by globbing config_dir/projects/*/ for a directory whose decoded form matches ROOT.",
+      "Specify that planner_window_tokens and planner_day_tokens must be zeroed under the same conditions Account.utilization() already uses to zero window_tokens/window_started and day_tokens/day (tie the reset to the same window_started/day fields so there's one source of truth, not two independent rollover clocks).",
+      "Specify that cli.py's `pick` subcommand calls pool.tally_planner() itself immediately before pool.pick(role), not just relying on daemon.tick() to have refreshed pool_state.json recently.",
+      "Add a bound or prune step for per-file offsets in pool_state so it doesn't grow forever as Claude Code rotates session files."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789741941.997246,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0163",
+      "claimed_at": 1789741941.9959009
+    },
+    {
+      "ts": 1789741942.007607,
+      "pid": 41238,
+      "account": "A"
+    },
+    {
+      "ts": 1789742103.767058,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "Spec dictates deriving the transcript project-dir name from ROOT by only replacing '/' with '-'. Claude Code's actual convention also replaces '.' with '-' (visible in ~/.claude*/projects/ as e.g. '-Users-k3ntaw--claude-mem-observer-sessions' for path '/Users/k3ntaw/.claude-mem-observer-sessions'). Since this orchestrator is installed into arbitrary target repos via `orchestrator install /path/to/target`, any ROOT path containing a dot will hash to the wrong directory name and tally_planner will silently read zero lines from a directory that doesn't exist \u2014 exactly the 'no warning, no switch' failure the task exists to fix, just moved one layer down.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "Account.utilization() already resets window_tokens/window_started (and day_tokens/day) when the window/day rolls over. The spec's tally design is explicitly incremental \u2014 read only newly-appended bytes via a per-file byte offset and add their usage to planner_window_tokens/planner_day_tokens \u2014 but never says these two new counters get zeroed on the same rollover. Since old in-window lines are never re-read once the offset has passed them, nothing will ever subtract their contribution back out. Once real, planner_window_tokens is monotonically non-decreasing across window resets, permanently pinning utilization at/above cap (double counting of a kind: previous window's usage bleeds into every future window). Same problem for planner_day_tokens across day rollover. This is the state-that-never-decreases failure mode called out in the review brief.",
+            "severity": "high",
+            "line": 33
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "issue": "`pick <role>` is meant to let an external launcher choose an account before starting the interactive Planner \u2014 the exact gap this task exists to close. The spec only says daemon.tick() calls pool.tally_planner(); it never says the `pick` subcommand does. A standalone `orchestrator pick planner` run (the launcher's use case) will pick against whatever planner_* numbers happen to be sitting in pool_state.json from the last daemon tick \u2014 stale or, on a fresh install/daemon restart, absent \u2014 defeating the purpose for the one caller that matters most.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "Per-file byte offsets in pool_state persist forever once a transcript file is seen, including sessions Claude Code itself later rotates/deletes; nothing in the spec prunes offsets for files that no longer exist, so pool_state.json grows unboundedly over the life of an installation.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Replace the hand-rolled '/'\u2192'-' encoding with the exact algorithm Claude Code uses for its own ~/.claude*/projects/ directory names (both '/' and '.' \u2192 '-'), or avoid hand-encoding entirely by globbing config_dir/projects/*/ for a directory whose decoded form matches ROOT.",
+          "Specify that planner_window_tokens and planner_day_tokens must be zeroed under the same conditions Account.utilization() already uses to zero window_tokens/window_started and day_tokens/day (tie the reset to the same window_started/day fields so there's one source of truth, not two independent rollover clocks).",
+          "Specify that cli.py's `pick` subcommand calls pool.tally_planner() itself immediately before pool.pick(role), not just relying on daemon.tick() to have refreshed pool_state.json recently.",
+          "Add a bound or prune step for per-file offsets in pool_state so it doesn't grow forever as Claude Code rotates session files."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789742103.770112,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Spec dictates deriving the transcript project-dir name from ROOT by only replacing '/' with '-'. Claude Code's actual convention also replaces '.' with '-' (visible in ~/.claude*/projects/ as e.g. '-Users-k3ntaw--claude-mem-observer-sessions' for path '/Users/k3ntaw/.claude-mem-observer-sessions'). Since this orchestrator is installed into arbitrary target repos via `orchestrator install /path/to/target`, any ROOT path containing a dot will hash to the wrong directory name and tally_planner will silently read zero lines from a directory that doesn't exist \u2014 exactly the 'no warning, no switch' failure the task exists to fix, just moved one layer down.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Account.utilization() already resets window_tokens/window_started (and day_tokens/day) when the window/day rolls over. The spec's tally design is explicitly incremental \u2014 read only newly-appended bytes via a per-file byte offset and add their usage to planner_window_tokens/planner_day_tokens \u2014 but never says these two new counters get zeroed on the same rollover. Since old in-window lines are never re-read once the offset has passed them, nothing will ever subtract their contribution back out. Once real, planner_window_tokens is monotonically non-decreasing across window resets, permanently pinning utilization at/above cap (double counting of a kind: previous window's usage bleeds into every future window). Same problem for planner_day_tokens across day rollover. This is the state-that-never-decreases failure mode called out in the review brief.",
+          "severity": "high",
+          "line": 33
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "`pick <role>` is meant to let an external launcher choose an account before starting the interactive Planner \u2014 the exact gap this task exists to close. The spec only says daemon.tick() calls pool.tally_planner(); it never says the `pick` subcommand does. A standalone `orchestrator pick planner` run (the launcher's use case) will pick against whatever planner_* numbers happen to be sitting in pool_state.json from the last daemon tick \u2014 stale or, on a fresh install/daemon restart, absent \u2014 defeating the purpose for the one caller that matters most.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Per-file byte offsets in pool_state persist forever once a transcript file is seen, including sessions Claude Code itself later rotates/deletes; nothing in the spec prunes offsets for files that no longer exist, so pool_state.json grows unboundedly over the life of an installation.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789741941.9959009,
+  "pid": 41238,
+  "account": "A",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Spec dictates deriving the transcript project-dir name from ROOT by only replacing '/' with '-'. Claude Code's actual convention also replaces '.' with '-' (visible in ~/.claude*/projects/ as e.g. '-Users-k3ntaw--claude-mem-observer-sessions' for path '/Users/k3ntaw/.claude-mem-observer-sessions'). Since this orchestrator is installed into arbitrary target repos via `orchestrator install /path/to/target`, any ROOT path containing a dot will hash to the wrong directory name and tally_planner will silently read zero lines from a directory that doesn't exist \u2014 exactly the 'no warning, no switch' failure the task exists to fix, just moved one layer down.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Account.utilization() already resets window_tokens/window_started (and day_tokens/day) when the window/day rolls over. The spec's tally design is explicitly incremental \u2014 read only newly-appended bytes via a per-file byte offset and add their usage to planner_window_tokens/planner_day_tokens \u2014 but never says these two new counters get zeroed on the same rollover. Since old in-window lines are never re-read once the offset has passed them, nothing will ever subtract their contribution back out. Once real, planner_window_tokens is monotonically non-decreasing across window resets, permanently pinning utilization at/above cap (double counting of a kind: previous window's usage bleeds into every future window). Same problem for planner_day_tokens across day rollover. This is the state-that-never-decreases failure mode called out in the review brief.",
+      "severity": "high",
+      "line": 33
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "`pick <role>` is meant to let an external launcher choose an account before starting the interactive Planner \u2014 the exact gap this task exists to close. The spec only says daemon.tick() calls pool.tally_planner(); it never says the `pick` subcommand does. A standalone `orchestrator pick planner` run (the launcher's use case) will pick against whatever planner_* numbers happen to be sitting in pool_state.json from the last daemon tick \u2014 stale or, on a fresh install/daemon restart, absent \u2014 defeating the purpose for the one caller that matters most.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Per-file byte offsets in pool_state persist forever once a transcript file is seen, including sessions Claude Code itself later rotates/deletes; nothing in the spec prunes offsets for files that no longer exist, so pool_state.json grows unboundedly over the life of an installation.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

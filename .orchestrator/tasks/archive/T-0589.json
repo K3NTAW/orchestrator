@@ -1,0 +1,206 @@
+{
+  "id": "T-0589",
+  "created_at": 1789971516.133821,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R4 v2: orchestrator/concurrency.py \u2014 adaptive concurrency limit 0..hard_max where a coupled cluster caps only its own contribution, independent groups still count, capacity and merge pressure bound the result (AP P13, P11)",
+  "spec": "Why: daemon.dispatch fills wave_limit = min(slots, max_wave or slots) (orchestrator/daemon.py:690), so concurrency is always the hard maximum; AP P13 wants a selected concurrency below the cap derived from evidence (coupled group -> 1-2, five independent modules -> higher), AP P11 wants merge pressure to bound it. v2 after spec review T-0569: the coupled-cluster rule caps that cluster's contribution, never the whole wave; the shared-interface bound keys on reason kinds interference.classify actually emits.\nWhat: new pure module orchestrator/concurrency.py; no daemon edits.\n- compatible_groups(ready_ids, pairwise_rows) -> list of lists: connected components over rows with level hard or soft (interference.pairwise shape {a, b, level, reasons}); singletons are independent.\n- group_contribution(group, pairwise_rows) -> int: 1 when every pair inside the group is hard (any size), 1 when the group has >= 3 members and any hard edge, 1 when any reason kind in the group is same_glob or glob_covers (shared interface surface; \"interface\" and \"migration\" kinds are reserved for a future interference extension and documented as such), otherwise 2 for a soft-only group of size >= 2 (soft pairs may run together when capacity allows), 1 for a singleton.\n- select_limit(hard_max, ready_ids, tasks, pairwise_rows, priorities, snapshot=None, pressure=None, durations=None, cfg=None) -> {\"hard_max\", \"limit\", \"reasons\": [strings], \"tasks_considered\", \"expected_benefit_s\", \"groups\": [{\"members\", \"contribution\", \"kind\"}]}. Rules appended to reasons when they bind: \"no_ready\" -> 0; start at hard_max (\"hard_max=N\"); structural bound = sum of group contributions (\"groups=k contributions=m\"); a cluster capped to 1 adds \"coupled_group:<ids>\" or \"shared_interface:<ids>\"; capacity bound = sum of executor free (claude_workers_free in fallback) (\"capacity=m\"); pressure saturated -> limit <= max(1, number of singleton groups) (\"merge_pressure=saturated\"); cfg [scheduler].concurrency_mode fixed|adaptive (default adaptive; fixed -> hard_max with reason \"fixed\"); minimum 1 when ready work exists and capacity > 0; never above hard_max.\n- expected_benefit_s = sum(est durations of the first limit ranked tasks) - max(those), durations dict or critical_path.est_duration_s priors.\n- log_row(result, wave_ids=None) -> dict for schedlog.append(\"concurrency\", ...) with hard_max, limit, reasons, tasks_considered, expected_benefit_s, selected, observed_outcome None.",
+  "inputs": [
+    "T-0584"
+  ],
+  "acceptance": [
+    "tests/test_concurrency.py::test_coupled_cluster_caps_only_its_own_contribution \u2014 a hard-coupled cluster of four plus three independent singletons with hard_max 8 yields limit 4 (1 + 3) with reason coupled_group naming the cluster",
+    "tests/test_concurrency.py::test_independent_modules_select_higher_concurrency \u2014 five ready tasks with no interference and hard_max 4 yield limit 4 and the hard_max reason binds",
+    "tests/test_concurrency.py::test_hard_max_is_never_exceeded_and_fixed_mode \u2014 twenty independent tasks and hard_max 3 yield limit 3; concurrency_mode fixed returns hard_max with reason fixed",
+    "tests/test_concurrency.py::test_no_ready_work_yields_zero \u2014 empty ready set yields limit 0 and reason no_ready",
+    "tests/test_concurrency.py::test_shared_interface_pair_contributes_one \u2014 two tasks whose pairwise reason is same_glob contribute 1 with reason shared_interface",
+    "tests/test_concurrency.py::test_quota_and_merge_pressure_bound_the_limit \u2014 a snapshot with 2 free executor slots bounds the limit to 2 with a capacity reason; pressure saturated with one singleton bounds to 1 with merge_pressure=saturated; log_row carries hard_max, limit, reasons, tasks_considered, expected_benefit_s"
+  ],
+  "scope": [
+    "orchestrator/concurrency.py",
+    "tests/test_concurrency.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0589",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/concurrency.py",
+        "issue": "expected_benefit_s = sum(durations of first limit ranked tasks) - max(those) is unguarded for the empty case. limit=0 (no_ready) or any path yielding an empty selected slice makes max() raise ValueError on an empty sequence, which directly breaks acceptance test test_no_ready_work_yields_zero unless the implementer adds a guard the spec never mentions.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/concurrency.py",
+        "issue": "The shared-interface rule ('1 when any reason kind in the group is same_glob or glob_covers') is unreachable under default classification: interference.DEFAULT_RULES already places same_glob and glob_covers in the hard bucket, so any pairwise row carrying those reason kinds already has level=hard and is already caught by the 'every pair inside the group is hard' rule. test_shared_interface_pair_contributes_one therefore cannot distinguish this rule from the plain hard-pair rule -- it will pass whether or not the shared-interface branch is implemented at all, so it doesn't verify what the spec claims.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/concurrency.py",
+        "issue": "snapshot and pressure parameter shapes (key names like 'claude_workers_free'/'free_slots', and what 'saturated' looks like) are not pinned anywhere in the codebase -- daemon.py's free_slots()/running_claude_workers() use different names, and no 'pressure' concept exists yet. Since this task deliberately makes no daemon edits, tests are free to invent any shape, so acceptance can pass with a contract the eventual daemon-integration spec will have to rewrite.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/concurrency.py",
+        "issue": "Reason-kind extraction (splitting a reason string like 'same_glob:pattern' on ':') mirrors interference._reason_kind, which is a private (underscore-prefixed) helper. The spec doesn't say whether concurrency.py may import it or must reimplement the split itself; importing a private symbol across modules is the kind of coupling a reviewer would reject.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "State explicitly that expected_benefit_s must be 0 when the selected slice of ranked tasks is empty (limit 0), before summing/maxing.",
+      "Either drop the same_glob/glob_covers shared-interface branch (since it's already covered by the hard-pair rule under default rules) or add an acceptance test that exercises it under a rules override where same_glob/glob_covers are reclassified as soft, so the branch is actually verifiable.",
+      "Pin the exact key names/shape expected in snapshot (e.g. {'free_slots': int} or {'claude_workers_free': int}) and pressure (e.g. {'state': 'saturated'} vs a bare string) so the future daemon-integration spec has a fixed contract to match.",
+      "Specify that concurrency.py implements its own reason-kind split (reason.split(':', 1)[0]) rather than importing interference._reason_kind."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789971708.3541188,
+      "pipeline": {
+        "respawned_at": 1789971708.324335
+      }
+    },
+    {
+      "ts": 1789971710.341374,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0589",
+      "claimed_at": 1789971710.341077
+    },
+    {
+      "ts": 1789971710.342357,
+      "account": "B"
+    },
+    {
+      "ts": 1789971710.701498,
+      "pid": 91921,
+      "account": "B"
+    },
+    {
+      "ts": 1789971856.454407,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/concurrency.py",
+            "issue": "expected_benefit_s = sum(durations of first limit ranked tasks) - max(those) is unguarded for the empty case. limit=0 (no_ready) or any path yielding an empty selected slice makes max() raise ValueError on an empty sequence, which directly breaks acceptance test test_no_ready_work_yields_zero unless the implementer adds a guard the spec never mentions.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/concurrency.py",
+            "issue": "The shared-interface rule ('1 when any reason kind in the group is same_glob or glob_covers') is unreachable under default classification: interference.DEFAULT_RULES already places same_glob and glob_covers in the hard bucket, so any pairwise row carrying those reason kinds already has level=hard and is already caught by the 'every pair inside the group is hard' rule. test_shared_interface_pair_contributes_one therefore cannot distinguish this rule from the plain hard-pair rule -- it will pass whether or not the shared-interface branch is implemented at all, so it doesn't verify what the spec claims.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/concurrency.py",
+            "issue": "snapshot and pressure parameter shapes (key names like 'claude_workers_free'/'free_slots', and what 'saturated' looks like) are not pinned anywhere in the codebase -- daemon.py's free_slots()/running_claude_workers() use different names, and no 'pressure' concept exists yet. Since this task deliberately makes no daemon edits, tests are free to invent any shape, so acceptance can pass with a contract the eventual daemon-integration spec will have to rewrite.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/concurrency.py",
+            "issue": "Reason-kind extraction (splitting a reason string like 'same_glob:pattern' on ':') mirrors interference._reason_kind, which is a private (underscore-prefixed) helper. The spec doesn't say whether concurrency.py may import it or must reimplement the split itself; importing a private symbol across modules is the kind of coupling a reviewer would reject.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "State explicitly that expected_benefit_s must be 0 when the selected slice of ranked tasks is empty (limit 0), before summing/maxing.",
+          "Either drop the same_glob/glob_covers shared-interface branch (since it's already covered by the hard-pair rule under default rules) or add an acceptance test that exercises it under a rules override where same_glob/glob_covers are reclassified as soft, so the branch is actually verifiable.",
+          "Pin the exact key names/shape expected in snapshot (e.g. {'free_slots': int} or {'claude_workers_free': int}) and pressure (e.g. {'state': 'saturated'} vs a bare string) so the future daemon-integration spec has a fixed contract to match.",
+          "Specify that concurrency.py implements its own reason-kind split (reason.split(':', 1)[0]) rather than importing interference._reason_kind."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971856.4553778,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/concurrency.py",
+          "issue": "expected_benefit_s = sum(durations of first limit ranked tasks) - max(those) is unguarded for the empty case. limit=0 (no_ready) or any path yielding an empty selected slice makes max() raise ValueError on an empty sequence, which directly breaks acceptance test test_no_ready_work_yields_zero unless the implementer adds a guard the spec never mentions.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/concurrency.py",
+          "issue": "The shared-interface rule ('1 when any reason kind in the group is same_glob or glob_covers') is unreachable under default classification: interference.DEFAULT_RULES already places same_glob and glob_covers in the hard bucket, so any pairwise row carrying those reason kinds already has level=hard and is already caught by the 'every pair inside the group is hard' rule. test_shared_interface_pair_contributes_one therefore cannot distinguish this rule from the plain hard-pair rule -- it will pass whether or not the shared-interface branch is implemented at all, so it doesn't verify what the spec claims.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/concurrency.py",
+          "issue": "snapshot and pressure parameter shapes (key names like 'claude_workers_free'/'free_slots', and what 'saturated' looks like) are not pinned anywhere in the codebase -- daemon.py's free_slots()/running_claude_workers() use different names, and no 'pressure' concept exists yet. Since this task deliberately makes no daemon edits, tests are free to invent any shape, so acceptance can pass with a contract the eventual daemon-integration spec will have to rewrite.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/concurrency.py",
+          "issue": "Reason-kind extraction (splitting a reason string like 'same_glob:pattern' on ':') mirrors interference._reason_kind, which is a private (underscore-prefixed) helper. The spec doesn't say whether concurrency.py may import it or must reimplement the split itself; importing a private symbol across modules is the kind of coupling a reviewer would reject.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "pipeline": {
+    "respawned_at": 1789971708.324335
+  },
+  "claimed_at": 1789971710.341077,
+  "account": "B",
+  "pid": 91921,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/concurrency.py",
+      "issue": "expected_benefit_s = sum(durations of first limit ranked tasks) - max(those) is unguarded for the empty case. limit=0 (no_ready) or any path yielding an empty selected slice makes max() raise ValueError on an empty sequence, which directly breaks acceptance test test_no_ready_work_yields_zero unless the implementer adds a guard the spec never mentions.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/concurrency.py",
+      "issue": "The shared-interface rule ('1 when any reason kind in the group is same_glob or glob_covers') is unreachable under default classification: interference.DEFAULT_RULES already places same_glob and glob_covers in the hard bucket, so any pairwise row carrying those reason kinds already has level=hard and is already caught by the 'every pair inside the group is hard' rule. test_shared_interface_pair_contributes_one therefore cannot distinguish this rule from the plain hard-pair rule -- it will pass whether or not the shared-interface branch is implemented at all, so it doesn't verify what the spec claims.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/concurrency.py",
+      "issue": "snapshot and pressure parameter shapes (key names like 'claude_workers_free'/'free_slots', and what 'saturated' looks like) are not pinned anywhere in the codebase -- daemon.py's free_slots()/running_claude_workers() use different names, and no 'pressure' concept exists yet. Since this task deliberately makes no daemon edits, tests are free to invent any shape, so acceptance can pass with a contract the eventual daemon-integration spec will have to rewrite.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/concurrency.py",
+      "issue": "Reason-kind extraction (splitting a reason string like 'same_glob:pattern' on ':') mirrors interference._reason_kind, which is a private (underscore-prefixed) helper. The spec doesn't say whether concurrency.py may import it or must reimplement the split itself; importing a private symbol across modules is the kind of coupling a reviewer would reject.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

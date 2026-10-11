@@ -1,0 +1,120 @@
+{
+  "id": "T-0292",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G6 v4: stage leases (final; spec reviews T-0269, T-0282, T-0287 folded in, further spec review waived after three rounds) \u2014 direct merges retried by the sweep, retry paths clear done markers, child review tasks re-spawned, count at least expected",
+  "spec": "Replaces T-0286 (spec review T-0287), T-0281 (T-0282) and T-0268 (T-0269). Spec review is waived after three rounds by Planner decision; the code review on daemon.py still fires. Problem unchanged: daemon.stamp() claims pipeline.<field> under bus.locked() before a stage acts and nothing clears it, so a crash between stamp and action wedges the task.\nDesign:\n1. Field mapping: for each claim field F in {dispatched_at, spec_review_at, gated_at, merged_at}, stamp(tid, F, ...) also writes pipeline.<F>_lease = now + [daemon].stage_lease_s (pool.toml, default 900); complete(tid, F) writes pipeline.<F>_done = now; both under the lock; callers keep today's F strings. A stamp that also sets status=held writes no lease. Any code path that clears a claim for a retry (merge_reviewed's tests_red branch from F6, and the sweep itself) clears <F>, <F>_lease and <F>_done together through one helper clear_stage(tid, F).\n2. complete() calls: dispatch right after spawn_async is issued; spec_review after both bus.create_task and spawn_async of the child have run; gate after the review tasks exist and are spawned, or after the direct merge.merge returned; merge_reviewed after merge.merge returns whatever its status.\n3. sweep_leases(pool) runs in tick() after pool.tally_planner() and _load_review_cfg(pool) (so tiers and stage_lease_s are current) and before dispatch(); it considers only tasks with status queued, running or done and only stages that carry a <F>_lease key (pre-lease stamps are never reconciled). For a leased stage with no <F>_done and an expired lease:\n   - dispatched_at: only when status is still queued: clear_stage so dispatch() re-runs; running tasks belong to the dead-pid requeue (Codex runs carry no pid); README states this window.\n   - spec_review_at: if a spec_review child with inputs[0] == id exists: if that child is still queued with no claimed_at, spawn_async(spawn.run_worker, child) again (spawn claims the task, so a double spawn is refused by the claim); mark done. Else clear_stage.\n   - gated_at: if already_merged(): mark done and set merged_into. Else if reviews_expected == 0 (review_reason none): call merge.merge(id) through report_merge exactly as gate() does, then mark done (already_merged makes a repeat harmless). Else count review children with inputs[0] == id: if count >= reviews_expected, re-spawn any child still queued without claimed_at, mark done; if fewer, create the missing reviews through the helper gate() uses (same tier rules), spawn them, mark done.\n   - merged_at: if already_merged(): mark done and set merged_into. Else increment pipeline.merge_retries and clear_stage so merge_reviewed() retries; at merge_retries 2 hold with hold_reason 'merge lease expired twice'.\n   No 'reviews_expected unset' branch exists.\n4. pool.toml [daemon] stage_lease_s = 900 with a comment; README Pipeline replaces the crash-and-retry sentence with the lease rules: done marker, pre-lease exemption, dispatched_at window, direct-merge retry, child re-spawn, held-task exclusion.\n5. Tests in tests/test_daemon.py: test_lease_dispatch_rerun_only_when_queued, test_lease_spec_review_respawns_unclaimed_child, test_lease_gate_direct_merge_retried_when_no_reviews_expected, test_lease_gate_creates_missing_second_review, test_lease_gate_done_when_count_at_least_expected (one extra review does not loop), test_lease_merge_retry_then_hold, test_tests_red_retry_clears_done_marker, test_lease_reconciles_already_merged, test_sweep_skips_held_tasks, test_sweep_skips_prelease_stamps, test_hold_stamps_have_no_lease. Every existing test stays green; the harness runs spawn_async synchronously.",
+  "inputs": [
+    "T-0290"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_lease_dispatch_rerun_only_when_queued, ::test_lease_spec_review_respawns_unclaimed_child, ::test_lease_gate_direct_merge_retried_when_no_reviews_expected, ::test_lease_gate_creates_missing_second_review, ::test_lease_gate_done_when_count_at_least_expected, ::test_lease_merge_retry_then_hold, ::test_tests_red_retry_clears_done_marker, ::test_lease_reconciles_already_merged, ::test_sweep_skips_held_tasks, ::test_sweep_skips_prelease_stamps, ::test_hold_stamps_have_no_lease pass",
+    "every existing test_daemon test passes unchanged in intent",
+    "pool.toml documents [daemon].stage_lease_s and README describes the lease rules",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0292",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 700,
+        "issue": "sweep_leases' dispatched_at recovery only fires when status==\"queued\"; a Codex-executed task moves to status=\"running\" via bus.claim almost immediately (executor.py:141) and never gets a pid, so if the daemon process itself dies while a Codex dispatch is in flight, the task is left at status=\"running\" forever with no pid for the existing dead-pid requeue and no lease-based recovery either (this stage is explicitly excluded for \"running\"). The lease feature is pitched as crash recovery but does not close the most likely real crash scenario for Codex work \u2014 worth calling out even though it's a pre-existing gap, not a new regression.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 709,
+        "issue": "In the spec_review_at lease branch, when a child review already exists but is not \"queued and unclaimed\" (e.g. already running or done), the code unconditionally clear_stage()s the parent's spec_review_at/lease instead of calling complete(). The side effect already succeeded in that case, so this discards valid pipeline metadata (harmless today only because dispatch()'s duplicate guard checks bus.read(role=\"spec_review\") directly rather than the pipeline stamp, not because this branch is correct).",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 121,
+        "issue": "complete()'s docstring says it records the done marker \"under the same bus lock as its pipeline update\", but it acquires a fresh bus.locked() context separate from the stamp() call that preceded it \u2014 not literally the same lock/critical section. Misleading for anyone reasoning about atomicity between stamp() and complete().",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789846943.4349692,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0292",
+      "claimed_at": 1789846943.434635
+    },
+    {
+      "ts": 1789846943.436237,
+      "account": "B"
+    },
+    {
+      "ts": 1789846943.4697149,
+      "pid": 15886,
+      "account": "B"
+    },
+    {
+      "ts": 1789847238.492033,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 700,
+            "issue": "sweep_leases' dispatched_at recovery only fires when status==\"queued\"; a Codex-executed task moves to status=\"running\" via bus.claim almost immediately (executor.py:141) and never gets a pid, so if the daemon process itself dies while a Codex dispatch is in flight, the task is left at status=\"running\" forever with no pid for the existing dead-pid requeue and no lease-based recovery either (this stage is explicitly excluded for \"running\"). The lease feature is pitched as crash recovery but does not close the most likely real crash scenario for Codex work \u2014 worth calling out even though it's a pre-existing gap, not a new regression.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 709,
+            "issue": "In the spec_review_at lease branch, when a child review already exists but is not \"queued and unclaimed\" (e.g. already running or done), the code unconditionally clear_stage()s the parent's spec_review_at/lease instead of calling complete(). The side effect already succeeded in that case, so this discards valid pipeline metadata (harmless today only because dispatch()'s duplicate guard checks bus.read(role=\"spec_review\") directly rather than the pipeline stamp, not because this branch is correct).",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 121,
+            "issue": "complete()'s docstring says it records the done marker \"under the same bus lock as its pipeline update\", but it acquires a fresh bus.locked() context separate from the stamp() call that preceded it \u2014 not literally the same lock/critical section. Misleading for anyone reasoning about atomicity between stamp() and complete().",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789847238.5070772,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789846943.434635,
+  "account": "B",
+  "pid": 15886,
+  "review_verdict": "approve"
+}

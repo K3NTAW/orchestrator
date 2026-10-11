@@ -1,0 +1,82 @@
+{
+  "id": "T-0707",
+  "created_at": 1789999209.980435,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Q12 v4: orchestrator/jev_planner.py \u2014 Jev as a shadow routing signal for Planner tier choice: typed batched questions over redacted structured state, fail open, never bypasses hard escalation (P12)",
+  "spec": "Why: the brief (P12) allows Jev to provide probabilistic decision characteristics to the Planner router, shadow first, as a signal and never as authority. jev_points.py (T-0586) shows the pattern: typed options, redacted evidence, mode per point, fail open. Nothing asks Jev about Planner routing. Three spec review rounds (T-0687, of T-0694, of T-0702) are folded in: classification producer, explicit state_version, signals source, cache rows, classification fingerprint including ambiguous, subject-scoped cache key, task parameter, jev_mode source, confidence aggregation, availability shape. The Planner waived a fourth spec review.\nWhat: new module orchestrator/jev_planner.py; jev.ask injected as ask_fn so tests never hit the network. Inputs are dicts read with .get(): classification = planner_taxonomy.classify output (orchestrator/planner_taxonomy.py, already on goal/T-0674: decision_type, architectural, ambiguous, risk_class, signals list[str], band, task_class); ctx = decision.route's ctx dict; goal and task = bus task dicts (task None for goal-level decisions). cfg = the dict returned by planner_router.load_cfg(pool_cfg) (planner_router.py is task T-0700 in this goal; this module never imports it): this module reads only cfg.get(\"jev_mode\", \"shadow\"); pool.toml wiring is [planner.routing].jev_mode. availability has the router contract shape {tier: {\"available\": bool, \"reason\": str}, \"fable_reserve_ok\": bool}, built by planner_runs in Wave B; should_ask counts tiers whose value is a dict with available True.\n- QUESTIONS = OrderedDict of five typed yes/no questions keyed routine_localized, architectural_reasoning, requirements_ambiguous, long_horizon, fable_improves_outcome, one sentence each.\n- subject(goal, task) -> the task dict when task is not None else goal; subject_id = subject[\"id\"].\n- state(classification, ctx, goal, task=None) -> bounded redacted dict: decision_type, band, task_class, architectural, ambiguous, risk_class from classification; signals = classification signals[:10], each jev.redact'ed and capped 100 chars; subject_id, subject_title = jev.redact(subject title)[:200], spec_excerpt = jev.redact(first 300 chars of subject spec), goal_title = jev.redact(goal title)[:200]; scope_count = len(subject scope); scout_count, failing_test_count (len(ctx failing_ids)), spec_review_request_changes, auto_fix_rounds_used, signature_repeated from ctx. Never file contents, diffs or review comment bodies; json.dumps(state) <= 4000 chars, truncating spec_excerpt then signals until it fits.\n- fingerprint(classification) -> sha256(json.dumps({decision_type, risk_class, architectural, ambiguous, band, task_class}, sort_keys=True))[:12].\n- should_ask(router_mode, jev_mode, hard_reasons, availability, route) -> (bool, reason): False with jev_off (jev_mode == \"off\"), hard_decision (hard_reasons non-empty), single_tier (fewer than two available tiers), deterministic (route name != \"escalate\"), cannot_affect (router_mode == \"off\"); else (True, \"eligible\"). Shadow and active both ask; applying the signal is the router's job.\n- ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route, state_version, task=None, ask_fn=jev.ask, cache=None, root=None) -> {\"asked\": bool, \"reason\", \"mode\": jev_mode, \"signals\": {key: float|None}, \"soft_adjust\": float, \"confidence\": float|None, \"cached\": bool}. One ask_fn(state, questions, task=subject_id) call carrying all five questions. Each answer parsed as jev_points._answer does: probability float(answer[\"noul\"]) in [0, 1] else None, confidence answer.get(\"confidence\"); confidence = None if any per-question confidence is None else their mean. soft_adjust = clamp(0.2 * mean(p_architectural, p_ambiguous, p_long_horizon, p_fable) - 0.2 * p_routine, -0.2, 0.2); ask_fn returning None -> asked True, reason jev_unavailable, soft_adjust 0.0, signals all None; unparsable answers -> reason jev_malformed, soft_adjust 0.0. cache: dict keyed (subject_id, state_version, fingerprint(classification)); a hit returns the cached result with cached True and no ask_fn call; two held tasks under one goal never share an entry; a changed risk_class, ambiguous or architectural under the same state_version misses. Every call (asked, skipped or cached) appends one row via schedlog.append(\"planner_jev\", {goal_id, subject_id, decision_type, state_version, fingerprint, asked, cached, reason, signals, soft_adjust, confidence, mode}) with no question text and no state text.\n- summary(root=None) -> {\"n\", \"asked\", \"cached\", \"skip_reasons\": dict, \"mean_soft_adjust\"} via schedlog.read_with_malformed, tolerant of malformed lines.",
+  "inputs": [
+    "T-0706"
+  ],
+  "acceptance": [
+    "tests/test_jev_planner.py::test_off_and_hard_and_single_tier_never_ask \u2014 jev_mode off, hard_reasons ['security'], one available tier and a routine route each give asked False with the documented reason, no ask_fn call, and still one planner_jev row",
+    "tests/test_jev_planner.py::test_batched_single_call_soft_adjust_and_confidence \u2014 exactly one ask_fn call carries five questions; noul 1.0 for architectural/ambiguous/long_horizon/fable and 0 routine give soft_adjust 0.2; all routine gives -0.2; never outside [-0.2, 0.2]; confidence is the mean of five confidences and None when one is missing",
+    "tests/test_jev_planner.py::test_malformed_and_timeout_fail_open \u2014 ask_fn returning None and ask_fn returning {'answers': 'garbage'} both yield soft_adjust 0.0 with reasons jev_unavailable / jev_malformed, and a row is recorded",
+    "tests/test_jev_planner.py::test_state_is_redacted_bounded_and_task_scoped \u2014 a task spec with a token-like secret and 20k chars and a classification with 30 signals yields spec_excerpt <= 300 chars taken from the task (not the goal), at most 10 signals, the secret redacted, no key named diff/contents/comments, json <= 4000 chars, and decision_type/band/risk_class/ambiguous copied from the classification",
+    "tests/test_jev_planner.py::test_cache_key_is_subject_scoped_with_fingerprint \u2014 a second ask for the same subject, state_version and classification returns cached True with zero extra ask_fn calls and appends a row with cached True; a different held task under the same goal with identical state_version and classification asks again; the same subject with risk_class high or ambiguous True asks again; summary counts asked, cached and skip reasons over rows including one malformed line"
+  ],
+  "scope": [
+    "orchestrator/jev_planner.py",
+    "tests/test_jev_planner.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "queued",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0707",
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789999212.523212,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0707",
+      "claimed_at": 1789999212.522841
+    },
+    {
+      "ts": 1789999212.5242171,
+      "account": "B"
+    },
+    {
+      "ts": 1789999212.971949,
+      "pid": 31010,
+      "account": "B"
+    },
+    {
+      "ts": 1789999400.412719,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "Reviewed the spec against the current repo shape. One high-severity finding stands out: `ask()`/`summary()` plumb a `root=` parameter toward `schedlog.append`/`schedlog.read_with_malformed`, but those functions accept no `root` kwarg \u2014 they always target the real worktree's `.orchestrator/runs/sched/`. As specced, tests would either pollute this worktree's actual state directory or hit a `TypeError`. The codebase already has the right pattern next door (`decision_log.py`'s `_using_root` monkeypatch of `schedlog.SCHED_DIR`), but the spec doesn't name it. Three lower-severity clarity/config-wiring notes are included alongside it \u2014 nothing else in the spec (fingerprint/cache-key scoping, taxonomy/decision.Route usage, jev.ask injection) contradicts the actual code."
+      }
+    },
+    {
+      "ts": 1790166287.961955,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "verdict_retries": 1
+      },
+      "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)"
+    }
+  ],
+  "claimed_at": 1789999212.522841,
+  "account": "B",
+  "pid": null,
+  "reason": "Planner sweeper: no parseable verdict; re-queued (retry 1)",
+  "resume_hint": {
+    "raw": "Reviewed the spec against the current repo shape. One high-severity finding stands out: `ask()`/`summary()` plumb a `root=` parameter toward `schedlog.append`/`schedlog.read_with_malformed`, but those functions accept no `root` kwarg \u2014 they always target the real worktree's `.orchestrator/runs/sched/`. As specced, tests would either pollute this worktree's actual state directory or hit a `TypeError`. The codebase already has the right pattern next door (`decision_log.py`'s `_using_root` monkeypatch of `schedlog.SCHED_DIR`), but the spec doesn't name it. Three lower-severity clarity/config-wiring notes are included alongside it \u2014 nothing else in the spec (fingerprint/cache-key scoping, taxonomy/decision.Route usage, jev.ask injection) contradicts the actual code."
+  },
+  "hold_reason": null,
+  "pipeline": {
+    "verdict_retries": 1
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "id": "T-0170",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "review (other model, opus): C-O7a v2 planner transcript tally + pick (T-0167, executed by claude:sonnet)",
+  "spec": "Review the T-0167 delta: `git diff e1ad1aa 2cf1d45` in worktree wt/T-0167 (orchestrator/pool.py, orchestrator/daemon.py, orchestrator/cli.py, tests/test_pool.py, tests/test_cli.py, README.md). Acceptance: (1) encode_project_dir maps every non-alnum char to '-', tested against a real projects/ directory name; (2) tally_planner reads <config_dir>/projects/<encoded ROOT>/*.jsonl incrementally with per-file byte offsets in pool_state (shrink resets, missing files pruned), only assistant lines in the current day and 5-hour window, usage = input + output + cache_read // 10 exactly like run_claude, malformed lines skipped, missing dir \u2192 one stderr line per tick and no exception; (3) planner_window_tokens / planner_day_tokens reset in the same place utilization() resets the worker counters while offsets are kept (test), and utilization plus the daily-budget check include them; (4) daemon.tick() calls tally_planner first, wrapped; (5) status and status --plain show planner_day_tokens; (6) `pick <role>` tallies first, prints id and config_dir, exits 3 when none; (7) privacy: nothing but usage numbers and timestamps leaves the transcript line, nothing from transcripts reaches the bus or logs (grep for any print/log of message content); (8) the nine named tests exist and are meaningful; no new dependency. Also check: pool_state writes are under the existing lock/save discipline (no torn writes racing the daemon), offsets keyed so two accounts sharing a config_dir never double count, and the timestamp parsing handles Claude Code's ISO timestamps with Z. Run `uv run python -m unittest tests.test_pool tests.test_cli -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0167"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the eight acceptance points confirmed with evidence from the delta",
+    "Privacy and state-write discipline explicitly assessed"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_pool.py",
+    "tests/test_cli.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0170",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 223,
+        "issue": "Day and window filters are ANDed into one `continue`, but the byte offset advances regardless \u2014 so a line skipped because it is outside the 5h window is also permanently lost from planner_day_tokens. This defeats the daily-budget guard added at pool.py:154 in exactly the case README.md:28 advertises `orchestrator pick` for (no daemon running): an idle pool rolls window_started to now on the first utilization() call, so every historical line is dropped. Reproduced: transcript with 5,000,000 input_tokens stamped 3h ago, today, window_started=now -> planner_window_tokens=0 AND planner_day_tokens=0, offset advanced past it, unrecoverable on later ticks. Account looks free against a 30M daily budget after burning 5M. The window filter and the day filter must gate their own counters independently (count into planner_day_tokens on the date match alone; into planner_window_tokens on the window match alone).",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 69,
+        "issue": "daemon.py:352 wraps tally_planner in try/except and logs \u2014 conceding it can raise \u2014 but the `pick` path calls it bare. f.stat() on a file deleted or compacted between glob and stat (FileNotFoundError), a non-string `timestamp` (.replace -> AttributeError, not caught by the ValueError guard at pool.py:222), or a permission error on open all turn `orchestrator pick` into a traceback: no account printed, exit 1 not 3, and a launcher that only distinguishes 0 from 3 misreads it. Mirror the daemon's guard here.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 74,
+        "issue": "config_dir is printed raw, so `pick` emits the literal `~/.claude-a`. Every other consumer in the repo expands it first (spawn.py:114, goals.py:336 both use os.path.expanduser). A launcher doing `CLAUDE_CONFIG_DIR=\"$cfg\" claude` gets an unexpanded tilde \u2014 shells do not expand `~` inside a variable's value \u2014 and Claude Code silently uses a directory named `~` relative to cwd, i.e. a fresh unauthenticated profile on the wrong account. Print os.path.expanduser(picked.config_dir).",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 190,
+        "issue": "README.md:39 claims a missing transcripts directory costs \"one stderr line\", but this fires once per account per call \u2014 daemon.tick() runs every 30s, so a fresh `orchestrator install` target (neither account has a root project dir until a Planner has run there) emits ~5,760 lines/day into the MCP server's stderr. Reproduced above: two tally_planner calls produced two identical \"planner transcripts not found for B\" lines. Log it once per account per process, or drop to a debug path.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 72,
+        "issue": "The hold message goes to stdout, the same channel as the machine-readable `<id>\\t<config_dir>` line. A launcher that captures stdout and ignores the exit code parses \"hold: no account with headroom\" as an account id. Send it to stderr and keep stdout parseable-or-empty; test_cli.py:65 asserts the current stdout behaviour and would need updating with it.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 232,
+        "issue": "State-write discipline: tally_planner ends in self.save(), so `pick` \u2014 a read-shaped command a launcher may run often \u2014 performs a full pool_state.json rewrite. Combined with the existing lost-update pattern (spawn.py:154 pool.record() saves the whole blob from a Pool loaded minutes earlier, before the worker subprocess ran), a worker finishing after a tally rewrites planner_offsets and planner_*_tokens back to its start-of-run snapshot, forcing a multi-MB transcript re-read on the next tick. The race predates this diff, but this diff puts monotonic byte offsets into the raced blob. Worth either persisting planner offsets in their own file or merging rather than overwriting the accounts dict in save().",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_cli.py",
+        "line": 47,
+        "issue": "Both new CLI tests stub or bypass the real tally: test_pick_tallies_then_prints_account_and_config_dir mocks tally_planner, and test_pick_exits_3_when_none cools both accounts so pick short-circuits. Nothing exercises `orchestrator pick` end to end against a real transcript file, which is why the unguarded-raise gap at cli.py:69 and the tilde at cli.py:74 are untested. One test with a temp config_dir and a real .jsonl would cover both.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789742830.6606688,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0170",
+      "claimed_at": 1789742830.660196
+    },
+    {
+      "ts": 1789742830.723198,
+      "pid": 90694,
+      "account": "B"
+    },
+    {
+      "ts": 1789742891.83842,
+      "status": "held",
+      "hold_reason": "rate_limit on B, cooling 1800s"
+    },
+    {
+      "ts": 1789752713.617182,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0170",
+      "claimed_at": 1789752713.6169448
+    },
+    {
+      "ts": 1789752713.693162,
+      "pid": 30253,
+      "account": "B"
+    },
+    {
+      "ts": 1789753032.0940108,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 223,
+            "issue": "Day and window filters are ANDed into one `continue`, but the byte offset advances regardless \u2014 so a line skipped because it is outside the 5h window is also permanently lost from planner_day_tokens. This defeats the daily-budget guard added at pool.py:154 in exactly the case README.md:28 advertises `orchestrator pick` for (no daemon running): an idle pool rolls window_started to now on the first utilization() call, so every historical line is dropped. Reproduced: transcript with 5,000,000 input_tokens stamped 3h ago, today, window_started=now -> planner_window_tokens=0 AND planner_day_tokens=0, offset advanced past it, unrecoverable on later ticks. Account looks free against a 30M daily budget after burning 5M. The window filter and the day filter must gate their own counters independently (count into planner_day_tokens on the date match alone; into planner_window_tokens on the window match alone).",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 69,
+            "issue": "daemon.py:352 wraps tally_planner in try/except and logs \u2014 conceding it can raise \u2014 but the `pick` path calls it bare. f.stat() on a file deleted or compacted between glob and stat (FileNotFoundError), a non-string `timestamp` (.replace -> AttributeError, not caught by the ValueError guard at pool.py:222), or a permission error on open all turn `orchestrator pick` into a traceback: no account printed, exit 1 not 3, and a launcher that only distinguishes 0 from 3 misreads it. Mirror the daemon's guard here.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 74,
+            "issue": "config_dir is printed raw, so `pick` emits the literal `~/.claude-a`. Every other consumer in the repo expands it first (spawn.py:114, goals.py:336 both use os.path.expanduser). A launcher doing `CLAUDE_CONFIG_DIR=\"$cfg\" claude` gets an unexpanded tilde \u2014 shells do not expand `~` inside a variable's value \u2014 and Claude Code silently uses a directory named `~` relative to cwd, i.e. a fresh unauthenticated profile on the wrong account. Print os.path.expanduser(picked.config_dir).",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 190,
+            "issue": "README.md:39 claims a missing transcripts directory costs \"one stderr line\", but this fires once per account per call \u2014 daemon.tick() runs every 30s, so a fresh `orchestrator install` target (neither account has a root project dir until a Planner has run there) emits ~5,760 lines/day into the MCP server's stderr. Reproduced above: two tally_planner calls produced two identical \"planner transcripts not found for B\" lines. Log it once per account per process, or drop to a debug path.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 72,
+            "issue": "The hold message goes to stdout, the same channel as the machine-readable `<id>\\t<config_dir>` line. A launcher that captures stdout and ignores the exit code parses \"hold: no account with headroom\" as an account id. Send it to stderr and keep stdout parseable-or-empty; test_cli.py:65 asserts the current stdout behaviour and would need updating with it.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 232,
+            "issue": "State-write discipline: tally_planner ends in self.save(), so `pick` \u2014 a read-shaped command a launcher may run often \u2014 performs a full pool_state.json rewrite. Combined with the existing lost-update pattern (spawn.py:154 pool.record() saves the whole blob from a Pool loaded minutes earlier, before the worker subprocess ran), a worker finishing after a tally rewrites planner_offsets and planner_*_tokens back to its start-of-run snapshot, forcing a multi-MB transcript re-read on the next tick. The race predates this diff, but this diff puts monotonic byte offsets into the raced blob. Worth either persisting planner offsets in their own file or merging rather than overwriting the accounts dict in save().",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_cli.py",
+            "line": 47,
+            "issue": "Both new CLI tests stub or bypass the real tally: test_pick_tallies_then_prints_account_and_config_dir mocks tally_planner, and test_pick_exits_3_when_none cools both accounts so pick short-circuits. Nothing exercises `orchestrator pick` end to end against a real transcript file, which is why the unguarded-raise gap at cli.py:69 and the tilde at cli.py:74 are untested. One test with a temp config_dir and a real .jsonl would cover both.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789753032.097402,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789752713.6169448,
+  "pid": 30253,
+  "account": "B",
+  "hold_reason": "rate_limit on B, cooling 1800s",
+  "review_verdict": "request_changes"
+}

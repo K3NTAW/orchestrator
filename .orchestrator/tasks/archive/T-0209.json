@@ -1,0 +1,113 @@
+{
+  "id": "T-0209",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "P8: executor image polish from approving security review T-0184 (venv protection, gh pin and gitconfig mount, frozen uv)",
+  "spec": "Bring-up notes from the approving security review of C-O5 (Dockerfile, docker-compose.executor.yml, docs/executor-host.md, .orchestrator/protected-paths.txt).\n1. .orchestrator/protected-paths.txt gains the container path of the orchestrator .venv (executed code) so guardrails.sh blocks writes to it inside the container.\n2. Dockerfile: gh is installed at a pinned version with a checksum or apt pin, and the build asserts `gh --version` prints that version (like the codex asset check).\n3. docker-compose.executor.yml: mount a read-only gitconfig for the orch user (the file gh auth setup-git writes) and document in docs/executor-host.md the human step that produces it.\n4. Entrypoint and the installer module run uv with --frozen (uv sync --frozen / uv run --frozen) against the root-owned project dir; document why.\nTests: new tests/test_image.py with grep-based assertions on the four files (no docker build in the gate).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_image.py::test_protected_paths_cover_venv, ::test_dockerfile_pins_gh_and_asserts_version, ::test_compose_mounts_gitconfig_readonly, ::test_uv_runs_frozen pass",
+    "docs/executor-host.md has a numbered human step for producing the gitconfig",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    "docs/executor-host.md",
+    ".orchestrator/protected-paths.txt",
+    "tests/test_image.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0209",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented the four bring-up hardening items from the C-O5 security review, all in scope.\n\n**Files changed:**\n- `.orchestrator/protected-paths.txt` \u2014 added `/opt/orchestrator/.venv` (executed code) so guardrails.sh blocks writes to it in-container.\n- `Dockerfile` \u2014 replaced the floating `cli.github.com` apt repo install of `gh` with a checksummed download of the pinned release tarball (`GH_VERSION=2.101.0`, real sha256 checksums fetched from the release's own `gh_2.101.0_checksums.txt`), with a build-time `gh --version | grep -qF \"gh version ${GH_VERSION}\"` assertion mirroring the codex asset check; added `--frozen` to the entrypoint's `uv run` (the build-time `uv sync` already had it) with a comment on why (root-owned project dir, fail fast on lock mismatch).\n- `docker-compose.executor.yml` \u2014 added a read-only `${ORCH_CREDS}/gitconfig:/home/orch/.gitconfig:ro` mount, with a comment explaining why it's read-only.\n- `docs/executor-host.md` \u2014 inserted a new numbered step (\"8. Generate the git credential helper config\") documenting the one-off `docker run` bootstrap that produces the host gitconfig file via `gh auth setup-git` before the read-only mount takes over; renumbered the following steps (9. Bring it up, 10. Smoke test).\n- `tests/test_image.py` (new) \u2014 grep-based tests: `test_protected_paths_cover_venv`, `test_dockerfile_pins_gh_and_asserts_version`, `test_compose_mounts_gitconfig_readonly`, `test_uv_runs_frozen`, plus `test_executor_host_has_numbered_gitconfig_step`.\n\n**Test output:** full suite (283 tests, including the 5 new ones) passes; `.claude/hooks/tests-green.sh` exits 0 with no failures.\n\nCommitted as `a99ce71` on `task/T-0209`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789811482.386987,
+      "pipeline": {
+        "dispatched_at": 1789811482.386932
+      }
+    },
+    {
+      "ts": 1789811482.423647,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789811482.427428,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789811483.5925162,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0209",
+      "claimed_at": 1789811483.591558
+    },
+    {
+      "ts": 1789811483.5979588,
+      "account": "B"
+    },
+    {
+      "ts": 1789811483.604918,
+      "pid": 50767,
+      "account": "B"
+    },
+    {
+      "ts": 1789811962.146443,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented the four bring-up hardening items from the C-O5 security review, all in scope.\n\n**Files changed:**\n- `.orchestrator/protected-paths.txt` \u2014 added `/opt/orchestrator/.venv` (executed code) so guardrails.sh blocks writes to it in-container.\n- `Dockerfile` \u2014 replaced the floating `cli.github.com` apt repo install of `gh` with a checksummed download of the pinned release tarball (`GH_VERSION=2.101.0`, real sha256 checksums fetched from the release's own `gh_2.101.0_checksums.txt`), with a build-time `gh --version | grep -qF \"gh version ${GH_VERSION}\"` assertion mirroring the codex asset check; added `--frozen` to the entrypoint's `uv run` (the build-time `uv sync` already had it) with a comment on why (root-owned project dir, fail fast on lock mismatch).\n- `docker-compose.executor.yml` \u2014 added a read-only `${ORCH_CREDS}/gitconfig:/home/orch/.gitconfig:ro` mount, with a comment explaining why it's read-only.\n- `docs/executor-host.md` \u2014 inserted a new numbered step (\"8. Generate the git credential helper config\") documenting the one-off `docker run` bootstrap that produces the host gitconfig file via `gh auth setup-git` before the read-only mount takes over; renumbered the following steps (9. Bring it up, 10. Smoke test).\n- `tests/test_image.py` (new) \u2014 grep-based tests: `test_protected_paths_cover_venv`, `test_dockerfile_pins_gh_and_asserts_version`, `test_compose_mounts_gitconfig_readonly`, `test_uv_runs_frozen`, plus `test_executor_host_has_numbered_gitconfig_step`.\n\n**Test output:** full suite (283 tests, including the 5 new ones) passes; `.claude/hooks/tests-green.sh` exits 0 with no failures.\n\nCommitted as `a99ce71` on `task/T-0209`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789812078.9368472,
+      "pipeline": {
+        "dispatched_at": 1789811482.386932,
+        "gated_at": 1789812078.936725
+      }
+    },
+    {
+      "ts": 1789812114.6149561,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "sha": "8517e922b54ae19005efecef901eb257e7d1a630"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789811482.386932,
+    "gated_at": 1789812078.936725
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789811483.591558,
+  "account": "B",
+  "pid": 50767,
+  "merged_into": "goal/T-0201",
+  "sha": "8517e922b54ae19005efecef901eb257e7d1a630"
+}

@@ -1,0 +1,49 @@
+{
+  "id": "T-1510",
+  "created_at": 1790894400.085414,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "Empty-merge guard: a fix-round merge stamps an ancestor merged only when that ancestor's commits are reachable from the target; an empty merge of a fix chain with unlanded ancestors is held",
+  "spec": "Goal T-1403, wave 2, plan label B6. Evidence (U6 resolved 2026-10-01 from luna-inbox): fix round T-0560 (re-gate\nof T-0555, itself a fix round of T-0554) merged into goal/T-0551 with changed_files [] (its branch carried no new\ncommit), and daemon.report_merge stamped T-0555 and T-0554 'merged_via fix round T-0560 ...' although T-0554's\ncommits f933e6a and ba1f5c9 never reached goal/T-0551. Same class as the 2026-09-24 gotcha (T-0174/T-0191).\n\nFacts (goal/T-1403 at 92c1a98):\n- daemon.py:1505-1546 report_merge(task_id, r): on status merged, walks constraints.fix_round_for from the fix\n  task to the lineage root and sets status done, merged_into, merged_via on every ancestor without checking\n  anything (1525-1538).\n- merge.py:28-122 merge(): rebases wt onto target, runs the gate, fast-forwards target to HEAD of the task branch,\n  records changed_files = diff previous_sha..sha (112), and returns {'status': 'merged', 'target', 'sha'}.\n- daemon.py:425-456 already_merged(t) proves a task landed with `git merge-base --is-ancestor task/<id> target`\n  (after excluding an unchanged target head and branches with no commits beyond trunk); it stamps\n  merged_via 'ancestor'. merge.py:11-21 _diff_hash() gives patch-id identity when a rebase rewrote shas.\n- spawn.base_for (spawn.py:277-308) cuts a fix round from task/<fix_round_for>, so normally the fix branch\n  contains the ancestor commits and the ancestor walk is right; it is wrong only when the fix branch was cut\n  elsewhere or the ancestor branch moved after the cut.\n\nChange:\n1. daemon.landed(ancestor_id, target, *, git=None) -> bool: True when task/<ancestor_id> does not exist (nothing\n   to land) or `merge-base --is-ancestor task/<id> <target>` succeeds; else compare patch ids: the patch id of\n   `git diff --binary <merge-base(task/<id>, target)>...task/<id>` equals the patch id of the same range on\n   the target side (`git diff --binary <merge-base>...<target>` restricted to the task's changed paths) -> True;\n   any git error -> False. Pure read-only git through gitutil._git_in.\n2. report_merge: in the ancestor walk, stamp an ancestor merged only when landed(ancestor, r['target']) is True.\n   When it is False: stop the walk, leave the ancestor as it was, mark the fix task itself done+merged (its own\n   commits did land), notify '<fix id> merged but ancestor <id> commits are not on <target>; held' and set the\n   ancestor status held, hold_reason 'unlanded_after_fix_round: <fix id>' with resume_hint {'fix_round': fix id,\n   'target': target, 'target_sha': r['sha']} so a Planner or fix round re-lands it. Record the outcome in the\n   fix task's pipeline as 'ancestor_stamps': {ancestor id: 'merged' | 'unlanded'}.\n3. merge.merge(): when the task is a fix round (constraints.fix_round_for) and changed_files is empty AND the\n   rebase moved nothing (HEAD before == HEAD after, i.e. the branch had no commit beyond target), return\n   {'status': 'empty_merge', 'target', 'sha'} instead of 'merged' and set the task held, hold_reason\n   'empty_merge: fix round added no commit', without fast-forwarding; a non-fix task with an empty diff keeps\n   today's behaviour. report_merge treats 'empty_merge' like any non-merged status (notify).\n\nTests that assert the old behaviour (SPEC RULE): tests/test_daemon.py report_merge / fix-round merge tests (grep\n'merged_via' and 'fix_round_for' in tests/test_daemon.py, ~T-0191-era tests) assume the unconditional walk: give\ntheir scratch repos a landed ancestor branch so they keep passing, or update them to the new contract;\ntests/test_merge.py tests that merge an empty branch must not be fix rounds (grep 'fix_round_for'). Run\ntests/test_daemon.py and tests/test_merge.py.\n\nDepends on E6v2 (daemon.py chain). Out of scope: spawn.py (B7), bus.py, planner_runs.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.\n\nRe-filed 2026-10-01 (replaces T-1456): depends_on re-pointed to T-1470 after the B2v3/B4v3 respecs; the spec, acceptance and scope are unchanged.\n\nRe-filed 2026-10-02 (replaces T-1473): depends_on re-pointed to T-1492 after the round-3 respecs (B2v4, B4a/B4b, E12v3); spec, acceptance and scope unchanged.\n\nRe-filed 2026-10-02 00:55 (replaces T-1495): B2 was split into B2a T-1504 and B2b T-1506 and E6v2 re-filed as T-1507; depends_on re-pointed to T-1507; spec, acceptance and scope unchanged.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_fix_round_merge_stamps_only_landed_ancestors: passes: in a scratch repo, report_merge for a fix round whose fix_round_for ancestor branch is an ancestor of the target stamps it merged_via 'fix round ...'; when the ancestor branch holds a commit not reachable from the target and not patch-identical to anything on it, the ancestor is held 'unlanded_after_fix_round: <fix id>' with resume_hint.fix_round, the fix task itself is done and merged, pipeline.ancestor_stamps records 'unlanded', and a notify names both ids",
+    "tests/test_daemon.py::test_landed_uses_ancestry_then_patch_id: passes: daemon.landed is True for a missing task branch, True for an ancestor branch, True for a branch whose commits were rebased onto the target (same patch id, different sha), False for a branch with an unlanded change, False on a git error",
+    "tests/test_merge.py::test_fix_round_with_no_new_commit_is_empty_merge: passes: merge.merge on a fix-round task whose branch equals the target returns status 'empty_merge', leaves the target ref unchanged and holds the task 'empty_merge: fix round added no commit'; a non-fix task with the same branch still merges as today",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [
+    "T-1507"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B6",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1495"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790936878.463878,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1551 (B6 re-filed 2026-10-02 11:50 with depends_on T-1548; T-1507 was superseded)"
+    }
+  ],
+  "hold_reason": "superseded by T-1551 (B6 re-filed 2026-10-02 11:50 with depends_on T-1548; T-1507 was superseded)"
+}

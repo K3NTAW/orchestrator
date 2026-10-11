@@ -1,0 +1,234 @@
+{
+  "id": "T-1435",
+  "created_at": 1790872035.732399,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "Execute result derived from git state in spawn.run_worker: commits+clean -> done; dirty in scope -> one commit-now resume then auto-commit; out-of-scope dirt or no commits -> execute_incomplete hold",
+  "spec": "Goal T-1403, wave 2, plan label B4. Contract (plan.md): gitutil.execute_outcome(worktree, parent, scope)\n-> {ahead, head, dirty_in_scope, dirty_out_of_scope}; hold prefix execute_incomplete (B5 later maps it to failure\nkind 'incomplete').\n\nU2 resolved by reading the evidence (2026-10-01): status_reason non_json is NOT a prose final message. It is set at\norchestrator/spawn.py:1380-1384 when json.loads(stdout) of `claude -p --output-format json` fails, i.e. the CLI\nprinted no JSON envelope at all. Every recorded case has the same shape: reason 'non-JSON output (rc=143): ' with\nempty stdout+stderr, the CLI killed by SIGTERM. luna-inbox T-0514 (bus event 2026-09-27, ~20 min after spawn,\nworkers/T-0514.events.jsonl exit status_reason non_json, no execute run row logged) and 12 local orchestrator cases\n(T-0116, T-0127, T-0133, T-0136, T-0142, T-0145, T-0148, T-0149, T-0166, T-0168, T-0193, T-0222). luna T-0526 was\nnot non_json: reconcile marked the worker process_dead, then its own bus_post_result landed status done with a prose\nsummary ('Gate result: not finished ... Last commit c1f766b. The working tree is clean'). So the robust signal is the\ngit state of the worktree, whatever run_claude returned.\n\nFacts (main 355583c):\n- spawn.py:1513 run_worker(); 1611 first = run_claude(...); 1656-1660 execute + status done posts\n  {'summary', 'executed_by': f\"claude:{t['tier']}\", 'review'} with NO commit; 1709-1716 failed -> status failed,\n  reason, resume_hint.partial_output. The execute contract (orchestrator/contracts.py:36) expects summary, commit,\n  executed_by.\n- spawn.py:1637-1655 resume_output() resumes with resume_session, which run_claude turns into\n  `--resume <id> --tools \"\"` (1320-1322): no tools, so it cannot commit. The task-level resume path\n  t['_resume_session'] (1323-1324, set at 1541) resumes WITH the normal allowlist: use that for commit-now.\n- run_worker sets t['executor'] = 'claude:<tier>' at 1564 for execute.\n- orchestrator/gitutil.py:11-22 _resolve_base(worktree, parent) picks merge-base with goal/<parent>, origin/main,\n  main. daemon.py:1230 _dirty_scope_paths parses `git status --porcelain -z --untracked-files=all` and ignores\n  .orchestrator/ and .venv; mirror that parsing in gitutil (do not import daemon). Scope matching:\n  orchestrator/scopes.py:7 matches(path, entries).\n\nChange:\n1. gitutil.execute_outcome(worktree, parent, scope): None when worktree is not a git work tree or no base resolves;\n   else {'ahead': int (rev-list --count base..HEAD), 'head': sha, 'dirty_in_scope': sorted list,\n   'dirty_out_of_scope': sorted list}. Read-only.\n2. run_worker, role execute only, after the run (statuses 'done' and 'failed'; leave 'held', 'budget',\n   'superseded' as today): o = execute_outcome(worktree, t.get('parent'), t.get('scope') or []).\n   - o is None -> today's behaviour exactly.\n   - dirty_out_of_scope non-empty -> status held, hold_reason 'execute_incomplete: uncommitted changes outside\n     scope', resume_hint {'dirty_out_of_scope': [...], 'dirty_in_scope': [...], 'commit': head}.\n   - dirty_in_scope non-empty -> once: if a session id exists and budget/time remain, resume that session through\n     t['_resume_session'] with the normal allowlist and a short prompt ('Commit the in-scope changes now: git add\n     <paths> && git commit -m \"<task id>: ...\"; do not run tests; reply DONE.'), budget <= 20% of the role budget,\n     timeout <= 600 s. Then recompute; if in-scope files are still dirty, the orchestrator commits them itself in\n     the worktree (git add -- <exact paths>; git commit -m '<task id>: auto-commit in-scope leftovers after\n     executor exit'), never `git add -A`. Recompute again.\n   - ahead > 0 and tree clean (after the step above) -> post_result done with summary (the model's result text when\n     there is one, else 'derived from git state after <reason>'), commit = head, executed_by = t['executor'],\n     'derived_from': 'git_state' when run_claude did not return done.\n   - ahead == 0 and clean -> status held, hold_reason 'execute_incomplete: no commits', resume_hint carrying the\n     partial output when there is one.\n   All writes go through worker_control.write_if_current like the neighbouring code; usage of the resume is\n   combined into release_usage like resume_output does.\n3. spawn.py:1657: executed_by = t['executor'] (set at 1564) instead of re-deriving from tier.\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract):\n- tests/test_spawn.py::test_failed_without_reason_key_sets_default_and_resume_hint (~543-558): its worktree is a\n  plain directory (not git), so execute_outcome returns None and it must still pass unchanged; keep it that way.\n- Other execute run_worker tests in tests/test_spawn.py patch ensure_worktree to TMP (e.g.\n  test_run_worker_records_skills_exposed_and_l0_tokens ~1774, the instruction-token test ~1755-1773). If TMP is a\n  git work tree during the run, they now take the git branch; they assert only packet_meta, so they should pass;\n  run all of tests/test_spawn.py and update any execute test whose expected status changed to the new contract.\n- Build the new tests on tests/_harness.py scratch_repo; patch run_claude like the neighbouring tests.\n\nOut of scope: daemon.py (B5 adds fix rounds for execute_incomplete; the daemon gate hold 'executor did not commit'\nstays), executor.py, failures.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gitutil.py::test_execute_outcome_reports_ahead_head_and_dirty_split_by_scope: passes: in a scratch repo with a goal branch and a task worktree, gitutil.execute_outcome(worktree, parent, scope) returns ahead (commits since merge-base with goal/<parent>), head sha, and uncommitted paths split into dirty_in_scope / dirty_out_of_scope (untracked included, .orchestrator/ and .venv ignored), and None for a directory that is not a git work tree",
+    "tests/test_spawn.py::test_execute_result_derived_from_git_state: passes: run_worker for an execute task whose run_claude returns failed 'non-JSON output (rc=143): ' posts status done with result.commit = the worktree HEAD when the branch has a commit and a clean tree; with in-scope uncommitted files and no session it auto-commits them and posts done; with an out-of-scope dirty file it holds 'execute_incomplete: ...' with resume_hint.dirty_out_of_scope; with no commits it holds 'execute_incomplete: no commits'",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/gitutil.py",
+    "tests/test_spawn.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B4",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790872060.19751,
+      "pipeline": {
+        "first_ready_at": 1790872060.197461
+      }
+    },
+    {
+      "ts": 1790872060.970133,
+      "pipeline": {
+        "first_ready_at": 1790872060.197461,
+        "spec_review_at": 1790872060.9699001,
+        "spec_review_at_lease": 1790872960.9699001
+      }
+    },
+    {
+      "ts": 1790872060.981098,
+      "pipeline": {
+        "first_ready_at": 1790872060.197461,
+        "spec_review_at": 1790872060.9699001,
+        "spec_review_at_lease": 1790872960.9699001,
+        "spec_review_at_done": 1790872060.9810162
+      }
+    },
+    {
+      "ts": 1790872126.8417668,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "`ahead > 0` is measured from the merge-base, not from the start of this run. A fix-round or retry worktree already has commits from earlier rounds. A run that did nothing (killed, rc=143) would then be posted as done with commit = old head, which reports false success. The spec does not record `head` or `ahead` before the run.",
+          "severity": "high",
+          "line": 1611
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Derived done with `derived_from: git_state` overwrites a result the worker already posted through bus_post_result. The T-0526 case in the spec is exactly this: the worker posted done with its own summary, and the new post would replace it. The write path has no check for an existing result, and the spec does not say whether the worker's own post wins.",
+          "severity": "med",
+          "line": 1656
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The 'status done' path changes behaviour without a stated rule. When run_claude returns done but out-of-scope files are dirty or there are no commits, the result becomes a hold. Today that case posts done and the daemon gate then holds it with 'executor did not commit'. Two different hold reasons now cover the same state, and the daemon is out of scope. The spec does not say how `contracts.process` and `fit_result` interact with the derived commit, or whether they should run.",
+          "severity": "med",
+          "line": 1656
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The auto-commit of in-scope leftovers stages whatever a killed executor left behind. That can be partial or broken work, and it then looks like a finished commit with done status. There is no cap on file count or size, no guard for in-scope secrets or junk, and no marker in the result that the commit was synthetic. A stale `.git/index.lock` left by the SIGTERM can also make `git add` fail. The spec leaves unspecified what happens when the add or commit fails (it should hold, not raise or fall through silently).",
+          "severity": "med",
+          "line": 1637
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The commit-now resume reuses `t['_resume_session']` and mutates `t`. `run_claude` also reads `_resume_session` for the main run (1323), and `resume_task` sets it as well. The spec does not say to restore the key afterwards. A later `run_claude` call in the same worker, such as the tool escalation respawn, would silently resume the wrong session. For the non_json cases there is usually no session id, so the resume branch is mostly dead and untested against real failures.",
+          "severity": "med",
+          "line": 1323
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Time and budget accounting for the resume is underspecified. Elapsed time since `started`, and spend from the first run (including the tool-escalation respawn), must be subtracted. The spec says '<= 20% of the role budget' and '<= 600 s' but does not say 'remaining'. The usage of the resume must be added through `_combined_usage`, as `resume_output` does, with a `bus.log_run` row. The spec does not require that row, so the extra spend would be unlogged. A `superseded` check is also needed after the resume and before any commit or post.",
+          "severity": "med",
+          "line": 1637
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "issue": "Scope matching is split across two implementations: scopes.matches here, and the fnmatch or prefix logic in daemon `_dirty_scope_paths`. The spec says to mirror the parsing but use `scopes.matches`. If the two disagree on glob or directory entries (daemon also treats '.' as match-all), the daemon gate and the new split will classify the same file differently. The spec also does not say whether `rev-list` and `git status` failures return None or raise, and the git calls have no timeout.",
+          "severity": "low",
+          "line": 11
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "issue": "Execute tests that patch `ensure_worktree` to TMP are hostage to whether TMP is a git work tree. The harness's shared root may sit inside a repo. If it does, those tests silently take the new branch and may hold instead of post. The spec says only 'should pass'. It should require those tests to pin a non-git worktree, or an explicit execute_outcome mock, so they stay independent of the host environment.",
+          "severity": "low",
+          "line": 1774
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "No rollback or kill-switch is given for an outward-behaviour change, one that overrides run_claude's verdict and auto-commits. A config flag defaulting to on, or at least a note on the revert path, is missing.",
+          "severity": "low",
+          "line": 1611
+        }
+      ]
+    },
+    {
+      "ts": 1790872218.013074,
+      "pipeline": {
+        "first_ready_at": 1790872060.197461,
+        "spec_review_at": 1790872060.9699001,
+        "spec_review_at_lease": 1790872960.9699001,
+        "spec_review_at_done": 1790872060.9810162,
+        "spec_review_held_at": 1790872218.012981
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790872252.0889118,
+      "pipeline": {
+        "first_ready_at": 1790872060.197461,
+        "spec_review_at": 1790872060.9699001,
+        "spec_review_at_lease": 1790872960.9699001,
+        "spec_review_at_done": 1790872060.9810162,
+        "spec_review_held_at": 1790872218.012981,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790872254.0323179,
+      "pipeline": {
+        "first_ready_at": 1790872060.197461,
+        "spec_review_at": 1790872060.9699001,
+        "spec_review_at_lease": 1790872960.9699001,
+        "spec_review_at_done": 1790872060.9810162,
+        "spec_review_held_at": 1790872218.012981,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790872218.013074": true
+        }
+      }
+    },
+    {
+      "ts": 1790874133.7762299,
+      "status": "superseded",
+      "reason": "respec as B4v2 T-1453 after spec review T-1445 request_changes (commits counted since run start, worker-posted result wins, commit-now resume dropped, auto-commit guarded and marked synthetic, kill switch)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790872060.197461,
+    "spec_review_at": 1790872060.9699001,
+    "spec_review_at_lease": 1790872960.9699001,
+    "spec_review_at_done": 1790872060.9810162,
+    "spec_review_held_at": 1790872218.012981,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790872218.013074": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "`ahead > 0` is measured from the merge-base, not from the start of this run. A fix-round or retry worktree already has commits from earlier rounds. A run that did nothing (killed, rc=143) would then be posted as done with commit = old head, which reports false success. The spec does not record `head` or `ahead` before the run.",
+      "severity": "high",
+      "line": 1611
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Derived done with `derived_from: git_state` overwrites a result the worker already posted through bus_post_result. The T-0526 case in the spec is exactly this: the worker posted done with its own summary, and the new post would replace it. The write path has no check for an existing result, and the spec does not say whether the worker's own post wins.",
+      "severity": "med",
+      "line": 1656
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The 'status done' path changes behaviour without a stated rule. When run_claude returns done but out-of-scope files are dirty or there are no commits, the result becomes a hold. Today that case posts done and the daemon gate then holds it with 'executor did not commit'. Two different hold reasons now cover the same state, and the daemon is out of scope. The spec does not say how `contracts.process` and `fit_result` interact with the derived commit, or whether they should run.",
+      "severity": "med",
+      "line": 1656
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The auto-commit of in-scope leftovers stages whatever a killed executor left behind. That can be partial or broken work, and it then looks like a finished commit with done status. There is no cap on file count or size, no guard for in-scope secrets or junk, and no marker in the result that the commit was synthetic. A stale `.git/index.lock` left by the SIGTERM can also make `git add` fail. The spec leaves unspecified what happens when the add or commit fails (it should hold, not raise or fall through silently).",
+      "severity": "med",
+      "line": 1637
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The commit-now resume reuses `t['_resume_session']` and mutates `t`. `run_claude` also reads `_resume_session` for the main run (1323), and `resume_task` sets it as well. The spec does not say to restore the key afterwards. A later `run_claude` call in the same worker, such as the tool escalation respawn, would silently resume the wrong session. For the non_json cases there is usually no session id, so the resume branch is mostly dead and untested against real failures.",
+      "severity": "med",
+      "line": 1323
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Time and budget accounting for the resume is underspecified. Elapsed time since `started`, and spend from the first run (including the tool-escalation respawn), must be subtracted. The spec says '<= 20% of the role budget' and '<= 600 s' but does not say 'remaining'. The usage of the resume must be added through `_combined_usage`, as `resume_output` does, with a `bus.log_run` row. The spec does not require that row, so the extra spend would be unlogged. A `superseded` check is also needed after the resume and before any commit or post.",
+      "severity": "med",
+      "line": 1637
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "issue": "Scope matching is split across two implementations: scopes.matches here, and the fnmatch or prefix logic in daemon `_dirty_scope_paths`. The spec says to mirror the parsing but use `scopes.matches`. If the two disagree on glob or directory entries (daemon also treats '.' as match-all), the daemon gate and the new split will classify the same file differently. The spec also does not say whether `rev-list` and `git status` failures return None or raise, and the git calls have no timeout.",
+      "severity": "low",
+      "line": 11
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "issue": "Execute tests that patch `ensure_worktree` to TMP are hostage to whether TMP is a git work tree. The harness's shared root may sit inside a repo. If it does, those tests silently take the new branch and may hold instead of post. The spec says only 'should pass'. It should require those tests to pin a non-git worktree, or an explicit execute_outcome mock, so they stay independent of the host environment.",
+      "severity": "low",
+      "line": 1774
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "No rollback or kill-switch is given for an outward-behaviour change, one that overrides run_claude's verdict and auto-commits. A config flag defaulting to on, or at least a note on the revert path, is missing.",
+      "severity": "low",
+      "line": 1611
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "respec as B4v2 T-1453 after spec review T-1445 request_changes (commits counted since run start, worker-posted result wins, commit-now resume dropped, auto-commit guarded and marked synthetic, kill switch)"
+}

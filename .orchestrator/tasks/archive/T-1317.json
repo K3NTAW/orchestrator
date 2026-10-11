@@ -1,0 +1,626 @@
+{
+  "id": "T-1317",
+  "created_at": 1790180977.471673,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S3b stale-work severity and critical-path aware steering in shadow: low continue, medium steer with changed evidence, high cancel or hold, critical-path workers first (P28, P29)",
+  "spec": "orchestrator/stale.py evidence(): add severity (none|low|medium|high) and severity_reasons: high when a moved path is in the task's write scope or is a test named in its acceptance; medium when a moved path is in its read scope or imported by a file in its write scope (use the existing repo links when available); low otherwise; none when nothing moved. orchestrator/steering_policy.py: new trigger stale_severity evaluated before dependency_changed: low continue; medium steer with a message listing the moved paths and the goal head sha; high cancel when the task has not yet committed anything in its worktree, else steer plus hold_after_gate flag (the daemon holds the task after its next gate for the Planner with hold_reason stale_high) \u2014 never auto-rebase silently for high. Critical path: daemon evaluates running tasks in critical_path.rank order and, when [steering].noncritical_medium_continue is true (default true, dated comment), a medium severity on a task not on the critical path is continue with reason noncritical. Shadow rows kind steering carry severity, critical (bool) and the would-be action; active applies. Also record for every row the accepted-task economics fields the scorecard needs later (tokens so far from the registry, elapsed). Docs: docs/hermes-hardening/12-steering-policy.md gains the severity table and the critical-path rule.\nSpec review T-1313 folded in: (1) Cancel stays shadow-only exactly as the merged steering policy does (an active cancel candidate is logged and downgraded to steer); no live cancel in this task; the no-commits guard is informational only. (2) hold_after_gate is a pipeline key stale_high = {ts, paths, goal_head} written only in effective active mode (never when promotion refused active); the gate stage checks it before its auto-rebase: when present it skips the rebase and holds the task with hold_reason stale_high (no auto fix round; the Planner clears it), and the flag is cleared when the goal head no longer moves any listed path. (3) Economics fields (tokens so far from the registry tokens dict as input_uncached + cache_read + output when present, else null; elapsed) go into the row's extra only and never into the evidence hash. (4) stale.evidence gains severity as an OPTIONAL key derived when absent; on the git-failure path severity is 'unknown' with a reason and steering treats it as continue; STALE_KEYS is unchanged. (5) The AST import walk moves into a shared helper module orchestrator/scopes.py (scope adds it and tests/test_scopes.py) used by steering_policy.read_scope and by stale.py; acceptance test ids are parsed to their file path; precedence high > medium > low; moved paths outside both scopes are low. (6) stale_severity replaces the stale-evidence part of dependency_changed (dependency_changed no longer fires from stale evidence); security_concern stays first and unchanged; existing security_concern tests stay green. (7) Critical = the chain critical_path.explain reports for the head of critical_path.rank; the steering loop iterates running tasks in rank order; when rank fails (durations None) every task counts as critical.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Task worktrees carry no .orchestrator runs, tasks or decision_log state: tests use synthetic fixtures; for any measured numbers in docs run read-only against /Users/k3ntaw/code/orchestrator/.orchestrator via an explicit root argument. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Contracts of the earlier modules: .orchestrator/plan.md (section GOAL T-0991) and docs/hermes-hardening/*.md on this branch; read the merged modules before building on them.",
+  "inputs": [
+    "T-1316"
+  ],
+  "acceptance": [
+    "tests/test_stale.py::test_severity_from_write_read_scope_and_acceptance_tests",
+    "tests/test_steering_policy.py::test_stale_severity_actions_and_hold_after_gate",
+    "tests/test_steering_policy.py::test_noncritical_medium_continues_and_critical_first",
+    "tests/test_daemon.py::test_stale_high_holds_after_gate_in_active_and_only_logs_in_shadow",
+    "tests/test_scopes.py::test_shared_import_walk_and_acceptance_id_paths",
+    "tests/test_daemon.py::test_stale_high_flag_written_only_in_effective_active_and_gate_skips_rebase",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/stale.py",
+    "orchestrator/steering_policy.py",
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_stale.py",
+    "tests/test_steering_policy.py",
+    "tests/test_daemon.py",
+    "docs/hermes-hardening/12-steering-policy.md",
+    "orchestrator/scopes.py",
+    "tests/test_scopes.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1317",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The gate's auto-rebase site (~line 1301, where hold_reason stale_rebase_conflict is set) is not named in the spec. Hold semantics are underspecified. The spec doesn't say whether the hold uses a new status or the existing held plus hold_reason. It doesn't say how the Planner clears it, or whether the existing held-task handlers (lines ~151-167, keyed on hold_reason) would auto-release or ignore stale_high. Without this, a held task could be released or re-gated by an existing branch, or stale_high could be silently bypassed.",
+        "severity": "high",
+        "line": 1301
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The stale_high pipeline flag lifecycle is thin. 'Cleared when the goal head no longer moves any listed path' needs a defined evaluation point, since steering only runs on running tasks and the flag is written after the task may already be gated. The spec also doesn't cover the flag going stale across a restart, or a task that is re-dispatched. A flag that never decreases is exactly the failure to avoid here. It should specify who clears the flag and when, and how a Planner-cleared hold avoids being re-written on the next steering pass.",
+        "severity": "med",
+        "line": 1654
+      },
+      {
+        "path": "orchestrator/steering_policy.py",
+        "issue": "The evidence hash and dedupe currently depend on stale evidence (STALE_KEYS validation at ~line 136, evidence_hash at ~195). Severity is optional and derived, and economics go only in extra. The hash must include severity, or a low to high transition would be deduped away and the flag would never be written. It must exclude tokens and elapsed, or every pass would be a new row. The spec says economics are out of the hash but doesn't say severity is in it. Add a test for both.",
+        "severity": "med",
+        "line": 195
+      },
+      {
+        "path": "orchestrator/stale.py",
+        "issue": "'Imported by a file in its write scope' needs a direction and a limit. The spec says 'imported by' but means a moved path that a write-scope file imports. Say so explicitly. The AST walk also needs a bound: one level deep only, no transitive walk, syntax errors and missing files tolerated. The walk runs on every steering pass, so cache or bound it per pass. Files under the task's own worktree versus the goal head must be resolved consistently, or the result differs from read_scope.",
+        "severity": "med",
+        "line": 106
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Critical path handling: when critical_path.rank fails, every task counts as critical, so noncritical_medium_continue never applies. That is safe, but the fallback should be logged in the row (critical_source: rank_failed) so shadow rows don't read as real critical decisions. Also, per-task critical_path.explain calls in the steering loop should be computed once per pass, not once per task.",
+        "severity": "low",
+        "line": 1654
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "The [steering].noncritical_medium_continue key needs a default in code (True) when absent, and a tests/test_pool.py check if pool.toml keys are validated. test_pool.py is outside scope, so a pool.toml schema check there could fail the base suite. Verify before writing.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "docs/hermes-hardening/12-steering-policy.md",
+        "issue": "The docs must not quote template placeholders (double braces). The severity table and the critical-path rule are the only content required. Any measured numbers must come from a read-only run against the real .orchestrator root via an explicit root argument.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Name the hold mechanism: status held with hold_reason stale_high at the gate stage next to the stale_rebase_conflict site. State that existing held-task release handlers must leave hold_reason stale_high untouched, and that the Planner clears the hold by removing pipeline.stale_high and re-releasing the task. Add a test that a held stale_high task is not auto-released.",
+      "Define when stale_high is cleared: at each steering pass that evaluates the task, or at gate time. Also state that the gate re-checks moved paths against the current goal head before honoring the flag, so a stale flag cannot hold a task forever.",
+      "State that severity and severity_reasons are part of the evidence hash used for dedupe, while tokens_so_far and elapsed are excluded. Add a test that a severity change produces a new row and that an elapsed-only change does not.",
+      "Specify the import walk as one level: moved path is imported by a write-scope file. Tolerate SyntaxError, missing files and non-Python files. Cap the files parsed per pass.",
+      "Record critical_source (rank or rank_failed) in the shadow row's extra. Compute rank and explain once per steering pass.",
+      "Confirm that the git-failure severity 'unknown' passes any severity validation in stale.evidence and in steering_policy, and add it to the severity table in the docs as continue.",
+      "Add a rollback note: every new behavior is gated by steering mode. Shadow mode writes only decision_log rows, and setting the mode to shadow or off disables stale_high writes."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790180979.0657332,
+      "packet_meta": {
+        "chars": 6157,
+        "est_tokens": 1539,
+        "presented_tokens": 1539,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "1f2b17fca02d4df55f3bbbbf26d4f9acc0b7aa8a6f586f945d5747045b17d057"
+          },
+          "spec": {
+            "chars": 4290,
+            "est_tokens": 1072,
+            "sha256": "44ac30def0513e80648a76f7c20d87d95df36e3eaccda73f0f59d34d148a5bb4"
+          },
+          "acceptance": {
+            "chars": 563,
+            "est_tokens": 140,
+            "sha256": "6136c247a5d8f1d1bb8bf5d6fca848b22a0cfde36c9090df6becb7f26b894efc"
+          },
+          "scope": {
+            "chars": 289,
+            "est_tokens": 72,
+            "sha256": "985782cacf2bf399c601e8036881ba3a80e8c5c69dc1d133f24ab16486aab9f0"
+          },
+          "depends_on": {
+            "chars": 242,
+            "est_tokens": 60,
+            "sha256": "601bd0fe857371081d70e7d673e24ef7ee104289a7c7fe2ad082a809bf794ca1"
+          },
+          "existing tests": {
+            "chars": 674,
+            "est_tokens": 168,
+            "sha256": "9dc30859e7c6bf1d956a4a95aa9306025d47e8564351a3ef47019ede7ec2b821"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "7f0f891c9deb",
+        "version": "7f0f891c9deb",
+        "candidate_known": false,
+        "base": "5de6c3770b7b",
+        "sources": "task@T-1316 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790180980.996072,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1317",
+      "claimed_at": 1790180980.9957561
+    },
+    {
+      "ts": 1790180980.997059,
+      "account": "A"
+    },
+    {
+      "ts": 1790180981.974802,
+      "pid": 19411,
+      "account": "A"
+    },
+    {
+      "ts": 1790181013.7842188,
+      "packet_meta": {
+        "chars": 6157,
+        "est_tokens": 1539,
+        "presented_tokens": 1539,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "1f2b17fca02d4df55f3bbbbf26d4f9acc0b7aa8a6f586f945d5747045b17d057"
+          },
+          "spec": {
+            "chars": 4290,
+            "est_tokens": 1072,
+            "sha256": "44ac30def0513e80648a76f7c20d87d95df36e3eaccda73f0f59d34d148a5bb4"
+          },
+          "acceptance": {
+            "chars": 563,
+            "est_tokens": 140,
+            "sha256": "6136c247a5d8f1d1bb8bf5d6fca848b22a0cfde36c9090df6becb7f26b894efc"
+          },
+          "scope": {
+            "chars": 289,
+            "est_tokens": 72,
+            "sha256": "985782cacf2bf399c601e8036881ba3a80e8c5c69dc1d133f24ab16486aab9f0"
+          },
+          "depends_on": {
+            "chars": 242,
+            "est_tokens": 60,
+            "sha256": "601bd0fe857371081d70e7d673e24ef7ee104289a7c7fe2ad082a809bf794ca1"
+          },
+          "existing tests": {
+            "chars": 674,
+            "est_tokens": 168,
+            "sha256": "9dc30859e7c6bf1d956a4a95aa9306025d47e8564351a3ef47019ede7ec2b821"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "7f0f891c9deb",
+        "version": "7f0f891c9deb",
+        "candidate_known": false,
+        "base": "5de6c3770b7b",
+        "sources": "task@T-1316 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d9bdcd10-2814-4d54-abc8-322ced1af118"
+      }
+    },
+    {
+      "ts": 1790181013.810215,
+      "packet_meta": {
+        "chars": 6157,
+        "est_tokens": 1539,
+        "presented_tokens": 1539,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "1f2b17fca02d4df55f3bbbbf26d4f9acc0b7aa8a6f586f945d5747045b17d057"
+          },
+          "spec": {
+            "chars": 4290,
+            "est_tokens": 1072,
+            "sha256": "44ac30def0513e80648a76f7c20d87d95df36e3eaccda73f0f59d34d148a5bb4"
+          },
+          "acceptance": {
+            "chars": 563,
+            "est_tokens": 140,
+            "sha256": "6136c247a5d8f1d1bb8bf5d6fca848b22a0cfde36c9090df6becb7f26b894efc"
+          },
+          "scope": {
+            "chars": 289,
+            "est_tokens": 72,
+            "sha256": "985782cacf2bf399c601e8036881ba3a80e8c5c69dc1d133f24ab16486aab9f0"
+          },
+          "depends_on": {
+            "chars": 242,
+            "est_tokens": 60,
+            "sha256": "601bd0fe857371081d70e7d673e24ef7ee104289a7c7fe2ad082a809bf794ca1"
+          },
+          "existing tests": {
+            "chars": 674,
+            "est_tokens": 168,
+            "sha256": "9dc30859e7c6bf1d956a4a95aa9306025d47e8564351a3ef47019ede7ec2b821"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "7f0f891c9deb",
+        "version": "7f0f891c9deb",
+        "candidate_known": false,
+        "base": "5de6c3770b7b",
+        "sources": "task@T-1316 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d9bdcd10-2814-4d54-abc8-322ced1af118",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790181013.8154109,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The gate's auto-rebase site (~line 1301, where hold_reason stale_rebase_conflict is set) is not named in the spec. Hold semantics are underspecified. The spec doesn't say whether the hold uses a new status or the existing held plus hold_reason. It doesn't say how the Planner clears it, or whether the existing held-task handlers (lines ~151-167, keyed on hold_reason) would auto-release or ignore stale_high. Without this, a held task could be released or re-gated by an existing branch, or stale_high could be silently bypassed.",
+            "severity": "high",
+            "line": 1301
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The stale_high pipeline flag lifecycle is thin. 'Cleared when the goal head no longer moves any listed path' needs a defined evaluation point, since steering only runs on running tasks and the flag is written after the task may already be gated. The spec also doesn't cover the flag going stale across a restart, or a task that is re-dispatched. A flag that never decreases is exactly the failure to avoid here. It should specify who clears the flag and when, and how a Planner-cleared hold avoids being re-written on the next steering pass.",
+            "severity": "med",
+            "line": 1654
+          },
+          {
+            "path": "orchestrator/steering_policy.py",
+            "issue": "The evidence hash and dedupe currently depend on stale evidence (STALE_KEYS validation at ~line 136, evidence_hash at ~195). Severity is optional and derived, and economics go only in extra. The hash must include severity, or a low to high transition would be deduped away and the flag would never be written. It must exclude tokens and elapsed, or every pass would be a new row. The spec says economics are out of the hash but doesn't say severity is in it. Add a test for both.",
+            "severity": "med",
+            "line": 195
+          },
+          {
+            "path": "orchestrator/stale.py",
+            "issue": "'Imported by a file in its write scope' needs a direction and a limit. The spec says 'imported by' but means a moved path that a write-scope file imports. Say so explicitly. The AST walk also needs a bound: one level deep only, no transitive walk, syntax errors and missing files tolerated. The walk runs on every steering pass, so cache or bound it per pass. Files under the task's own worktree versus the goal head must be resolved consistently, or the result differs from read_scope.",
+            "severity": "med",
+            "line": 106
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Critical path handling: when critical_path.rank fails, every task counts as critical, so noncritical_medium_continue never applies. That is safe, but the fallback should be logged in the row (critical_source: rank_failed) so shadow rows don't read as real critical decisions. Also, per-task critical_path.explain calls in the steering loop should be computed once per pass, not once per task.",
+            "severity": "low",
+            "line": 1654
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "The [steering].noncritical_medium_continue key needs a default in code (True) when absent, and a tests/test_pool.py check if pool.toml keys are validated. test_pool.py is outside scope, so a pool.toml schema check there could fail the base suite. Verify before writing.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "docs/hermes-hardening/12-steering-policy.md",
+            "issue": "The docs must not quote template placeholders (double braces). The severity table and the critical-path rule are the only content required. Any measured numbers must come from a read-only run against the real .orchestrator root via an explicit root argument.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Name the hold mechanism: status held with hold_reason stale_high at the gate stage next to the stale_rebase_conflict site. State that existing held-task release handlers must leave hold_reason stale_high untouched, and that the Planner clears the hold by removing pipeline.stale_high and re-releasing the task. Add a test that a held stale_high task is not auto-released.",
+          "Define when stale_high is cleared: at each steering pass that evaluates the task, or at gate time. Also state that the gate re-checks moved paths against the current goal head before honoring the flag, so a stale flag cannot hold a task forever.",
+          "State that severity and severity_reasons are part of the evidence hash used for dedupe, while tokens_so_far and elapsed are excluded. Add a test that a severity change produces a new row and that an elapsed-only change does not.",
+          "Specify the import walk as one level: moved path is imported by a write-scope file. Tolerate SyntaxError, missing files and non-Python files. Cap the files parsed per pass.",
+          "Record critical_source (rank or rank_failed) in the shadow row's extra. Compute rank and explain once per steering pass.",
+          "Confirm that the git-failure severity 'unknown' passes any severity validation in stale.evidence and in steering_policy, and add it to the severity table in the docs as continue.",
+          "Add a rollback note: every new behavior is gated by steering mode. Shadow mode writes only decision_log rows, and setting the mode to shadow or off disables stale_high writes."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790181013.81648,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The gate's auto-rebase site (~line 1301, where hold_reason stale_rebase_conflict is set) is not named in the spec. Hold semantics are underspecified. The spec doesn't say whether the hold uses a new status or the existing held plus hold_reason. It doesn't say how the Planner clears it, or whether the existing held-task handlers (lines ~151-167, keyed on hold_reason) would auto-release or ignore stale_high. Without this, a held task could be released or re-gated by an existing branch, or stale_high could be silently bypassed.",
+          "severity": "high",
+          "line": 1301
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The stale_high pipeline flag lifecycle is thin. 'Cleared when the goal head no longer moves any listed path' needs a defined evaluation point, since steering only runs on running tasks and the flag is written after the task may already be gated. The spec also doesn't cover the flag going stale across a restart, or a task that is re-dispatched. A flag that never decreases is exactly the failure to avoid here. It should specify who clears the flag and when, and how a Planner-cleared hold avoids being re-written on the next steering pass.",
+          "severity": "med",
+          "line": 1654
+        },
+        {
+          "path": "orchestrator/steering_policy.py",
+          "issue": "The evidence hash and dedupe currently depend on stale evidence (STALE_KEYS validation at ~line 136, evidence_hash at ~195). Severity is optional and derived, and economics go only in extra. The hash must include severity, or a low to high transition would be deduped away and the flag would never be written. It must exclude tokens and elapsed, or every pass would be a new row. The spec says economics are out of the hash but doesn't say severity is in it. Add a test for both.",
+          "severity": "med",
+          "line": 195
+        },
+        {
+          "path": "orchestrator/stale.py",
+          "issue": "'Imported by a file in its write scope' needs a direction and a limit. The spec says 'imported by' but means a moved path that a write-scope file imports. Say so explicitly. The AST walk also needs a bound: one level deep only, no transitive walk, syntax errors and missing files tolerated. The walk runs on every steering pass, so cache or bound it per pass. Files under the task's own worktree versus the goal head must be resolved consistently, or the result differs from read_scope.",
+          "severity": "med",
+          "line": 106
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Critical path handling: when critical_path.rank fails, every task counts as critical, so noncritical_medium_continue never applies. That is safe, but the fallback should be logged in the row (critical_source: rank_failed) so shadow rows don't read as real critical decisions. Also, per-task critical_path.explain calls in the steering loop should be computed once per pass, not once per task.",
+          "severity": "low",
+          "line": 1654
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "The [steering].noncritical_medium_continue key needs a default in code (True) when absent, and a tests/test_pool.py check if pool.toml keys are validated. test_pool.py is outside scope, so a pool.toml schema check there could fail the base suite. Verify before writing.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "docs/hermes-hardening/12-steering-policy.md",
+          "issue": "The docs must not quote template placeholders (double braces). The severity table and the critical-path rule are the only content required. Any measured numbers must come from a read-only run against the real .orchestrator root via an explicit root argument.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 6157,
+    "est_tokens": 1539,
+    "presented_tokens": 1539,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "1f2b17fca02d4df55f3bbbbf26d4f9acc0b7aa8a6f586f945d5747045b17d057"
+      },
+      "spec": {
+        "chars": 4290,
+        "est_tokens": 1072,
+        "sha256": "44ac30def0513e80648a76f7c20d87d95df36e3eaccda73f0f59d34d148a5bb4"
+      },
+      "acceptance": {
+        "chars": 563,
+        "est_tokens": 140,
+        "sha256": "6136c247a5d8f1d1bb8bf5d6fca848b22a0cfde36c9090df6becb7f26b894efc"
+      },
+      "scope": {
+        "chars": 289,
+        "est_tokens": 72,
+        "sha256": "985782cacf2bf399c601e8036881ba3a80e8c5c69dc1d133f24ab16486aab9f0"
+      },
+      "depends_on": {
+        "chars": 242,
+        "est_tokens": 60,
+        "sha256": "601bd0fe857371081d70e7d673e24ef7ee104289a7c7fe2ad082a809bf794ca1"
+      },
+      "existing tests": {
+        "chars": 674,
+        "est_tokens": 168,
+        "sha256": "9dc30859e7c6bf1d956a4a95aa9306025d47e8564351a3ef47019ede7ec2b821"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "7f0f891c9deb",
+    "version": "7f0f891c9deb",
+    "candidate_known": false,
+    "base": "5de6c3770b7b",
+    "sources": "task@T-1316 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "d9bdcd10-2814-4d54-abc8-322ced1af118",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790180980.9957561,
+  "account": "A",
+  "pid": 19411,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The gate's auto-rebase site (~line 1301, where hold_reason stale_rebase_conflict is set) is not named in the spec. Hold semantics are underspecified. The spec doesn't say whether the hold uses a new status or the existing held plus hold_reason. It doesn't say how the Planner clears it, or whether the existing held-task handlers (lines ~151-167, keyed on hold_reason) would auto-release or ignore stale_high. Without this, a held task could be released or re-gated by an existing branch, or stale_high could be silently bypassed.",
+      "severity": "high",
+      "line": 1301
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The stale_high pipeline flag lifecycle is thin. 'Cleared when the goal head no longer moves any listed path' needs a defined evaluation point, since steering only runs on running tasks and the flag is written after the task may already be gated. The spec also doesn't cover the flag going stale across a restart, or a task that is re-dispatched. A flag that never decreases is exactly the failure to avoid here. It should specify who clears the flag and when, and how a Planner-cleared hold avoids being re-written on the next steering pass.",
+      "severity": "med",
+      "line": 1654
+    },
+    {
+      "path": "orchestrator/steering_policy.py",
+      "issue": "The evidence hash and dedupe currently depend on stale evidence (STALE_KEYS validation at ~line 136, evidence_hash at ~195). Severity is optional and derived, and economics go only in extra. The hash must include severity, or a low to high transition would be deduped away and the flag would never be written. It must exclude tokens and elapsed, or every pass would be a new row. The spec says economics are out of the hash but doesn't say severity is in it. Add a test for both.",
+      "severity": "med",
+      "line": 195
+    },
+    {
+      "path": "orchestrator/stale.py",
+      "issue": "'Imported by a file in its write scope' needs a direction and a limit. The spec says 'imported by' but means a moved path that a write-scope file imports. Say so explicitly. The AST walk also needs a bound: one level deep only, no transitive walk, syntax errors and missing files tolerated. The walk runs on every steering pass, so cache or bound it per pass. Files under the task's own worktree versus the goal head must be resolved consistently, or the result differs from read_scope.",
+      "severity": "med",
+      "line": 106
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Critical path handling: when critical_path.rank fails, every task counts as critical, so noncritical_medium_continue never applies. That is safe, but the fallback should be logged in the row (critical_source: rank_failed) so shadow rows don't read as real critical decisions. Also, per-task critical_path.explain calls in the steering loop should be computed once per pass, not once per task.",
+      "severity": "low",
+      "line": 1654
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "The [steering].noncritical_medium_continue key needs a default in code (True) when absent, and a tests/test_pool.py check if pool.toml keys are validated. test_pool.py is outside scope, so a pool.toml schema check there could fail the base suite. Verify before writing.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "docs/hermes-hardening/12-steering-policy.md",
+      "issue": "The docs must not quote template placeholders (double braces). The severity table and the critical-path rule are the only content required. Any measured numbers must come from a read-only run against the real .orchestrator root via an explicit root argument.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

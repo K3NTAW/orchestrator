@@ -1,0 +1,202 @@
+{
+  "id": "T-0784",
+  "created_at": 1790083430.485579,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: P2 + P3/P4 (library): canonical evidence objects and a deterministic context router (HIDE/SHORT/LONG/FULL) with role profiles, pure functions, no packet wiring",
+  "spec": "Program brief .orchestrator/roadmap-context.md P2, P3, P4, P6, P7 (cache key only). This task builds the library; T-<wiring task> (filed separately, depends on this) hooks it into spawn packets in shadow. No existing behaviour changes.\n\nA. orchestrator/evidence.py (new)\n- `@dataclass(frozen=True) Evidence`: id (str, 12-hex sha256 over f\"{source_type}|{location}|{content_hash}\"), source_type (one of SOURCE_TYPES = (\"source_chunk\", \"test_result\", \"scout_finding\", \"memory_entry\", \"graph_finding\", \"previous_result\", \"review_finding\", \"architecture_note\", \"decision\", \"external_doc\")), location (str: path[:line-range], task id, memory heading), commit (str, goal head sha or \"\"), content_hash (sha256 of the raw content, full hex), content (str, raw, bounded by the caller), summary_short (str \u2264 160 chars: deterministic first meaningful line / signature / heading), summary_long (str \u2264 600 chars: first 600 chars of content with whitespace collapsed; callers may pass a better one), relevance (dict: scope_match bool, title_terms int (count of task-title words \u22654 chars found in content, case-insensitive), path_terms int (scope path stems found), recent_task str|None), provenance (one of \"repo\", \"bus\", \"memory\", \"scout\", \"external\"), observed_at (float epoch), trust (\"trusted\" for provenance repo/memory, \"untrusted\" otherwise).\n- `make(source_type, location, content, *, commit=\"\", provenance, task=None, scope=(), summary_long=None, observed_at=None) -> Evidence` computes id, hashes, summaries and relevance from task title/scope when task is given.\n- `Pool` bound to a goal: file `.orchestrator/evidence/<goal>.jsonl` under STATE (create dir), `add(ev)` idempotent by id (returns existing), `get(id)`, `by_type(t)`, `fresh(ev, head_sha)` (True when ev.commit == head_sha or source_type not in (\"source_chunk\",\"test_result\")), `stale_ids(head_sha)`. Never store secrets: run jev.redact over content before persisting and note it in the docstring.\n- `cache_key(ev, task_class, role, level)` = sha256 of f\"{ev.content_hash}|{task_class}|{role}|{level}\"[:16] (P7 key shape; no summariser yet).\n\nB. orchestrator/context_router.py (new)\n- LEVELS = (\"HIDE\", \"SHORT\", \"LONG\", \"FULL\"); `@dataclass Routed`: evidence_id, level, reason (short deterministic string, e.g. \"in_scope_file\", \"acceptance\", \"failing_output\", \"unrelated_memory\", \"stale\", \"read_scope\", \"dependency\", \"ambiguous\"), tokens_full, tokens_at_level (chars//4 of the text render() would emit).\n- `route(task, candidates: list[Evidence], *, role, head_sha=None, cfg=None) -> RoutedPacket` with RoutedPacket fields: items (list[Routed]), candidate_tokens, routed_tokens, reduction_ratio (routed/candidate, 1.0 when candidate 0), ambiguous_ids (list), profile (role name), rules_version (\"v1\").\n- Deterministic rules (P4), applied in this order, first match wins: FULL when source_type==\"source_chunk\" and location's path is in task scope (write scope) and role in (\"execute\", \"scout\"); FULL for source_type \"test_result\" whose location matches a failing id in task.constraints/pipeline (fix rounds) or whose content contains \"FAIL\"/\"ERROR\"; FULL for the task's own spec/acceptance (source_type \"architecture_note\" with location \"task:<id>:spec|acceptance\", callers create these); HIDE when relevance.scope_match is False and title_terms == 0 and path_terms == 0 and source_type in (\"memory_entry\", \"decision\", \"previous_result\", \"review_finding\"); HIDE when not fresh(ev, head_sha) and source_type in (\"source_chunk\", \"test_result\"); SHORT for source_chunk not in scope (read scope / imports) in every role; LONG for previous_result, scout_finding, decision, memory_entry that match by scope or title terms; everything else \u2192 LONG with reason \"ambiguous\" and the id appended to ambiguous_ids (P5 hands these to Jev later; never call Jev here).\n- Role profiles (P6): execute as above; review: source_chunk in scope \u2192 LONG (interface summary) not FULL, review_finding/previous_result \u2192 SHORT, test_result \u2192 FULL; security_review: like review plus FULL for any source_chunk whose path matches a [review] security_paths glob from cfg; planner: every source_chunk \u2192 SHORT, decisions/architecture_note \u2192 LONG; scout: FULL only for source_chunk in scope, else SHORT. Unknown role \u2192 execute profile.\n- `render(routed_packet, pool_or_lookup) -> str`: \"## evidence (routed v1)\" followed by one block per non-HIDE item: SHORT = \"- {location} \u2014 {summary_short}\", LONG = \"- {location}\\n  {summary_long}\", FULL = \"- {location}\\n```\\n{content}\\n```\"; HIDE items are counted in a trailing line \"hidden: N\". Deterministic ordering: FULL, LONG, SHORT, then by location.\n- `decision_row(task, routed_packet, *, mode)` returns the dict for decision_log.record(kind=\"context_selection\", ...) with candidates = [id:level], hard_constraints = the FULL reasons, deterministic = {counts per level, candidate_tokens, routed_tokens, reduction_ratio, ambiguous: n}, selected = \"routed v1\", reason = f\"{role} profile rules v1\", mode = mode; no chain-of-thought text, no content. (Uses decision_log kind context_selection from T-0772.)\n\nC. Tests (unittest, `import _harness` first): tests/test_evidence.py::test_make_ids_are_content_addressed_and_redacted, ::test_pool_add_is_idempotent_and_fresh_by_commit; tests/test_context_router.py::test_execute_profile_full_for_scope_hide_unrelated_memory, ::test_review_profile_long_for_scope_and_full_tests, ::test_render_orders_and_counts_hidden, ::test_reduction_ratio_and_ambiguous_bucket, ::test_decision_row_has_no_content. Fixtures build Evidence via make(); no real repo needed.\nD. docs/context-economy/05-context-router.md (\u226480 lines): the rule table per role, the Evidence schema, what shadow will log (from the wiring task), what is explicitly not done yet (Jev P5, summariser P7, active mode P21).\nConstraints: no new dependencies; never call Jev; never read files outside STATE in this module (callers build Evidence). Do not ask questions; decide and note decisions in the result.",
+  "inputs": [
+    "T-0779"
+  ],
+  "acceptance": [
+    "tests/test_evidence.py::test_make_ids_are_content_addressed_and_redacted passes",
+    "tests/test_evidence.py::test_pool_add_is_idempotent_and_fresh_by_commit passes",
+    "tests/test_context_router.py::test_execute_profile_full_for_scope_hide_unrelated_memory passes",
+    "tests/test_context_router.py::test_review_profile_long_for_scope_and_full_tests passes",
+    "tests/test_context_router.py::test_render_orders_and_counts_hidden passes",
+    "tests/test_context_router.py::test_reduction_ratio_and_ambiguous_bucket passes",
+    "tests/test_context_router.py::test_decision_row_has_no_content passes",
+    "docs/context-economy/05-context-router.md exists; no change to any existing module; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/evidence.py",
+    "orchestrator/context_router.py",
+    "tests/test_evidence.py",
+    "tests/test_context_router.py",
+    "docs/context-economy/05-context-router.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0784",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": ".orchestrator/roadmap-context.md",
+        "issue": "Spec cites this file as the P2/P3/P4/P6/P7 program brief but it does not exist anywhere in the repo (checked via find and git log for T-0765/T-0772/T-0779). The repo's actual context-economy doc set (docs/context-economy/00-audit.md, 02-modes.md) uses a different numbering scheme (P26, P30, P27/P28), not P2/P3/P4/P6/P7. The doc deliverable (05-context-router.md) is asked to describe 'what shadow will log' and 'what's not done yet' with no real source to draw from, and the executor has no way to verify the cited P-numbers align with anything.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "docs/context-economy/05-context-router.md (acceptance)",
+        "issue": "'no change to any existing module' is listed as an acceptance criterion but .claude/hooks/tests-green.sh only runs the test suite (confirmed by reading the hook) and no scope/diff enforcement exists in daemon.py or merge.py. This criterion cannot be verified by the stated gate; only a human diff review would catch a violation.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/evidence.py",
+        "issue": "The spec names the new per-goal cache class 'Pool', but orchestrator/pool.py:145 already defines a class Pool (the account pool). Two same-named, semantically unrelated classes in the same package (orchestrator.pool.Pool vs orchestrator.evidence.Pool) is a naming collision a reviewer would reject \u2014 confusing in imports, greps, and any code that does 'from orchestrator import pool, evidence' and calls .Pool().",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "decision_row(task, routed_packet, *, mode) is specified to return 'the dict for decision_log.record(kind=\"context_selection\", ...)', but decision_log.record(kind, subject, *, candidates, hard_constraints, deterministic, selected, reason, ...) requires a positional 'subject' that decision_row's field list never mentions producing. Ambiguous whether decision_row includes subject/kind keys or the wiring caller supplies them separately.",
+        "severity": "low",
+        "line": 105
+      }
+    ],
+    "suggested_spec_changes": [
+      "Either check in .orchestrator/roadmap-context.md with the P2/P3/P4/P6/P7 sections it cites (reconciled with existing P26/P30 numbering in docs/context-economy/00-audit.md), or drop the citation and let section A/B's inline rules stand as the sole source of truth for the executor and for 05-context-router.md.",
+      "Drop 'no change to any existing module' from acceptance, or replace it with a mechanically checkable form (e.g. 'git diff --stat main...HEAD touches only the scope list') that the Planner or a hook actually runs before merge.",
+      "Rename evidence.py's cache class to EvidencePool (or similar) to avoid colliding with orchestrator.pool.Pool.",
+      "State explicitly whether decision_row's returned dict is meant to be splatted directly into decision_log.record(subject=task.id, **decision_row(...)) or whether the wiring task assembles kind/subject itself."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790083434.1777542,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0784",
+      "claimed_at": 1790083434.174639
+    },
+    {
+      "ts": 1790083434.189885,
+      "account": "B"
+    },
+    {
+      "ts": 1790083440.647097,
+      "pid": 15833,
+      "account": "B"
+    },
+    {
+      "ts": 1790083630.104647,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": ".orchestrator/roadmap-context.md",
+            "issue": "Spec cites this file as the P2/P3/P4/P6/P7 program brief but it does not exist anywhere in the repo (checked via find and git log for T-0765/T-0772/T-0779). The repo's actual context-economy doc set (docs/context-economy/00-audit.md, 02-modes.md) uses a different numbering scheme (P26, P30, P27/P28), not P2/P3/P4/P6/P7. The doc deliverable (05-context-router.md) is asked to describe 'what shadow will log' and 'what's not done yet' with no real source to draw from, and the executor has no way to verify the cited P-numbers align with anything.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "docs/context-economy/05-context-router.md (acceptance)",
+            "issue": "'no change to any existing module' is listed as an acceptance criterion but .claude/hooks/tests-green.sh only runs the test suite (confirmed by reading the hook) and no scope/diff enforcement exists in daemon.py or merge.py. This criterion cannot be verified by the stated gate; only a human diff review would catch a violation.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/evidence.py",
+            "issue": "The spec names the new per-goal cache class 'Pool', but orchestrator/pool.py:145 already defines a class Pool (the account pool). Two same-named, semantically unrelated classes in the same package (orchestrator.pool.Pool vs orchestrator.evidence.Pool) is a naming collision a reviewer would reject \u2014 confusing in imports, greps, and any code that does 'from orchestrator import pool, evidence' and calls .Pool().",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "decision_row(task, routed_packet, *, mode) is specified to return 'the dict for decision_log.record(kind=\"context_selection\", ...)', but decision_log.record(kind, subject, *, candidates, hard_constraints, deterministic, selected, reason, ...) requires a positional 'subject' that decision_row's field list never mentions producing. Ambiguous whether decision_row includes subject/kind keys or the wiring caller supplies them separately.",
+            "severity": "low",
+            "line": 105
+          }
+        ],
+        "suggested_spec_changes": [
+          "Either check in .orchestrator/roadmap-context.md with the P2/P3/P4/P6/P7 sections it cites (reconciled with existing P26/P30 numbering in docs/context-economy/00-audit.md), or drop the citation and let section A/B's inline rules stand as the sole source of truth for the executor and for 05-context-router.md.",
+          "Drop 'no change to any existing module' from acceptance, or replace it with a mechanically checkable form (e.g. 'git diff --stat main...HEAD touches only the scope list') that the Planner or a hook actually runs before merge.",
+          "Rename evidence.py's cache class to EvidencePool (or similar) to avoid colliding with orchestrator.pool.Pool.",
+          "State explicitly whether decision_row's returned dict is meant to be splatted directly into decision_log.record(subject=task.id, **decision_row(...)) or whether the wiring task assembles kind/subject itself."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790083630.10624,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/roadmap-context.md",
+          "issue": "Spec cites this file as the P2/P3/P4/P6/P7 program brief but it does not exist anywhere in the repo (checked via find and git log for T-0765/T-0772/T-0779). The repo's actual context-economy doc set (docs/context-economy/00-audit.md, 02-modes.md) uses a different numbering scheme (P26, P30, P27/P28), not P2/P3/P4/P6/P7. The doc deliverable (05-context-router.md) is asked to describe 'what shadow will log' and 'what's not done yet' with no real source to draw from, and the executor has no way to verify the cited P-numbers align with anything.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "docs/context-economy/05-context-router.md (acceptance)",
+          "issue": "'no change to any existing module' is listed as an acceptance criterion but .claude/hooks/tests-green.sh only runs the test suite (confirmed by reading the hook) and no scope/diff enforcement exists in daemon.py or merge.py. This criterion cannot be verified by the stated gate; only a human diff review would catch a violation.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/evidence.py",
+          "issue": "The spec names the new per-goal cache class 'Pool', but orchestrator/pool.py:145 already defines a class Pool (the account pool). Two same-named, semantically unrelated classes in the same package (orchestrator.pool.Pool vs orchestrator.evidence.Pool) is a naming collision a reviewer would reject \u2014 confusing in imports, greps, and any code that does 'from orchestrator import pool, evidence' and calls .Pool().",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "decision_row(task, routed_packet, *, mode) is specified to return 'the dict for decision_log.record(kind=\"context_selection\", ...)', but decision_log.record(kind, subject, *, candidates, hard_constraints, deterministic, selected, reason, ...) requires a positional 'subject' that decision_row's field list never mentions producing. Ambiguous whether decision_row includes subject/kind keys or the wiring caller supplies them separately.",
+          "severity": "low",
+          "line": 105
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790083434.174639,
+  "account": "B",
+  "pid": 15833,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/roadmap-context.md",
+      "issue": "Spec cites this file as the P2/P3/P4/P6/P7 program brief but it does not exist anywhere in the repo (checked via find and git log for T-0765/T-0772/T-0779). The repo's actual context-economy doc set (docs/context-economy/00-audit.md, 02-modes.md) uses a different numbering scheme (P26, P30, P27/P28), not P2/P3/P4/P6/P7. The doc deliverable (05-context-router.md) is asked to describe 'what shadow will log' and 'what's not done yet' with no real source to draw from, and the executor has no way to verify the cited P-numbers align with anything.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "docs/context-economy/05-context-router.md (acceptance)",
+      "issue": "'no change to any existing module' is listed as an acceptance criterion but .claude/hooks/tests-green.sh only runs the test suite (confirmed by reading the hook) and no scope/diff enforcement exists in daemon.py or merge.py. This criterion cannot be verified by the stated gate; only a human diff review would catch a violation.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/evidence.py",
+      "issue": "The spec names the new per-goal cache class 'Pool', but orchestrator/pool.py:145 already defines a class Pool (the account pool). Two same-named, semantically unrelated classes in the same package (orchestrator.pool.Pool vs orchestrator.evidence.Pool) is a naming collision a reviewer would reject \u2014 confusing in imports, greps, and any code that does 'from orchestrator import pool, evidence' and calls .Pool().",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "decision_row(task, routed_packet, *, mode) is specified to return 'the dict for decision_log.record(kind=\"context_selection\", ...)', but decision_log.record(kind, subject, *, candidates, hard_constraints, deterministic, selected, reason, ...) requires a positional 'subject' that decision_row's field list never mentions producing. Ambiguous whether decision_row includes subject/kind keys or the wiring caller supplies them separately.",
+      "severity": "low",
+      "line": 105
+    }
+  ]
+}

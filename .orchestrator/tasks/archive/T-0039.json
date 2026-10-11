@@ -1,0 +1,114 @@
+{
+  "id": "T-0039",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "Re-review bench.py after B4d (security checklist): identified fetch, fail-closed, provenance",
+  "spec": "Second security review of orchestrator/bench.py on task/T-0038 (your worktree is based on that branch; verify `grep stealthy_headers orchestrator/bench.py` first). Apply skills/review/adversarial-review/references/security-checklist.md. Confirm each T-0033 finding is closed: (1) Fetcher.get is called with stealthy_headers=False and no impersonation, an orchestrator-bench User-Agent, no referer \u2014 check the installed scrapling's Fetcher.get signature and defaults to be sure nothing re-enables impersonation implicitly; (2) the real HTTP status is read from the response and stored; a non-200, tiny body or zero-record parse never overwrites bench.json; (3) matcher handles effort suffixes without over-matching. Also check: parse_chunks on hostile input (bounded regex, no catastrophic backtracking), no eval/exec, no page content used as path/command, unmatched_names truncated, tests network-free. Run `uv run python -m unittest tests/test_orchestrator.py` and report the result line. Return ONLY {\"verdict\":\"approve|request_changes\",\"comments\":[...]} under 3,000 chars.",
+  "inputs": [
+    "T-0038"
+  ],
+  "acceptance": [
+    "verdict with line-anchored comments; each T-0033 finding explicitly marked closed or open",
+    "test result line reported",
+    "result under 3,000 chars"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0039",
+  "codex_thread": null,
+  "result": {
+    "summary": "Posted to T-0039: `request_changes`.\n\nAll three T-0033 findings are closed (impersonate/stealthy_headers disabled, real HTTP status read and used to gate the write, effort-suffix matching added) and 65 tests pass. New finding: `_supported_params` introspects `Fetcher.get`'s TypedDict annotation at runtime rather than asserting it \u2014 if a future scrapling release changes that signature shape or stringifies annotations, the detection silently returns empty and `fetch_html` falls back to calling `Fetcher.get(url)` bare, which the installed library defaults to `impersonate=\"chrome\"` (confirmed in `static.py:73`), quietly resurrecting the exact bot-impersonation bug T-0033 flagged, plus dropping the identifying User-Agent. Recommended fix: assert the expected kwargs are present rather than silently omitting them, so an incompatible upgrade fails loudly instead of regressing the compliance-critical behavior.",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789662935.1098309,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1789668070.787928,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0039",
+      "claimed_at": 1789668070.787818
+    },
+    {
+      "ts": 1789668070.81637,
+      "pid": 88252,
+      "account": "A"
+    },
+    {
+      "ts": 1789668234.158371,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/bench.py",
+            "line": 218,
+            "issue": "T-0033#1 (impersonate/stealthy_headers) CLOSED for the currently installed scrapling: verified Fetcher.get's kwargs.get('impersonate','chrome') default -- fetch_html correctly detects 'impersonate'/'stealthy_headers' in the TypedDict and forces None/False. But _supported_params relies on runtime introspection of a third-party TypedDict annotation (typing.get_args on sig.parameters['kwargs'].annotation). If a future scrapling release changes this signature shape, or adds `from __future__ import annotations` (stringifies annotations, inspect.signature won't eval them), get_args silently returns () and `supported` becomes empty -- fetch_html then calls Fetcher.get(url) with zero kwargs, and confirmed in static.py:73 the library defaults impersonate to 'chrome', silently reintroducing the exact bot-impersonation behavior T-0033 flagged high, and also drops the orchestrator-bench User-Agent entirely. This is fail-open, not fail-closed (checklist #8). No test exercises this degraded path -- test_fetch_html_source_disables_impersonation_and_stealth only greps source text.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/bench.py",
+            "line": 230,
+            "issue": "Fix: assert {'impersonate','stealthy_headers','headers'} <= supported (or raise) in fetch_html instead of silently omitting kwargs when a name is missing, so an incompatible scrapling upgrade fails loudly instead of quietly re-enabling impersonation.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/bench.py",
+            "line": 291,
+            "issue": "T-0033#2 (hardcoded http_status=200) CLOSED: fetch_html now returns page.status; fetch() checks status!=200 and leaves bench.json untouched on failure (test_fetch_failure_status_leaves_existing_file_untouched passes).",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/bench.py",
+            "line": 184,
+            "issue": "T-0033#3 (exact-match only, no effort-suffix handling) CLOSED: match()/norm()/_startswith_candidate()/_token_candidate() handle '(max)'/'(xhigh)' suffixes and variant preference without over-matching (e.g. 'GPT-5.5 Pro (xhigh)' correctly rejected for hint 'GPT-5.5'); covered by tests.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_orchestrator.py",
+            "line": 0,
+            "issue": "Test result: uv run python -m unittest tests.test_orchestrator -v -> Ran 65 tests, OK.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789668240.167853,
+      "status": "done",
+      "result": {
+        "summary": "Posted to T-0039: `request_changes`.\n\nAll three T-0033 findings are closed (impersonate/stealthy_headers disabled, real HTTP status read and used to gate the write, effort-suffix matching added) and 65 tests pass. New finding: `_supported_params` introspects `Fetcher.get`'s TypedDict annotation at runtime rather than asserting it \u2014 if a future scrapling release changes that signature shape or stringifies annotations, the detection silently returns empty and `fetch_html` falls back to calling `Fetcher.get(url)` bare, which the installed library defaults to `impersonate=\"chrome\"` (confirmed in `static.py:73`), quietly resurrecting the exact bot-impersonation bug T-0033 flagged, plus dropping the identifying User-Agent. Recommended fix: assert the expected kwargs are present rather than silently omitting them, so an incompatible upgrade fails loudly instead of regressing the compliance-critical behavior.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "hold_reason": "no account with headroom",
+  "claimed_at": 1789668070.787818,
+  "pid": 88252,
+  "account": "A"
+}

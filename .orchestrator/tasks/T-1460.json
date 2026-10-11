@@ -1,0 +1,47 @@
+{
+  "id": "T-1460",
+  "created_at": 1790874500.6857998,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Skip the merge re-gate when the target has not moved since the daemon gate: gate() records the target and head it gated, merge() reuses that green result when the rebase was a no-op",
+  "spec": "Goal T-1403, wave 2, plan label B9. Every merge runs the full gate again (merge.py gate.run_gate after the rebase)\neven when the daemon gated the identical tree minutes earlier against the same target head; on luna-inbox the\nApple gate takes 9-11 min, so each task costs two gate runs.\n\nFacts (goal/T-1403 at 92c1a98 plus T-1456 merged before this task; re-check line numbers):\n- daemon.py:1396 gate(pool): runs gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id, cfg) and on green\n  stamps 'gated_at' (grep \"stamp(t[\\\"id\\\"], \\\"gated_at\\\"\" in gate()); it does not record which target sha or\n  worktree head it gated.\n- merge.py:28-122 merge(): rebase onto target (46), then gate.run_gate (62) unconditionally, then fast-forward.\n  _diff_hash (11-21) and the reviewed_sha check already compare before/after rebase.\n- gate.run_gate returns {'returncode', 'timed_out', 'stdout', 'stderr', ...} (gate.py).\n\nChange:\n1. daemon.gate(): on a green run, the gated_at stamp also writes pipeline.gated_target_sha = rev-parse of the\n   merge target (goal/<parent>, or 'integration' without a parent, same rule as merge.py:30) and\n   pipeline.gated_head = rev-parse HEAD of the worktree, both read through gitutil._git_in; a failed rev-parse\n   leaves the keys absent.\n2. merge.merge(): after the rebase, when pool config [merge].skip_regate_when_unmoved (default True; read via\n   pool_config().get('merge', {}), import lazily like merge.py's other config reads) and\n   pipeline.gated_target_sha == rev-parse(target) taken before the rebase and rev-parse HEAD of the worktree\n   after the rebase == pipeline.gated_head: skip gate.run_gate, set result['gate'] = 'reused_green' and\n   pipeline.merge_gate = {'mode': 'reused_green', 'gated_target_sha': ..., 'gated_head': ...}; otherwise run the\n   gate as today and record pipeline.merge_gate = {'mode': 'ran'}. Never reuse when the task was held\n   gate_timeout or gate_red after the stamp (the stamp is only written on green, and a later red clears\n   gated_at via clear_stage, so check that gated_at is present).\n3. orchestrator status / notify: one notify line '<id>: merge reused the daemon gate (target unmoved)' when\n   reused.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_merge.py tests patch gate.run_gate and assert it was\ncalled (grep 'run_gate' in tests/test_merge.py): those tasks have no gated_target_sha, so they keep running the\ngate; tests/test_daemon.py gate tests assert the gated_at stamp (grep 'gated_at'): unchanged plus the two new keys.\nRun tests/test_merge.py and tests/test_daemon.py.\n\nDepends on B6 T-1456 (daemon.py and merge.py chain). Out of scope: gate.py, spawn.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_gate_records_target_sha_and_head_on_green: passes: after a green daemon gate the task's pipeline holds gated_at, gated_target_sha equal to the goal branch head and gated_head equal to the worktree HEAD; a red gate writes neither",
+    "tests/test_merge.py::test_merge_reuses_daemon_gate_when_target_unmoved: passes: with gate.run_gate patched, merge.merge on a task whose pipeline.gated_target_sha equals the target head and whose rebase is a no-op does not call run_gate, merges, returns gate 'reused_green' and records pipeline.merge_gate mode 'reused_green'; when the target moved, when gated_head differs from HEAD after the rebase, when gated_at is absent, or when [merge].skip_regate_when_unmoved is False, run_gate is called as before",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [
+    "T-1456"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B9",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790878815.912292,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1475 (2026-10-01 wave 2 respec)"
+    }
+  ],
+  "hold_reason": "superseded by T-1475 (2026-10-01 wave 2 respec)"
+}

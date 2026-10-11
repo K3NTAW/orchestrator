@@ -1,0 +1,188 @@
+{
+  "id": "T-0859",
+  "created_at": 1790104725.5966341,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Active path 3: handoff-aware executor routing (start strong when expected route cost says so) within pool constraints (v2)",
+  "spec": "Today (T-0831) [handoff] mode \"active\" is treated as shadow: executor.start records a \"handoff\" decision with expected_route_cost per eligible executor but launches the baseline pick. Build the active branch. Facts: executor.start picks via pool.pick_executor + allocation (executor.py ~276-323); handoff_scorecard.expected_route_cost(task_class, executor, root, cfg) returns a number or {\"insufficient\": True}; promotion CRITERIA min_samples 20.\nDo:\n1. Active: after the baseline pick, when every eligible executor has sufficient samples for the task's class and the lowest expected_route_cost executor differs from the baseline by more than [handoff] min_gain (new key, default 0.15 = 15% cheaper expected cost-to-accept), launch that executor instead; record the decision row with selected = the chosen executor and reason \"expected_route_cost\" plus the gain; otherwise keep the baseline with reason \"insufficient_evidence\" or \"gain_below_threshold\". Hard pool constraints (eligibility, cooldowns, complexity ceilings such as Astra for \u22659, budgets) stay authoritative: the router only chooses among pool.eligible_executors.\n2. Cap: at most [handoff] max_active_share (default 0.5) of the day's execute launches may deviate from the baseline, so the baseline keeps producing comparison data; count per day in pool_state or the decision log.\n3. Outcome feedback: when a task started under an active handoff decision reaches merged or failed, decision_log.outcome(task, \"handoff\", ...) records rounds, accepted tokens and usd; handoff_scorecard.by_start already aggregates by first executor, add a column \"active_share\".\nTests: tests/test_executor.py::test_active_handoff_switches_executor_when_gain_exceeds_threshold, ::test_active_handoff_keeps_baseline_without_evidence, ::test_active_share_cap_enforced; tests/test_handoff_scorecard.py::test_active_outcome_rows_feed_by_start; docs/context-economy/08-handoffs.md Active section with the revert path ([handoff] mode shadow).\nDo not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-22 23:05) after spec review T-0851 (request_changes), binding on top of v1:\n- No daemon hook. executor.start stamps `pipeline.handoff` = {\"baseline\", \"selected\", \"switched\": bool, \"gain\", \"reason\", \"ts\"} on the bus task at dispatch (inside bus.locked()). handoff_scorecard.lineage_rows/by_start read that stamp from the task rows they already load: active_share = switched lineages / lineages with a stamp, and outcomes (rounds, accepted tokens, usd, merged/failed) come from the same task and run rows the module already aggregates. orchestrator/daemon.py leaves the scope; no decision_log.outcome call is required (the decision row is written once at dispatch with the final reason).\n- Decision reasons: \"expected_route_cost\" (switched), \"insufficient_evidence\", \"gain_below_threshold\", \"cap_reached\" (evidence and gain justify a switch but the day's active share is full), \"allocation_active\" (see precedence). Tests assert each reason is auditable from the decision row alone.\n- Day counter: computed under bus.locked() from task rows stamped today (pipeline.handoff.switched and ts within the local day) immediately before stamping; the count and the stamp happen in the same locked block, so concurrent dispatchers cannot overshoot max_active_share by more than one.\n- Precedence: baseline = the executor start() is about to launch after the allocation layer (the post-allocation pick). When [allocation] mode is active, handoff never overrides it: it records the decision with reason \"allocation_active\" and keeps the pick. When allocation is shadow or off, handoff may switch. Document this in 08-handoffs.md.\n- tests/test_handoff_scorecard.py::test_active_outcome_rows_feed_by_start is replaced by ::test_active_share_and_outcomes_from_task_stamps (two lineages, one switched; by_start shows active_share 0.5 and the switched lineage's outcome), and tests/test_executor.py gains ::test_handoff_yields_to_active_allocation.",
+  "inputs": [
+    "T-0858"
+  ],
+  "acceptance": [
+    "tests/test_executor.py::test_active_handoff_switches_executor_when_gain_exceeds_threshold passes",
+    "tests/test_executor.py::test_active_handoff_keeps_baseline_without_evidence passes",
+    "tests/test_executor.py::test_active_share_cap_enforced passes",
+    "docs/context-economy/08-handoffs.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_handoff_scorecard.py::test_active_share_and_outcomes_from_task_stamps passes",
+    "tests/test_executor.py::test_handoff_yields_to_active_allocation passes"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/handoff_scorecard.py",
+    ".orchestrator/pool.toml",
+    "tests/test_executor.py",
+    "tests/test_handoff_scorecard.py",
+    "docs/context-economy/08-handoffs.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0859",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "risks": [
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "decision_log.record(\"handoff\", ...) at line 330-336 hardcodes reason=\"shadow: routing unchanged\" regardless of mode. Once active switching is added, this call still fires for both shadow and active (line 323: `if mode in (\"shadow\",\"active\")`) and would log a false reason for switched/gain_below_threshold/cap_reached/allocation_active decisions, since the spec's new decision reasons live only in the pipeline.handoff stamp, not in this existing decision_log call. Spec doesn't say whether to update, repoint, or delete this call.",
+        "severity": "med",
+        "line": 330
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "notify.notify_once(task_id, \"handoff_active_shadow\", f\"...handoff active is observation-only; routing unchanged\") at line 337-339 becomes false once active mode actually switches executors. docs/context-economy/08-handoffs.md currently states 'The current active value is also observation-only and emits a warning' \u2014 both the notify message and this doc sentence must be replaced, but the spec's acceptance criteria only requires an 'Active section' to be added, not this stale sentence removed.",
+        "severity": "med",
+        "line": 338
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "Spec introduces [handoff] min_gain and max_active_share as 'new keys' but doesn't say whether they must be added to pool.toml with explicit defaults or may live only as code-level .get(...,default) fallbacks. Scope lists pool.toml as touched, so leaving the keys implicit-only would technically satisfy tests but leave the config file undocumented for operators, inconsistent with every other tunable in this file having an inline comment.",
+        "severity": "low",
+        "line": 354
+      }
+    ],
+    "suggested_spec_changes": [
+      "State explicitly whether the existing decision_log.record(\"handoff\", ...) call in executor.py should be updated to use the real per-dispatch reason/selected values, left as shadow-only bookkeeping, or removed now that pipeline.handoff is the source of truth.",
+      "Require the notify.notify_once(..., \"handoff_active_shadow\", ...) message and the matching sentence in docs/context-economy/08-handoffs.md ('The current active value is also observation-only and emits a warning') be rewritten or removed as part of the Active section, so the running system doesn't emit a false 'observation-only' notice after active switching ships.",
+      "Add explicit pool.toml entries for [handoff] min_gain = 0.15 and max_active_share = 0.5 with a one-line comment, matching the convention used by every other tunable in that file (e.g. [allocation] min_samples, latency_weight_usd_per_hour)."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790104726.389018,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1790109855.176743,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner 01:25: held/failed during account B cooldown; re-spawned by hand"
+    },
+    {
+      "ts": 1790109857.1542442,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0859",
+      "claimed_at": 1790109857.153431
+    },
+    {
+      "ts": 1790109857.15523,
+      "account": "B"
+    },
+    {
+      "ts": 1790109857.684372,
+      "pid": 86483,
+      "account": "B"
+    },
+    {
+      "ts": 1790110020.487509,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "risks": [
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "decision_log.record(\"handoff\", ...) at line 330-336 hardcodes reason=\"shadow: routing unchanged\" regardless of mode. Once active switching is added, this call still fires for both shadow and active (line 323: `if mode in (\"shadow\",\"active\")`) and would log a false reason for switched/gain_below_threshold/cap_reached/allocation_active decisions, since the spec's new decision reasons live only in the pipeline.handoff stamp, not in this existing decision_log call. Spec doesn't say whether to update, repoint, or delete this call.",
+            "severity": "med",
+            "line": 330
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "notify.notify_once(task_id, \"handoff_active_shadow\", f\"...handoff active is observation-only; routing unchanged\") at line 337-339 becomes false once active mode actually switches executors. docs/context-economy/08-handoffs.md currently states 'The current active value is also observation-only and emits a warning' \u2014 both the notify message and this doc sentence must be replaced, but the spec's acceptance criteria only requires an 'Active section' to be added, not this stale sentence removed.",
+            "severity": "med",
+            "line": 338
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "Spec introduces [handoff] min_gain and max_active_share as 'new keys' but doesn't say whether they must be added to pool.toml with explicit defaults or may live only as code-level .get(...,default) fallbacks. Scope lists pool.toml as touched, so leaving the keys implicit-only would technically satisfy tests but leave the config file undocumented for operators, inconsistent with every other tunable in this file having an inline comment.",
+            "severity": "low",
+            "line": 354
+          }
+        ],
+        "suggested_spec_changes": [
+          "State explicitly whether the existing decision_log.record(\"handoff\", ...) call in executor.py should be updated to use the real per-dispatch reason/selected values, left as shadow-only bookkeeping, or removed now that pipeline.handoff is the source of truth.",
+          "Require the notify.notify_once(..., \"handoff_active_shadow\", ...) message and the matching sentence in docs/context-economy/08-handoffs.md ('The current active value is also observation-only and emits a warning') be rewritten or removed as part of the Active section, so the running system doesn't emit a false 'observation-only' notice after active switching ships.",
+          "Add explicit pool.toml entries for [handoff] min_gain = 0.15 and max_active_share = 0.5 with a one-line comment, matching the convention used by every other tunable in that file (e.g. [allocation] min_samples, latency_weight_usd_per_hour)."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790110020.4894998,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "decision_log.record(\"handoff\", ...) at line 330-336 hardcodes reason=\"shadow: routing unchanged\" regardless of mode. Once active switching is added, this call still fires for both shadow and active (line 323: `if mode in (\"shadow\",\"active\")`) and would log a false reason for switched/gain_below_threshold/cap_reached/allocation_active decisions, since the spec's new decision reasons live only in the pipeline.handoff stamp, not in this existing decision_log call. Spec doesn't say whether to update, repoint, or delete this call.",
+          "severity": "med",
+          "line": 330
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "notify.notify_once(task_id, \"handoff_active_shadow\", f\"...handoff active is observation-only; routing unchanged\") at line 337-339 becomes false once active mode actually switches executors. docs/context-economy/08-handoffs.md currently states 'The current active value is also observation-only and emits a warning' \u2014 both the notify message and this doc sentence must be replaced, but the spec's acceptance criteria only requires an 'Active section' to be added, not this stale sentence removed.",
+          "severity": "med",
+          "line": 338
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Spec introduces [handoff] min_gain and max_active_share as 'new keys' but doesn't say whether they must be added to pool.toml with explicit defaults or may live only as code-level .get(...,default) fallbacks. Scope lists pool.toml as touched, so leaving the keys implicit-only would technically satisfy tests but leave the config file undocumented for operators, inconsistent with every other tunable in this file having an inline comment.",
+          "severity": "low",
+          "line": 354
+        }
+      ]
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 01:25: held/failed during account B cooldown; re-spawned by hand",
+  "claimed_at": 1790109857.153431,
+  "account": "B",
+  "pid": 86483,
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "decision_log.record(\"handoff\", ...) at line 330-336 hardcodes reason=\"shadow: routing unchanged\" regardless of mode. Once active switching is added, this call still fires for both shadow and active (line 323: `if mode in (\"shadow\",\"active\")`) and would log a false reason for switched/gain_below_threshold/cap_reached/allocation_active decisions, since the spec's new decision reasons live only in the pipeline.handoff stamp, not in this existing decision_log call. Spec doesn't say whether to update, repoint, or delete this call.",
+      "severity": "med",
+      "line": 330
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "notify.notify_once(task_id, \"handoff_active_shadow\", f\"...handoff active is observation-only; routing unchanged\") at line 337-339 becomes false once active mode actually switches executors. docs/context-economy/08-handoffs.md currently states 'The current active value is also observation-only and emits a warning' \u2014 both the notify message and this doc sentence must be replaced, but the spec's acceptance criteria only requires an 'Active section' to be added, not this stale sentence removed.",
+      "severity": "med",
+      "line": 338
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Spec introduces [handoff] min_gain and max_active_share as 'new keys' but doesn't say whether they must be added to pool.toml with explicit defaults or may live only as code-level .get(...,default) fallbacks. Scope lists pool.toml as touched, so leaving the keys implicit-only would technically satisfy tests but leave the config file undocumented for operators, inconsistent with every other tunable in this file having an inline comment.",
+      "severity": "low",
+      "line": 354
+    }
+  ]
+}

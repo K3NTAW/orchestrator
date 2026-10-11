@@ -1,0 +1,193 @@
+{
+  "id": "T-0981",
+  "created_at": 1790129345.491982,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S10: evidence-driven skill promotion and demotion, freshness marking, version-scoped scores, and the P36 evaluation suite; nothing promotes on one run (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P17, P18, P22, P23, P30, P36, P37 stage 10, P38. Depends on T-0938 (skill_scorecard marginal/verdicts), T-0939 (active routing + refusal), T-0964 (specialists + conflicts), T-0954 (learned drafts in quarantine), T-0971 (Jev skill routing). Facts: skills_registry holds states with history and content-hash versions; promotion.py has FEATURES, CRITERIA (min_samples 20) and per-feature collect() branches; skill_scorecard.marginal returns verdicts valuable/neutral/costly/harmful with n; the context program's context_eval.py is the model for a deterministic eval suite; discovery/learned records live in discovered.json with the inspect gate.\nDo:\n1. orchestrator/skill_promotion.py (new): `evaluate_skill(id, root, cfg)` reads marginal() for the skill's version only (P22: scores are keyed by (id, version); a new version starts with n = 0 and never inherits), applies P17: testing \u2192 shadow requires the P7 validation tests for that skill to pass (validation.status tested) and inspect max_severity below block; shadow \u2192 active requires n \u2265 min_samples, verdict valuable or neutral with a measurable efficiency gain (accepted tokens or cost down, or fix rounds down) and no security finding; active \u2192 demoted (P18) when verdict harmful, or costly over \u2265 min_samples, or repeated irrelevant activation (selected but unused in \u2265 70% of \u2265 20 spawns), or a conflict with a newer active skill recorded by specialists, or stale (P23); demoted \u2192 shadow when a later version's evidence clears. Every transition goes through skills_registry.transition with the evidence summary as reason (observable, reversible via rollback). `orchestrator skills promote --dry-run` prints recommendations; without --dry-run applies them (the CLI is the only writer; no daemon auto-apply in this stage).\n2. Freshness (P23): each skill's declared dependencies (frontmatter `depends_on:` list of paths/globs/tool ids; for builtins fill from their scripts and referenced modules) are hashed at sync; when a dependency's content hash changes, the record gets `stale: true` with the changed dependency in history and `skills list` shows it; a stale active skill is demoted to shadow by evaluate_skill until re-validated (its validation tests pass again on the new head).\n3. P30 economy metrics complete: skill_scorecard adds skill_reuse_rate (spawns whose selected skills were all used / spawns with a selection) and reports skill_tokens_per_accepted_task, skill_overhead_ratio, skill_utility (marginal quality delta per 1k skill tokens), skill_recovery_rate together in `scorecard --skills`; `scorecard --economy` gains the skills block with these five.\n4. P36 evaluation suite: orchestrator/skill_eval.py (new) with deterministic fixtures (no models, no network) covering Routing (irrelevant skill excluded; obvious skill deterministically selected; ambiguous resolved by a fake Jev; minimal set only; unavailable skill handled), Lifecycle (external starts quarantined; quarantined cannot reach candidates or packets; testing never mutates skills/ or .claude/skills; shadow leaves exposure and packet bytes unchanged; promotion needs evidence; demotion works; rollback works), Security (a malicious draft with hidden instructions is blocked by inspect; an external skill with a script cannot leave quarantine without override; secret-looking content is redacted in drafts; external endpoints outside allowed_domains are flagged), Compaction (P6 headings present; token count not higher than before; output contract preserved), Specialists (composition, unrelated skills excluded, conflicts detected, required tools exposed), Scorecard (usage attribution; model and workflow grouping; marginal value; insufficient evidence safe), Learned (repeated behaviour creates a candidate; one-off cannot; candidate enters quarantine; activation needs evaluation). `orchestrator skill-eval` prints a table and exits 1 on any failure; results persist to STATE/skill_eval.json; skill_promotion refuses any promotion to active while the last suite run is missing, older than 7 days or failed.\n5. docs/skill-intelligence/11-promotion.md and 12-evaluation.md (\u226470 lines each): rules, thresholds, what the suite covers, revert paths.\nTests (unittest): tests/test_skill_promotion.py::test_new_version_starts_without_inherited_score, ::test_shadow_to_active_requires_samples_and_efficiency, ::test_demotion_on_harmful_or_costly_or_irrelevant_activation, ::test_stale_dependency_marks_and_demotes_until_revalidated, ::test_promotion_refused_without_recent_passing_suite, ::test_rollback_restores_previous_state; tests/test_skill_eval.py::test_suite_covers_all_p36_groups_and_passes, ::test_cli_exit_code_and_persisted_result. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 15:30) after spec review T-0977 (request_changes), binding on top of v1:\n- Version scoping (P22) is by time window, using data that exists today: skills_registry history carries an \"at\" timestamp for every content-hash version change; a version's window runs from its \"at\" to the next version change (or now). skill_promotion.evaluate_skill passes since_s/until_s bounds into skill_scorecard.marginal() and usage_rows() (both gain optional `since_s`/`until_s` filters on the run timestamp) so scores cover only runs inside the current version's window; the same window bounds the irrelevant-activation count (selected-but-unused \u2265 70% of \u2265 20 spawns) computed from skill_selection rows. Additionally, skill_scorecard.usage_rows records `skill_versions` per run when the run's packet meta carries them (S5 writes \"### <id> (v<version>)\" headers; parse them) so future scores can key by (id, version) directly; when absent the window rule applies. Tests: tests/test_skill_promotion.py::test_new_version_starts_without_inherited_score builds two registry versions with history timestamps and runs on both sides of the boundary and asserts only the newer window counts; tests/test_skill_scorecard.py::test_usage_rows_window_filters_and_skill_versions.\n- tests/test_skills_registry.py and tests/test_skill_scorecard.py exist and are extended in place; both stay green (acceptance).\n\nSPEC v3 (2026-09-23 16:05) after spec review T-0979 (round 2; three points folded in, further review waived by the Planner, verdict set to approve):\n- Drop the skill_versions packet-header parsing from usage_rows(): version scoping is the time-window rule from registry history only (since_s/until_s on usage_rows and marginal); spawn.py and bus.py stay out of scope.\n- tests/test_skills_registry.py (SkillsRegistryTests) and tests/test_skill_scorecard.py (SkillScorecardTests) exist; new test methods are added to those classes; both suites stay green.\n- P23 dependency hashing is whole-file: each entry of a skill's depends_on (paths or globs; for builtins the scripts/ and references/ files plus modules named in the body, resolved to files) is hashed as sha256 of the file bytes at sync and stored as {path: hash} on the record; a change marks the record `stale: true` with the changed paths in history. Debounce: a stale ACTIVE skill is demoted to shadow only when its validation tests fail on the new head OR the staleness has persisted for more than 24 h without re-validation; a hash change alone never demotes within the first 24 h. `orchestrator skills revalidate <id>` re-runs the skill's validation tests and clears stale on success (recorded in history). Tests: tests/test_skill_promotion.py::test_stale_dependency_marks_and_demotes_until_revalidated covers both the failing-tests path and the 24 h path.",
+  "inputs": [
+    "T-0980"
+  ],
+  "acceptance": [
+    "tests/test_skill_promotion.py::test_new_version_starts_without_inherited_score passes",
+    "tests/test_skill_promotion.py::test_shadow_to_active_requires_samples_and_efficiency passes",
+    "tests/test_skill_promotion.py::test_demotion_on_harmful_or_costly_or_irrelevant_activation passes",
+    "tests/test_skill_promotion.py::test_stale_dependency_marks_and_demotes_until_revalidated passes",
+    "tests/test_skill_promotion.py::test_promotion_refused_without_recent_passing_suite passes",
+    "tests/test_skill_promotion.py::test_rollback_restores_previous_state passes",
+    "tests/test_skill_eval.py::test_suite_covers_all_p36_groups_and_passes passes",
+    "tests/test_skill_eval.py::test_cli_exit_code_and_persisted_result passes",
+    "`uv run orchestrator skill-eval` exits 0; `uv run orchestrator skills promote --dry-run` runs; docs/skill-intelligence/11-promotion.md and 12-evaluation.md exist; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_scorecard.py::test_usage_rows_window_filters_and_skill_versions passes",
+    "tests/test_skills_registry.py and tests/test_skill_scorecard.py stay green"
+  ],
+  "scope": [
+    "orchestrator/skill_promotion.py",
+    "orchestrator/skill_eval.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/promotion.py",
+    "orchestrator/cli.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_skill_promotion.py",
+    "tests/test_skill_eval.py",
+    "docs/skill-intelligence/11-promotion.md",
+    "docs/skill-intelligence/12-evaluation.md",
+    "tests/test_skill_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0981",
+  "codex_thread": null,
+  "result": {
+    "summary": "Diff largely matches SPEC v3's promotion/eval/scorecard behavior and the listed acceptance tests already gate green, but two issues stand out on adversarial read: (1) a real trust-boundary gap \u2014 dependency_hashes() lets an untrusted, still-quarantined skill's frontmatter (depends_on) direct the orchestrator to hash arbitrary absolute-path files on the host before any inspection/human review, and the resulting path+hash pairs are exposed via skills show/list; (2) SPEC v3 explicitly mandated new test methods in tests/test_skills_registry.py's SkillsRegistryTests class, which never happened, leaving the new registry-side behavior (staleness, revalidate, rollback fix, draft redaction) without direct coverage in that file.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/skills_registry.py",
+        "line": 267,
+        "issue": "dependency_hashes() applies to every discovered/quarantined skill on every sync() (see the discovered.json loop that calls dependency_hashes(source, dependencies, repo=...) using the skill's own frontmatter depends_on list). Declarations may be absolute paths (candidate.is_absolute(): if candidate.is_file(): paths.add(candidate)) or globs resolved with no repo/quarantine containment check. An external, still-quarantined and uninspected skill can therefore declare depends_on: ['/etc/passwd','/Users/<user>/.ssh/id_rsa', ...] and the orchestrator will read and sha256-hash those files and store {absolute_path: hash} in the skill's registry record before any human review or inspect gate runs, and that record is later exposed via `orchestrator skills show <id> --json`/`skills list`. That's an arbitrary-file existence/fingerprint disclosure primitive driven entirely by untrusted skill submission content, which is exactly the trust boundary this review is meant to check (external content must not gain filesystem reach it wasn't granted). It should restrict depends_on resolution for non-builtin/quarantined skills to paths inside the skill's own quarantine directory (mirroring the containment check already done for provenance!='builtin' in skill_promotion._inspection).",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_skills_registry.py",
+        "line": 1,
+        "issue": "SPEC v3 explicitly requires 'tests/test_skills_registry.py (SkillsRegistryTests) ... new test methods are added to those classes' alongside test_skill_scorecard.py, but this file has zero changes in the diff. Significant new/changed behavior added directly to skills_registry.py in this packet (dependency_hashes(), stale marking in sync(), revalidate(), the rollback() no-op-skipping fix, _redact_drafts() hooked into _write_json()) has no direct unit test in SkillsRegistryTests; it's only exercised indirectly through skill_promotion/skill_eval fixtures. This is a binding-spec deviation, not just a style gap.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "a099afb75b6c",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790129345.492888,
+      "reviewed_sha": "2fc60771ef367e4d28f05f0fbe8baa3f763adec3"
+    },
+    {
+      "ts": 1790129349.6407301,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0981",
+      "claimed_at": 1790129349.640479
+    },
+    {
+      "ts": 1790129349.642163,
+      "account": "B"
+    },
+    {
+      "ts": 1790129350.995787,
+      "pid": 31366,
+      "account": "B"
+    },
+    {
+      "ts": 1790129514.937355,
+      "status": "done",
+      "result": {
+        "summary": "Diff largely matches SPEC v3's promotion/eval/scorecard behavior and the listed acceptance tests already gate green, but two issues stand out on adversarial read: (1) a real trust-boundary gap \u2014 dependency_hashes() lets an untrusted, still-quarantined skill's frontmatter (depends_on) direct the orchestrator to hash arbitrary absolute-path files on the host before any inspection/human review, and the resulting path+hash pairs are exposed via skills show/list; (2) SPEC v3 explicitly mandated new test methods in tests/test_skills_registry.py's SkillsRegistryTests class, which never happened, leaving the new registry-side behavior (staleness, revalidate, rollback fix, draft redaction) without direct coverage in that file.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/skills_registry.py",
+            "line": 267,
+            "issue": "dependency_hashes() applies to every discovered/quarantined skill on every sync() (see the discovered.json loop that calls dependency_hashes(source, dependencies, repo=...) using the skill's own frontmatter depends_on list). Declarations may be absolute paths (candidate.is_absolute(): if candidate.is_file(): paths.add(candidate)) or globs resolved with no repo/quarantine containment check. An external, still-quarantined and uninspected skill can therefore declare depends_on: ['/etc/passwd','/Users/<user>/.ssh/id_rsa', ...] and the orchestrator will read and sha256-hash those files and store {absolute_path: hash} in the skill's registry record before any human review or inspect gate runs, and that record is later exposed via `orchestrator skills show <id> --json`/`skills list`. That's an arbitrary-file existence/fingerprint disclosure primitive driven entirely by untrusted skill submission content, which is exactly the trust boundary this review is meant to check (external content must not gain filesystem reach it wasn't granted). It should restrict depends_on resolution for non-builtin/quarantined skills to paths inside the skill's own quarantine directory (mirroring the containment check already done for provenance!='builtin' in skill_promotion._inspection).",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_skills_registry.py",
+            "line": 1,
+            "issue": "SPEC v3 explicitly requires 'tests/test_skills_registry.py (SkillsRegistryTests) ... new test methods are added to those classes' alongside test_skill_scorecard.py, but this file has zero changes in the diff. Significant new/changed behavior added directly to skills_registry.py in this packet (dependency_hashes(), stale marking in sync(), revalidate(), the rollback() no-op-skipping fix, _redact_drafts() hooked into _write_json()) has no direct unit test in SkillsRegistryTests; it's only exercised indirectly through skill_promotion/skill_eval fixtures. This is a binding-spec deviation, not just a style gap.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "a099afb75b6c",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790129514.93842,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790129514.999082,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "2fc60771ef367e4d28f05f0fbe8baa3f763adec3",
+        "packet_version": "a099afb75b6c",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "2fc60771ef367e4d28f05f0fbe8baa3f763adec3",
+      "packet_version": "a099afb75b6c",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "2fc60771ef367e4d28f05f0fbe8baa3f763adec3",
+  "claimed_at": 1790129349.640479,
+  "account": "B",
+  "pid": 31366,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "2fc60771ef367e4d28f05f0fbe8baa3f763adec3",
+    "packet_version": "a099afb75b6c",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "a099afb75b6c",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

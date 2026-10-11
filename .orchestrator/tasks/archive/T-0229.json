@@ -1,0 +1,164 @@
+{
+  "id": "T-0229",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "E3 v2: Jev tool-call gate \u2014 PreToolUse hook scores every worker tool call for necessity, logs to runs/jev/gate.jsonl, blocks only in block mode (supersedes T-0215 after spec review T-0228)",
+  "spec": "Pattern from the LiteLLM typesafe guardrail and jev-compactor: ask Jev a typed question per tool call, branch on the probability, keep everything else verbatim. Workers run as `claude -p` with the repo hooks; PreToolUse hook stdin is JSON with session_id, transcript_path, tool_name, tool_input, cwd; ORCH_TASK_ID names the bus task (see .claude/hooks/_lib.sh task_id and scope-guard.sh). Build on orchestrator/jev.py (merged: ask/noul/redact, fail-open, budget). Spec review T-0228 risks folded in (log path, transcript schema, dead branch).\n1. .claude/hooks/jev-gate.sh: exit 0 immediately when task_id is empty (Planner session) or when `uv run python -m orchestrator.jev_gate --enabled` prints 0 (reads pool.toml [jev].enabled); otherwise pipe the hook JSON to `uv run python -m orchestrator.jev_gate` under a 3 s wall clock (perl/python alarm, no GNU timeout on macOS); any non-zero exit other than 2, or a timeout, means allow (fail-open). Register in .claude/settings.json PreToolUse with matcher Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch after guardrails.sh. No bus-tool branch (the matcher never passes MCP tools).\n2. orchestrator/jev_gate.py: transcript reader for Claude Code JSONL: each line is {type: \"assistant\"|\"user\"|..., message: {content: [...]}}; tool calls are content blocks {type: \"tool_use\", id, name, input} on assistant lines; results are {type: \"tool_result\", tool_use_id, content, is_error} on user lines; correlate by id. recent = the last 20 tool_use blocks as {name, input: jev.redact(json.dumps(input))[:300], error: bool}. Missing, unreadable or partially malformed transcript lines -> skip those lines, recent may be empty; never raise.\n3. state = {task: {title, spec[:1500], acceptance, scope, role}, recent, proposed: {tool_name, input: redacted[:300]}}. One jev.ask() with three noul questions: needed ('Does the agent need this tool call to satisfy the acceptance criteria, given what it has already read or run?'), redundant ('Does this call repeat an earlier call whose result the agent already has, with no intervening change to that file or command?'), destructive ('Would this call delete, overwrite, force-push, or exfiltrate data outside the task scope?').\n4. Decision: [jev].gate_mode = \"log\" | \"block\" (default log; add the key to pool.toml). Block mode exits 2 with one line on stderr when P(redundant) >= 0.85 or P(needed) <= 0.15 with confidence >= 0.6 ('jev-gate: this call repeats <tool> on <path>; use the result you already have' / 'jev-gate: not needed for the acceptance criteria; continue with the next criterion'). destructive is logged only (guardrails.sh owns blocking). Never block: the tests-green script, git commit/add/status/diff/log, bus_post_result, or any call when ask() returned None.\n5. Log every evaluated call to .orchestrator/runs/jev/gate.jsonl (the path jev.py's module comment reserves): {ts, task, session, tool, p_needed, p_redundant, p_destructive, confidence, mode, blocked, latency_ms, scored}. ask() None -> scored false, allow.\nTests in tests/test_jev_gate.py with jev.ask monkeypatched and a fixture transcript JSONL (tool_use + tool_result with is_error): reader correlates errors; log mode never blocks; block mode blocks a redundant Read and allows a needed one; protected calls never block; missing transcript allows; hook script exits 0 for the Planner (no task id) via subprocess.",
+  "inputs": [
+    "T-0215",
+    "T-0228"
+  ],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_transcript_reader_correlates_errors, ::test_log_mode_never_blocks, ::test_block_mode_blocks_redundant_read, ::test_block_mode_allows_needed_call, ::test_protected_calls_never_block, ::test_missing_transcript_allows, ::test_hook_exits_zero_without_task pass",
+    ".claude/settings.json registers .claude/hooks/jev-gate.sh under PreToolUse and tests/test_hooks.py still passes",
+    "Every evaluated call appends one line to .orchestrator/runs/jev/gate.jsonl in the tests; pool.toml [jev] has gate_mode = \"log\"",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    ".claude/hooks/jev-gate.sh",
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py",
+    ".claude/settings.json",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [
+    "T-0214"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "spec_review_waived": "Planner 2026-09-19: T-0228 risks folded into v2"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0229",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented the E3 Jev tool-call gate per spec:\n\n1. **`.claude/hooks/jev-gate.sh`** \u2014 new PreToolUse hook (`Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch`). Exits 0 immediately with no task id (Planner session) or when `jev_gate --enabled` doesn't print `1`. Otherwise pipes the hook JSON to `uv run python -m orchestrator.jev_gate` under a 3s wall clock via a `perl -e 'alarm shift; exec @ARGV'` wrapper (no GNU `timeout` on macOS). Any exit other than 2 (including a timeout, which kills the exec'd process with the default `SIGALRM` disposition) falls through to `exit 0` \u2014 fail-open.\n2. **`orchestrator/jev_gate.py`** \u2014 transcript reader (`read_transcript`) that correlates `tool_use`/`tool_result` blocks by id, skipping unreadable/malformed lines without raising; builds the `{task, recent, proposed}` state; asks Jev the three `noul` questions (needed/redundant/destructive) in one `jev.ask()` call; `decide()` blocks only in `gate_mode=\"block\"` on `P(redundant)>=0.85` or `P(needed)<=0.15`, each gated by `confidence>=0.6`; `is_protected()` exempts `tests-green.sh`, `git commit/add/status/diff/log`, and `bus_post_result` from ever being evaluated; every evaluated call (protected calls, `ask()==None`, and scored calls) is logged to `.orchestrator/runs/jev/gate.jsonl`.\n3. **`.claude/settings.json`** \u2014 registered the new hook group after guardrails.sh's entry.\n4. **`.orchestrator/pool.toml`** \u2014 added `[jev].gate_mode = \"log\"` (default).\n5. **`tests/test_jev_gate.py`** \u2014 8 tests (the 7 required plus one extra) covering transcript correlation, log-mode never blocking, block-mode blocking a confident redundant `Read` and allowing a needed call, the protected-call allowlist, a missing transcript, and the shell hook exiting 0 with no task id.\n\n**Test output (failures only):**\n```\nRan 348 tests in 37.766s\nFAILED (failures=1)\nFAIL: test_disabled_returns_none_without_network (test_jev.JevTests.test_disabled_returns_none_without_network)\nAssertionError: urlopen must not be called when jev is disabled\n```\nThis one failure is pre-existing and out of scope: commit `08b2f74` (the parent commit, already on this branch before I started) set `[jev].enabled = true` in `pool.toml`, and this machine has real `TYPESAFE_API_KEY` credentials resolvable via the Keychain, so `jev.ask()` now genuinely calls out instead of short-circuiting \u2014 the test's assumption that Jev is disabled by default is stale. Fixing it would require editing `tests/test_jev.py`, which is outside this task's scope list (and scope-guard.sh actively blocks it under `ORCH_TASK_ID=T-0229`). All 8 new tests and all of `tests/test_hooks.py` pass; my in-scope changes are green.\n\nSince `tests-green.sh` is not fully green (due to that unrelated pre-existing issue), I have **not committed** \u2014 flagging this for the Planner to open a separate fix-round task against `test_jev.py`/T-0226's assumption rather than have me commit against a red gate or edit outside scope.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789817245.929494,
+      "pipeline": {
+        "spec_review_at": 1789817245.9293199,
+        "spec_review_by": "planner-waiver: T-0228 risks folded into v2"
+      },
+      "spec_review_verdict": "approve",
+      "spec_review_note": "Planner waiver 2026-09-19: T-0228 risks folded into v2"
+    },
+    {
+      "ts": 1789817246.6441128,
+      "pipeline": {
+        "spec_review_at": 1789817245.9293199,
+        "spec_review_by": "planner-waiver: T-0228 risks folded into v2",
+        "dispatched_at": 1789817246.644057
+      }
+    },
+    {
+      "ts": 1789817246.6797519,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789817246.683019,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789817247.81917,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0229",
+      "claimed_at": 1789817247.818673
+    },
+    {
+      "ts": 1789817247.821568,
+      "account": "B"
+    },
+    {
+      "ts": 1789817247.836736,
+      "pid": 59746,
+      "account": "B"
+    },
+    {
+      "ts": 1789817878.074234,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented the E3 Jev tool-call gate per spec:\n\n1. **`.claude/hooks/jev-gate.sh`** \u2014 new PreToolUse hook (`Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch`). Exits 0 immediately with no task id (Planner session) or when `jev_gate --enabled` doesn't print `1`. Otherwise pipes the hook JSON to `uv run python -m orchestrator.jev_gate` under a 3s wall clock via a `perl -e 'alarm shift; exec @ARGV'` wrapper (no GNU `timeout` on macOS). Any exit other than 2 (including a timeout, which kills the exec'd process with the default `SIGALRM` disposition) falls through to `exit 0` \u2014 fail-open.\n2. **`orchestrator/jev_gate.py`** \u2014 transcript reader (`read_transcript`) that correlates `tool_use`/`tool_result` blocks by id, skipping unreadable/malformed lines without raising; builds the `{task, recent, proposed}` state; asks Jev the three `noul` questions (needed/redundant/destructive) in one `jev.ask()` call; `decide()` blocks only in `gate_mode=\"block\"` on `P(redundant)>=0.85` or `P(needed)<=0.15`, each gated by `confidence>=0.6`; `is_protected()` exempts `tests-green.sh`, `git commit/add/status/diff/log`, and `bus_post_result` from ever being evaluated; every evaluated call (protected calls, `ask()==None`, and scored calls) is logged to `.orchestrator/runs/jev/gate.jsonl`.\n3. **`.claude/settings.json`** \u2014 registered the new hook group after guardrails.sh's entry.\n4. **`.orchestrator/pool.toml`** \u2014 added `[jev].gate_mode = \"log\"` (default).\n5. **`tests/test_jev_gate.py`** \u2014 8 tests (the 7 required plus one extra) covering transcript correlation, log-mode never blocking, block-mode blocking a confident redundant `Read` and allowing a needed call, the protected-call allowlist, a missing transcript, and the shell hook exiting 0 with no task id.\n\n**Test output (failures only):**\n```\nRan 348 tests in 37.766s\nFAILED (failures=1)\nFAIL: test_disabled_returns_none_without_network (test_jev.JevTests.test_disabled_returns_none_without_network)\nAssertionError: urlopen must not be called when jev is disabled\n```\nThis one failure is pre-existing and out of scope: commit `08b2f74` (the parent commit, already on this branch before I started) set `[jev].enabled = true` in `pool.toml`, and this machine has real `TYPESAFE_API_KEY` credentials resolvable via the Keychain, so `jev.ask()` now genuinely calls out instead of short-circuiting \u2014 the test's assumption that Jev is disabled by default is stale. Fixing it would require editing `tests/test_jev.py`, which is outside this task's scope list (and scope-guard.sh actively blocks it under `ORCH_TASK_ID=T-0229`). All 8 new tests and all of `tests/test_hooks.py` pass; my in-scope changes are green.\n\nSince `tests-green.sh` is not fully green (due to that unrelated pre-existing issue), I have **not committed** \u2014 flagging this for the Planner to open a separate fix-round task against `test_jev.py`/T-0226's assumption rather than have me commit against a red gate or edit outside scope.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789817898.492788,
+      "merged_into": "goal/T-0201",
+      "merged_via": "ancestor"
+    },
+    {
+      "ts": 1789818042.2081568,
+      "merged_into": null,
+      "merged_via": null,
+      "pipeline": {
+        "spec_review_at": 1789817245.9293199,
+        "spec_review_by": "planner-waiver: T-0228 risks folded into v2",
+        "dispatched_at": 1789817246.644057
+      },
+      "reason": "Planner committed the worktree as found (f1e17e2) and cleared the ancestor mis-stamp so gate() reviews it"
+    },
+    {
+      "ts": 1789818088.274339,
+      "pipeline": {
+        "spec_review_at": 1789817245.9293199,
+        "spec_review_by": "planner-waiver: T-0228 risks folded into v2",
+        "dispatched_at": 1789817246.644057,
+        "gated_at": 1789818088.2741592
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_disabled_returns_none_without_network (test_jev.JevTests.test_disabled_returns_none_without_network)\nTraceback (most recent call last):\n    raise AssertionError(\"urlopen must not be called when jev is disabled\")\nAssertionError: urlopen must not be called when jev is disabled\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789829049.2346408,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "E3 chain landed via T-0237 merge (2267c62)"
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789817245.9293199,
+    "spec_review_by": "planner-waiver: T-0228 risks folded into v2",
+    "dispatched_at": 1789817246.644057,
+    "gated_at": 1789818088.2741592
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_note": "Planner waiver 2026-09-19: T-0228 risks folded into v2",
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789817247.818673,
+  "account": "B",
+  "pid": 59746,
+  "merged_into": "goal/T-0201",
+  "merged_via": null,
+  "reason": "E3 chain landed via T-0237 merge (2267c62)",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_disabled_returns_none_without_network (test_jev.JevTests.test_disabled_returns_none_without_network)\nTraceback (most recent call last):\n    raise AssertionError(\"urlopen must not be called when jev is disabled\")\nAssertionError: urlopen must not be called when jev is disabled\nFAILED (failures=1)\n"
+  }
+}

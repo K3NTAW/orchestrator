@@ -1,0 +1,77 @@
+{
+  "id": "T-0440",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 5,
+  "title": "H3b v4: wire decision routes into the daemon (spec reviews T-0430, T-0434, T-0436 folded in; review waived after three rounds) \u2014 build_ctx and touch_areas in daemon.py, legacy per-point model kept behind [planner.routes].enabled=false, goal-level claim and coalesced non-routine held sections when enabled, unknown gate short-circuits before decision.route, routine close with PR opening opt-in",
+  "spec": "Replaces T-0435 and T-0437 (both superseded; T-0365 and T-0433 before them) after spec reviews T-0430, T-0434 and T-0436. Spec review waived by Planner decision after three rounds (Phase G rule); every risk they raised is resolved below. Build on goal/T-0353 at df2ae89 (H3a decision.py, H2 launch attribution, H4 reservations and notify-once helper, H7 failure kinds and signatures, H6 acceptance gate, G7 v4 auto fix rounds, G8 semantic triggers merged). Handover sections 3 and 4. decision.py is out of scope and unmodifiable.\n\n1. Placement, no import cycle (T-0434 r1, T-0436 r1, r2): daemon.build_ctx(point, pool, tasks) and daemon.touch_areas(task) live in orchestrator/daemon.py, next to the helpers they reuse in place (_test_ids, _rejecting_reviews, _path_in_scope, failure_kind, failure_signature, changed_paths, _added_diff_lines, _resolve_base, _git_in). No new module. planner_runs.run(point, ctx=None) takes the built ctx; ctx=None keeps the legacy behaviour so existing callers and tests are untouched. planner_runs keeps its existing deferred `from . import daemon` for notify() on gave_up (explicitly allowed; it is the current pattern) and adds no module-scope import of daemon.\n\n2. Two models, one active (T-0436 r3): [planner.routes].enabled selects the model. enabled absent or false: decision_points(), _blocked() and run() behave exactly as today (per-(goal_id, kind, payload_key) records, one launch per point) and every existing test in tests/test_planner_runs.py and tests/test_daemon.py stays green unchanged because their fixtures carry no [planner.routes] table. enabled = true (shipped in pool.toml): decision_points() yields, per goal and tick, at most one point of kind \"goal\" with payload_key = state_version (sha12 over sorted (task id, status, hold_reason, merged_into, last event seq) of the goal children) and never yields the legacy held and scouts_done points for that goal, so the two paths cannot fire on the same task; closable stays its own point (kind \"closable\", handled in item 4). _blocked and the gave_up rule apply to the goal record; old per-point records remain readable history; the module docstring documents both models and the switch. An identical state_version never launches twice (test_same_state_version_never_relaunches). Unrelated goals never share a packet (test_two_goals_two_packets).\n\n3. Routing and packets when enabled: each held execute child is routed individually with its own ctx from build_ctx (held fields: failing_ids via the auto_fix_round extractor over resume_hint.failures; in_scope_review_comments via the auto_fix_round check; auto_fix_rounds_used = lineage count of constraints.auto_round; auto_fix_rounds = [daemon].auto_fix_rounds; failure_signature; signature_repeated against earlier lineage signatures (H7); spec_review_request_changes = spec_review tasks with inputs[0] in the lineage and verdict request_changes; blocked_scouts = scout ids under the goal with status blocked; touches_auth, touches_migrations, touches_interfaces, touches_data_deletion from touch_areas mapping changed paths and added diff lines against pool.toml [review.areas] tables (auth: auth, authz, permission, token, session; migrations: migrations or schema paths, ALTER or CREATE TABLE; interfaces: public API, cli, mcp tool definitions, exported symbols; data_deletion: DROP, DELETE FROM, rm -rf, shutil.rmtree, os.remove), defaults shipped, an unavailable diff sets all four True (test_touch_areas_fail_closed_without_diff)). Common fields: routes = [planner.routes]; infra_failure_kind = \"quota\" | \"auth\" | \"unavailable\" from the pool cooldown or usage-limit reason for the account or executor involved or pipeline.failure_kind quota or permissions, else None (present); premium_launches = escalate launches recorded for the goal. scouts_done fields: goal_complexity, scout_count, all_scouts_posted, blocked_scouts from the bus; security_trigger = any goal scope path matches [review].security_paths; semantic_trigger = goal spec or scope matches [review].semantic_patterns or semantic_paths. test_ctx_fields_complete_for_each_kind asserts decision.route on a built ctx never returns an unknown reason for held, scouts_done and closable. Routine held children get auto_fix_round in that tick and never enter a packet (test_routine_hold_launches_no_model). The non-routine ones plus a pending scouts_done point are coalesced into the goal launch: the packet (goals.launch_planner ids-only prompt, planner-decision.md) carries one section per covered item (task id, hold_reason, failure kind and signature, failing ids, branch, head sha, route and reason for that item; for scouts_done the scout ids), the goal route is the highest severity among them (escalate over investigate), the launch runs on that route's tier ([planner.routes].investigate_tier or the premium tier), and the claim record lists the covered task ids plus route, reason, evidence, cheaper_steps, state_version and cursor_at_launch (H2 fields). test_two_held_siblings_one_packet_non_routine_sections: one routine-fixable child and one escalate-worthy (touches_auth) child under one goal in one tick produce exactly one auto fix round for the first and exactly one launch on the premium tier whose packet contains only the second task's section and whose claim record lists only the second id. test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_routes_disabled_restores_per_point_launch.\n\n4. Closable (T-0434 r3, T-0436 r4, r5): order fixed. (a) state_version dedup and _blocked check first; already claimed means nothing else runs (test_dedup_precedes_gate_state: no merge-record read, no side effect). (b) gate_state from recorded evidence only: \"green\" when the goal branch head sha equals the sha the last successful orchestrator.merge into that branch recorded (merge runs tests-green before fast-forwarding), \"red\" when the last recorded gate for that head failed, else \"unknown\". tick and build_ctx never run a test suite (test_closable_gate_state_from_merge_record_never_runs_suite). (c) gate_state unknown or red is terminal for the tick: the caller does not call decision.route, launches nothing, and notifies once per transition via the H4 helper (test_closable_unknown_gate_launches_nothing). (d) gate green and all_children_merged: routine close without a launch: stamp(goal_id, \"closed_at\") under bus.locked() before any side effect, then idempotent effects each checked by evidence before acting: retrospective entry written once (record script with facts from bus state, or the no-new-learning marker; skipped when an entry for the goal id exists), GOAL result posted once (skipped when present). PR opening is opt-in (T-0436 r5, an autonomy change the human signs off separately): [planner.routes].auto_open_pr defaults to false in pool.toml with a comment naming the policy; when false the routine close records pr_url = None with pr_state = \"ready_for_human\" on the GOAL task and notifies once \"PR ready: goal/<id> to main\"; when true it opens the PR only if the goal has no recorded pr_url and gh pr list shows none for the branch, a non-zero gh exit records pr_error (first 300 chars of stderr) and pr_attempts, notifies once per transition, never counts toward gave_up, retries on later ticks with backoff from [planner.routes].close_retry_base_s (default 60) up to [planner.routes].close_retry_max (default 3), then sets pr_state = \"open_failed\" and holds the goal with hold_reason pr_open_failed while entry and result stand. A crash between stamp and effects is reconciled on the next tick by the same evidence checks (test_closable_routine_is_idempotent_across_ticks: three ticks, one entry, one result, one notification; test_pr_create_failure_retries_then_holds with auto_open_pr = true and gh mocked to fail).\n\n5. Cursor and infra (T-0434 r5): the processed-event cursor is one value per goal in planner_runs.json (cursors[goal_id]); each launch record carries cursor_at_launch; the cursor advances only after the launch is recorded as started (claim written and process spawned); an infra failure leaves it so the retry rebuilds the same packet (test_cursor_advances_only_after_launch_start). Infra failures (auth, quota, service unavailable markers in stderr or exit) set a pool cooldown with reason, do not count toward gave_up, notify once per transition (test_auth_failure_cools_account_without_gave_up).\n\n6. Soft premium budget: exceeding [planner.routes].premium_launches_soft_per_goal still launches and records exception: true with the reason (test_soft_budget_exceeded_still_launches_with_exception).\n\nTests in tests/test_planner_runs.py and tests/test_daemon.py: the sixteen named above. Every gh, git and process launch in tests is mocked; new tests set [planner.routes].enabled = true in their pool fixture. Keep every existing test green unchanged; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_runs.py and tests/test_daemon.py: test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_two_held_siblings_one_packet_non_routine_sections, test_same_state_version_never_relaunches, test_two_goals_two_packets, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff, test_dedup_precedes_gate_state, test_closable_gate_state_from_merge_record_never_runs_suite, test_closable_unknown_gate_launches_nothing, test_closable_routine_is_idempotent_across_ticks, test_pr_create_failure_retries_then_holds, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception pass",
+    "planner_runs.py has no module-scope import of daemon; build_ctx and touch_areas are defined in daemon.py; no new module is added",
+    "with [planner.routes] absent every pre-existing test passes unchanged; with enabled = true the legacy held and scouts_done points are not yielded for a goal that has a goal-level point",
+    "every goal launch record carries route, reason, evidence, cheaper_steps, state_version, cursor_at_launch and covered task ids; the routine close stamps closed_at before any side effect, never runs a test suite inside tick, and opens a PR only when [planner.routes].auto_open_pr is true",
+    "pool.toml documents [review.areas] defaults and [planner.routes] enabled, auto_open_pr (false), close_retry_base_s, close_retry_max; the planner_runs module docstring documents both claim models and the switch",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/goals.py",
+    ".orchestrator/prompts/planner-decision.md",
+    ".orchestrator/pool.toml",
+    "tests/test_planner_runs.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2400,
+    "task_class": "routing",
+    "supersedes": [
+      "T-0435",
+      "T-0437"
+    ],
+    "spec_review_waived": "Planner decision after three rounds (T-0430, T-0434, T-0436), Phase G rule; complexity set to 5 so the daemon does not spawn a fourth",
+    "spec_review_prior": [
+      "T-0430",
+      "T-0434",
+      "T-0436"
+    ]
+  },
+  "status": "done",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789915868.319386,
+      "pipeline": {
+        "dispatched_at": 1789915868.319337
+      }
+    },
+    {
+      "ts": 1789915905.780481,
+      "status": "failed",
+      "reason": "superseded: duplicate H3b v4 of T-0439, which is already running on Codex (dispatched 16:51); plan.md OWNER header: session 6410 drives T-0353, the launcher session must not create tasks",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789917819.7090418,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0442 cdc21db (H3b v4 lineage)",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789915868.319337
+  },
+  "reason": "superseded: duplicate H3b v4 of T-0439, which is already running on Codex (dispatched 16:51); plan.md OWNER header: session 6410 drives T-0353, the launcher session must not create tasks",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0442 cdc21db (H3b v4 lineage)"
+}

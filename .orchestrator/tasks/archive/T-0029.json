@@ -1,0 +1,89 @@
+{
+  "id": "T-0029",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "B6: review and challenge worktrees base on the reviewed task's branch; scoped_diff against the parent goal branch; review affinity on account A",
+  "spec": "Why: review T-0026 judged B2 in a worktree created from origin/main (spawn.ensure_worktree default base), so it saw executor.py without B1's pool.py and reported the new API as nonexistent; every finding was an artefact. Also scoped_diff (spawn.py) diffs origin/main...HEAD, so stacked tasks show their predecessors' changes as their own. And .orchestrator/pool.toml gives review affinity only to account B, so a fallback task executed on B is reviewed on the same account. Depends on B2 merged into goal/T-0005 (spawn.py is edited by both).\n\nWhat (\u22644 files: orchestrator/spawn.py, .orchestrator/pool.toml, tests/test_orchestrator.py, README.md):\n1. spawn.py \u2014 `def base_for(task) -> str`: for role review/challenge with inputs[0] a task id whose json has a worktree or branch, return `task/<inputs[0]>` if that branch exists, else `goal/<parent>` if it exists, else origin/main; for execute tasks with a parent whose `goal/<parent>` branch exists, return that goal branch (so the Planner no longer has to pre-create worktrees); otherwise origin/main. ensure_worktree(task_id, base=None) resolves base via base_for when not given. scoped_diff: diff base = `goal/<parent>` of the reviewed task when that branch exists, else origin/main; use `<base>...HEAD`.\n2. pool.toml \u2014 add \"review\" to account A's role_affinity so Pool.pick(\"review\") can land on either account; in Pool.pick for role review, skip the account that executed inputs[0] (read the reviewed task's `account` field) when another account has headroom. (Edit pool.py only for that skip; it is in scope for this one change.)\n3. tests: base_for returns task/<id> for a review task whose input task branch exists (create branches in the TMP repo used by MergeQueue tests or a fresh scratch repo); returns goal/<parent> for an execute task with an existing goal branch; falls back to origin/main. Pool.pick(\"review\") avoids the executing account when B is the executor and A has headroom.\n4. README: one sentence under Access model or Phase 1: review worktrees are based on the reviewed task's branch; reviews prefer the other account.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"spawn: review/challenge worktrees base on the reviewed branch, diffs against the goal branch; reviews prefer the other account\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new base_for and pick(review) tests",
+    "base_for(review task with inputs [T-x]) == 'task/T-x' when that branch exists",
+    "scoped_diff of a stacked task no longer includes its predecessor's hunks (test with two commits on a scratch repo)",
+    "pool.toml account A role_affinity contains review",
+    "git diff --stat limited to orchestrator/spawn.py, orchestrator/pool.py, .orchestrator/pool.toml, tests/test_orchestrator.py, README.md"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/pool.py",
+    ".orchestrator/pool.toml",
+    "tests/test_orchestrator.py",
+    "README.md"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0029",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed and green. Summary:\n\n**Files changed:** `orchestrator/spawn.py`, `orchestrator/pool.py`, `.orchestrator/pool.toml`, `tests/test_orchestrator.py`, `README.md`\n\n- `spawn.py`: added `base_for(task)` (review/challenge base on the reviewed task's branch \u2192 its goal branch \u2192 origin/main; execute tasks with an existing goal branch stack on it); `ensure_worktree(task_id, base=None)` resolves through it; `scoped_diff` now diffs against the reviewed task's goal branch instead of always `origin/main`; `run_worker` passes the executing account as `avoid` to `pool.pick` for reviews.\n- `pool.py`: `Pool.pick(role, avoid=None)` skips the account that executed the reviewed task when another has headroom.\n- `pool.toml`: account A's `role_affinity` now includes `review`.\n- `tests/test_orchestrator.py`: new `SpawnBase` class (5 tests covering `base_for` fallback chain, `ensure_worktree` auto-base, and the stacked-task diff exclusion), a new `PoolSel` test for the avoid-account skip, and updated one pre-existing assertion whose expected winner changed now that both accounts have review affinity.\n- `README.md`: one sentence noting the new review-basing/account-preference behavior.\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 39 tests, OK (no failures). `.claude/hooks/tests-green.sh` exits 0.\n\nNo new dependencies added.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789659437.809566,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789659437.813838,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0029",
+      "claimed_at": 1789659437.813749
+    },
+    {
+      "ts": 1789659437.8244102,
+      "pid": 47491,
+      "account": "A"
+    },
+    {
+      "ts": 1789659807.6056828,
+      "status": "done",
+      "result": {
+        "summary": "Committed and green. Summary:\n\n**Files changed:** `orchestrator/spawn.py`, `orchestrator/pool.py`, `.orchestrator/pool.toml`, `tests/test_orchestrator.py`, `README.md`\n\n- `spawn.py`: added `base_for(task)` (review/challenge base on the reviewed task's branch \u2192 its goal branch \u2192 origin/main; execute tasks with an existing goal branch stack on it); `ensure_worktree(task_id, base=None)` resolves through it; `scoped_diff` now diffs against the reviewed task's goal branch instead of always `origin/main`; `run_worker` passes the executing account as `avoid` to `pool.pick` for reviews.\n- `pool.py`: `Pool.pick(role, avoid=None)` skips the account that executed the reviewed task when another has headroom.\n- `pool.toml`: account A's `role_affinity` now includes `review`.\n- `tests/test_orchestrator.py`: new `SpawnBase` class (5 tests covering `base_for` fallback chain, `ensure_worktree` auto-base, and the stacked-task diff exclusion), a new `PoolSel` test for the avoid-account skip, and updated one pre-existing assertion whose expected winner changed now that both accounts have review affinity.\n- `README.md`: one sentence noting the new review-basing/account-preference behavior.\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 39 tests, OK (no failures). `.claude/hooks/tests-green.sh` exits 0.\n\nNo new dependencies added.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789674109.572899,
+      "pipeline": {
+        "gated_at": 1789674109.572774
+      }
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789659437.813749,
+  "pid": 47491,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789674109.572774
+  }
+}

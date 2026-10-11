@@ -1,0 +1,90 @@
+{
+  "id": "T-0925",
+  "created_at": 1790116049.144428,
+  "parent": "T-0760",
+  "role": "challenge",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "challenge: cross-invocation respawn cap finding (T-0918 review)",
+  "spec": "A reviewer of task/T-0918 claimed: run_worker in orchestrator/spawn.py enforces the one-respawn-per-task escalation cap only within a single run_worker() call (an if/else at spawn.py:1084), and never checks pipeline[\"tool_escalation_used\"] before allowing escalation on a later, separate run_worker(task_id) invocation of the same task. Concretely: if the escalated (second) attempt itself returns status \"held\" (spawn.py:1144-1145, e.g. it again posts a needs_tool hold), the task is marked held and could be resumed later; on that later run_worker call, _hidden_tool_request(task_id) (spawn.py:1083) only reads the current bus result reason, with no check of prior pipeline[\"tool_escalation_used\"], so a second escalation with a fresh budget reservation is possible, contradicting the spec (respawn capped at one per task). Read orchestrator/spawn.py around lines 1011-1158, focused on run_worker, _hidden_tool_request, and the held-status branch. Try to refute or confirm with concrete evidence.",
+  "inputs": [
+    {
+      "claim": "one-respawn-per-task cap is not enforced across separate run_worker invocations on the same task_id",
+      "evidence": "spawn.py:1083-1098, 1144-1145",
+      "confidence": 0.0
+    }
+  ],
+  "acceptance": [
+    "verdict confirmed, refuted, or uncertain with file:line evidence"
+  ],
+  "scope": [
+    "orchestrator/spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 15,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0925",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "confirmed",
+    "evidence": [
+      "orchestrator/spawn.py:1098",
+      "orchestrator/spawn.py:311-314",
+      "orchestrator/spawn.py:1083-1101"
+    ],
+    "note": "pipeline['tool_escalation_used'] is stamped at spawn.py:1098 but never read/checked anywhere in spawn.py as a guard. The escalation branch (1084-1101) is gated only by disclosure_mode=='active' and _hidden_tool_request(task_id) finding a needs_tool: reason on the task's current bus result (311-314). Within one run_worker() call the escalation runs at most once structurally (single if/else, no loop), but nothing prevents a second, independent run_worker(task_id) invocation (e.g. after the task is held/requeued and redispatched by the daemon) from hitting the same branch and escalating again \u2014 tests (test_spawn.py:1254-1315) only verify single-call behavior, none exercise or assert a cross-invocation cap.",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790116049.145626,
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0918"
+    },
+    {
+      "ts": 1790116051.1034188,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0925",
+      "claimed_at": 1790116051.1031349
+    },
+    {
+      "ts": 1790116051.104446,
+      "account": "A"
+    },
+    {
+      "ts": 1790116051.5479648,
+      "pid": 71698,
+      "account": "A"
+    },
+    {
+      "ts": 1790116098.328705,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "confirmed",
+        "evidence": [
+          "orchestrator/spawn.py:1098",
+          "orchestrator/spawn.py:311-314",
+          "orchestrator/spawn.py:1083-1101"
+        ],
+        "note": "pipeline['tool_escalation_used'] is stamped at spawn.py:1098 but never read/checked anywhere in spawn.py as a guard. The escalation branch (1084-1101) is gated only by disclosure_mode=='active' and _hidden_tool_request(task_id) finding a needs_tool: reason on the task's current bus result (311-314). Within one run_worker() call the escalation runs at most once structurally (single if/else, no loop), but nothing prevents a second, independent run_worker(task_id) invocation (e.g. after the task is held/requeued and redispatched by the daemon) from hitting the same branch and escalating again \u2014 tests (test_spawn.py:1254-1315) only verify single-call behavior, none exercise or assert a cross-invocation cap.",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1790116051.1031349,
+  "account": "A",
+  "pid": 71698
+}

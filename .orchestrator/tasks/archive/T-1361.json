@@ -1,0 +1,170 @@
+{
+  "id": "T-1361",
+  "created_at": 1790194472.509111,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S2b v2: capacity snapshot and fallback treat claude:<tier> rows as Claude capacity; README plug-and-play",
+  "spec": "Goal T-1334 (S1 T-1352 merged). Replaces T-1357 after spec review T-1359. Claude executor rows have id \"claude:<tier>\" (S2a contract), so running claude-row tasks carry executor \"claude:<tier>\" and are already counted by daemon.running_claude_workers (daemon.py:470, \"claude:\" prefix) into snapshot[\"claude_workers_free\"]; no change there. The dispatch-time check (executor.start -> pool.pick) stays authoritative and holds \"no account with headroom\"; the snapshot rule below is advisory and read-only.\n\n1. capacity.snapshot (capacity.py:9): each executor row carries \"provider\"; every reader uses row.get(\"provider\", \"codex\") so rows built elsewhere (concurrency.py, speculation.py, tests) without the key stay codex.\n2. One helper _usable(row, snapshot, free=None) used by eligible_executors_from_snapshot (:54), admit (:101) and the \"fallback\" flag (:45): codex row -> today's checks; claude row -> today's checks (enabled, role, band, cooling_s == 0, row free, day_tasks_left) plus at least one snapshot account with cooling_s == 0 plus the shared counter > 0. fallback = enabled execute rows exist and none is usable (with the shared counter at its snapshot value).\n3. admit: free[\"claude_rows\"] = snapshot[\"claude_workers_free\"]; the `available` filter (capacity.py:127) requires free[\"claude_rows\"] > 0 for claude rows; the imminent-reservation blocker (:141) treats a claude row as having min(row free, free[\"claude_rows\"]); on choosing a claude row decrement both. The legacy \"claude\" pseudo-executor only appears when fallback is True, i.e. when no claude row is usable, so the two never draw in the same pass.\n4. _reason (:75): a claude row otherwise eligible but shared counter 0 -> \"account_capacity\"; every account cooling -> \"cooldown\".\n5. daemon._codex_available (daemon.py:454): a claude row counts when enabled, has \"execute\", is not cooling and at least one pool account is not cooling (same advisory rule; no Pool.pick, no window roll).\n6. README.md \"Executors and routing\" (README.md:278): Claude rows (id \"claude:<tier>\", tier alias in [models], model optional and must match the alias, roles, band, max_parallel, daily_budget_tasks), headroom from [[claude_accounts]] and [limits].max_parallel_claude_workers, reviewer never runs the executing model, plug-and-play: add a [models] alias + a claude:<alias> row for a new Claude model, add a codex row for a new Codex model, enabled=false on every codex row to run without Codex.\nTests (unittest.TestCase methods): two ready tasks and one shared slot -> one admitted, one deferred account_capacity; every account cooling -> claude row not eligible, reason cooldown; all codex rows cooling + healthy claude row -> fallback False and the claude row eligible; codex-only snapshot rows without \"provider\" -> admit result equals hard-coded expected ids; a running task with executor \"claude:opus\" lowers claude_workers_free via running_claude_workers; _codex_available with a claude row, one account not cooling vs all cooling. No pool.toml edit, no new dependencies. Additive; git revert restores the old admission.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_capacity.py::test_claude_rows_share_claude_worker_slots",
+    "tests/test_capacity.py::test_claude_row_unusable_when_every_account_cools",
+    "tests/test_capacity.py::test_healthy_claude_row_prevents_fallback",
+    "tests/test_capacity.py::test_codex_only_rows_without_provider_unchanged",
+    "tests/test_daemon.py::test_running_claude_row_task_counts_as_claude_worker",
+    "tests/test_daemon.py::test_codex_available_counts_claude_row_when_an_account_is_free",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_capacity.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-1352"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1357",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/executor.py",
+      "orchestrator/concurrency.py",
+      "orchestrator/speculation.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Claude executor rows: id 'claude:<tier>', provider 'claude' (S2a validates). Snapshot rows gain 'provider' (read with .get(..., 'codex')). running_claude_workers counts the 'claude:' executor prefix, which claude-row tasks carry."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790194491.72544,
+      "pipeline": {
+        "first_ready_at": 1790194491.725287
+      }
+    },
+    {
+      "ts": 1790194491.962334,
+      "pipeline": {
+        "first_ready_at": 1790194491.725287,
+        "spec_review_at": 1790194491.962216,
+        "spec_review_at_lease": 1790195391.962216
+      }
+    },
+    {
+      "ts": 1790194491.970987,
+      "pipeline": {
+        "first_ready_at": 1790194491.725287,
+        "spec_review_at": 1790194491.962216,
+        "spec_review_at_lease": 1790195391.962216,
+        "spec_review_at_done": 1790194491.9708679
+      }
+    },
+    {
+      "ts": 1790194552.265733,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "The spec defines fallback as 'no enabled execute row is usable', and _usable includes free, band and day_tasks_left. Today fallback means only 'all enabled rows cooling'. If every codex row is saturated but healthy, fallback flips True and tasks route to the legacy 'claude' pseudo-executor instead of waiting. daemon._fallback_mode (daemon.py:463) still keys on cooling only, so the two disagree, and the 'codex-only unchanged' criterion breaks.",
+          "severity": "high",
+          "line": 45
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "free_slots (daemon.py:483-499) is not in the spec. It sums max_parallel minus running for every non-cooling execute row, claude rows included, with no shared claude cap and no account check. capacity_reason at daemon.py:773 also ignores claude rows. With scheduler mode off, admit is skipped and _first_come_order over-dispatches claude tasks, which executor.start/pool.pick then holds.",
+          "severity": "med",
+          "line": 494
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The advisory _codex_available rule (enabled, execute, not cooling, one account free) ignores band, daily budget and row saturation, which both the snapshot _usable and pool.eligible_executors apply. With every codex row cooling and a claude row that is over budget or out of band, _codex_available stays True, so fallback_claude never fires and tasks hold indefinitely.",
+          "severity": "med",
+          "line": 460
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "choice_key (:132) and the imminent blocker (:141) read free[executor_id] (row free). The spec does not say whether they use the effective min(row free, claude_rows). A claude row with free=4 and shared counter 1 can outrank a codex row, and the `free==1` blocker check can misfire.",
+          "severity": "med",
+          "line": 132
+        },
+        {
+          "path": "orchestrator/concurrency.py",
+          "issue": "concurrency.py and speculation.py read snapshot rows and claude_workers_free but are outside scope. The spec does not check that select_limit does not double count the shared counter against per-row free for claude rows.",
+          "severity": "low",
+          "line": 80
+        }
+      ]
+    },
+    {
+      "ts": 1790194602.8980968,
+      "pipeline": {
+        "first_ready_at": 1790194491.725287,
+        "spec_review_at": 1790194491.962216,
+        "spec_review_at_lease": 1790195391.962216,
+        "spec_review_at_done": 1790194491.9708679,
+        "spec_review_held_at": 1790194602.89801
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790194603.703488,
+      "status": "superseded",
+      "hold_reason": "respec T-1363 after spec review T-1362: fallback stays cooling-only (account cooling folded into claude row cooling), shared cap in free_slots and eff() in admit"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790194491.725287,
+    "spec_review_at": 1790194491.962216,
+    "spec_review_at_lease": 1790195391.962216,
+    "spec_review_at_done": 1790194491.9708679,
+    "spec_review_held_at": 1790194602.89801
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "The spec defines fallback as 'no enabled execute row is usable', and _usable includes free, band and day_tasks_left. Today fallback means only 'all enabled rows cooling'. If every codex row is saturated but healthy, fallback flips True and tasks route to the legacy 'claude' pseudo-executor instead of waiting. daemon._fallback_mode (daemon.py:463) still keys on cooling only, so the two disagree, and the 'codex-only unchanged' criterion breaks.",
+      "severity": "high",
+      "line": 45
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "free_slots (daemon.py:483-499) is not in the spec. It sums max_parallel minus running for every non-cooling execute row, claude rows included, with no shared claude cap and no account check. capacity_reason at daemon.py:773 also ignores claude rows. With scheduler mode off, admit is skipped and _first_come_order over-dispatches claude tasks, which executor.start/pool.pick then holds.",
+      "severity": "med",
+      "line": 494
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The advisory _codex_available rule (enabled, execute, not cooling, one account free) ignores band, daily budget and row saturation, which both the snapshot _usable and pool.eligible_executors apply. With every codex row cooling and a claude row that is over budget or out of band, _codex_available stays True, so fallback_claude never fires and tasks hold indefinitely.",
+      "severity": "med",
+      "line": 460
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "choice_key (:132) and the imminent blocker (:141) read free[executor_id] (row free). The spec does not say whether they use the effective min(row free, claude_rows). A claude row with free=4 and shared counter 1 can outrank a codex row, and the `free==1` blocker check can misfire.",
+      "severity": "med",
+      "line": 132
+    },
+    {
+      "path": "orchestrator/concurrency.py",
+      "issue": "concurrency.py and speculation.py read snapshot rows and claude_workers_free but are outside scope. The spec does not check that select_limit does not double count the shared counter against per-row free for claude rows.",
+      "severity": "low",
+      "line": 80
+    }
+  ],
+  "hold_reason": "respec T-1363 after spec review T-1362: fallback stays cooling-only (account cooling folded into claude row cooling), shared cap in free_slots and eff() in admit"
+}

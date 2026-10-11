@@ -1,0 +1,694 @@
+{
+  "id": "T-0800",
+  "created_at": 1790086732.037445,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "P3/P6 wiring, shadow only: build evidence candidates from the execute and review packet builders, route them, log context_selection decisions and shadow reduction into packet_meta and the context scorecard; the model still receives the unchanged packet",
+  "spec": "Depends on T-0794 (orchestrator/evidence.py, orchestrator/context_router.py: make(), EvidencePool, route(), render(), decision_row() which returns the full keyword set for decision_log.record), T-0772 (promotion.mode(\"context_router\"), decision_log kind context_selection) and T-0799 (execute prompt dedup; spawn.py changed there). This spec is self-contained; the program brief is not on the goal branch. Shadow means: compute and log; the bytes sent to any model are byte-identical to before this task (assert in tests).\nDo:\n1. spawn.py, execute path (_packet_body around lines 181-350): after `sections` are assembled and before the cap loop, build candidates via evidence.make(): one \"architecture_note\" for task spec (location task:<id>:spec) and one per acceptance line (task:<id>:acceptance:<n>); one \"source_chunk\" per write-scope file that exists (content = the file text bounded to 12000 chars, commit = merge_base sha) and one per read_scope path (content = the symbols lines for that path, provenance repo); one \"memory_entry\" per gotcha line and one \"decision\" per decisions line (provenance memory); one \"previous_result\" per evidence line from task inputs (provenance bus, trust untrusted); one \"test_result\" for each relevant_tests path (content = path only) and, for fix rounds, one for the failure block in the spec if a \"Failures:\" marker exists (content = that block). Add every candidate to evidence.EvidencePool(goal) (goal = task parent or task id). Call context_router.route(task, candidates, role=\"execute\", head_sha=merge_base, cfg=Pool().cfg). When promotion.mode(\"context_router\") == \"off\": skip everything in this step. When \"shadow\" or \"active\" (active is treated as shadow in this task and logs a warning once per process via notify: \"context_router active not implemented; running shadow\"): record decision_log.record(**context_router.decision_row(task, routed, mode=mode)) and extend the build meta returned by _packet_body with routed_tokens, routed_reduction_ratio, routed_hidden, routed_ambiguous, routed_rules_version, evidence_ids (list of ids, capped 200). packet_run_meta / with_instruction_tokens / bus.log_run (P1) must carry those keys through into the run's `context` object (bus.py: add the keys to the copied list). The router must never raise into the packet builder: wrap in try/except, log one notify line, and continue without the shadow keys.\n2. spawn.py, review path (review_packet ~435-500): candidates = the scoped diff as one \"source_chunk\" per file hunk group (split raw_diff on \"diff --git\", location = the path, content = that file's hunks), spec/acceptance notes as above, previous review comments (fix-round context) as \"review_finding\". role = \"security_review\" when the packet carries the security section, else \"review\". Same logging and meta keys, same shadow guarantee.\n3. context_scorecard.py: per role and per goal add columns shadow_routed_tokens (avg), shadow_reduction (avg routed_reduction_ratio), shadow_hidden (avg), shadow_ambiguous_rate (ambiguous / candidates); rows without the keys count as unmeasured for those columns only. `orchestrator scorecard --context` prints them.\n4. Scout evidence reuse (P8 first step): scout_evidence.reuse_check may read evidence.EvidencePool(goal) ids by source_type \"scout_finding\" only if it is a one-line addition; otherwise leave scout_evidence untouched and note it.\nTests: tests/test_spawn.py::test_execute_packet_bytes_unchanged_under_context_router_shadow (build a packet with mode off and with mode shadow on the same fixture task; the packet text is identical; the shadow meta keys exist only in shadow), ::test_execute_packet_logs_context_selection_decision (one decision_log row of kind context_selection with subject = task id, no content field in the row), ::test_review_packet_routes_diff_files_per_path (a two-file diff gives two source_chunk candidates with those locations), ::test_router_failure_never_breaks_packet (monkeypatch context_router.route to raise; packet still builds; a notify line mentions the task); tests/test_context_scorecard.py::test_shadow_columns_present_and_unmeasured_rows_counted; tests/test_bus.py::test_log_run_carries_routed_keys.\nDocs: extend docs/context-economy/05-context-router.md with a \"Shadow wiring\" section (what is logged where, how to read the scorecard columns, revert path: set [context_router] mode = \"off\" or git revert). Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_packet_bytes_unchanged_under_context_router_shadow passes",
+    "tests/test_spawn.py::test_execute_packet_logs_context_selection_decision passes",
+    "tests/test_spawn.py::test_review_packet_routes_diff_files_per_path passes",
+    "tests/test_spawn.py::test_router_failure_never_breaks_packet passes",
+    "tests/test_context_scorecard.py::test_shadow_columns_present_and_unmeasured_rows_counted passes",
+    "tests/test_bus.py::test_log_run_carries_routed_keys passes",
+    "docs/context-economy/05-context-router.md has a Shadow wiring section; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/scout_evidence.py",
+    "tests/test_spawn.py",
+    "tests/test_context_scorecard.py",
+    "tests/test_bus.py",
+    "docs/context-economy/05-context-router.md"
+  ],
+  "depends_on": [
+    "T-0794",
+    "T-0799"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0800",
+  "codex_thread": "01a0c9a9-1c03-7831-a086-54774a97f339",
+  "result": {
+    "summary": "Implemented shadow-only context router wiring for execute/review packets, telemetry propagation, scorecard columns, tests, and documentation. Scout evidence reuse was left unchanged because it required more than a one-line addition.\n\nGate: `tests-green: OK 1067 512845d 125s`  \nCommit: `5248d9a44e6b202e3dc48285eab8a15dbf9207e1`\n\nFiles changed: 7 scoped files, 222 insertions, 13 deletions.  \nFailures-only output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c9a9-1c03-7831-a086-54774a97f339",
+    "usage": {
+      "input_tokens": 1467176,
+      "cached_input_tokens": 1409664,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11894,
+      "reasoning_output_tokens": 3045,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790086732.038856,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 16:35: same spec as T-0795 (which inherited the v4 library review chain); only the dependency id changed"
+    },
+    {
+      "ts": 1790089672.0803661,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301
+      }
+    },
+    {
+      "ts": 1790089672.081964,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042
+      }
+    },
+    {
+      "ts": 1790089675.586001,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141
+      }
+    },
+    {
+      "ts": 1790089696.7075279,
+      "packet_meta": {
+        "chars": 1709,
+        "est_tokens": 427,
+        "hash": "cbf3d9b805e7",
+        "version": "cbf3d9b805e7",
+        "base": "e8c4687d6d62",
+        "sources": "pool.toml@958205df7bf1 gotchas@11656566bb08 memory@notes",
+        "policy_version": "958205df7bf1",
+        "gotchas": "11656566bb08"
+      }
+    },
+    {
+      "ts": 1790089696.708993,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0800",
+      "claimed_at": 1790089696.7088692
+    },
+    {
+      "ts": 1790089696.710121,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790090368.985329,
+      "codex_thread": "01a0c9a9-1c03-7831-a086-54774a97f339",
+      "codex_thread_head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+    },
+    {
+      "ts": 1790090368.993044,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790090368.99629,
+      "status": "done",
+      "result": {
+        "summary": "Implemented shadow-only context router wiring for execute/review packets, telemetry propagation, scorecard columns, tests, and documentation. Scout evidence reuse was left unchanged because it required more than a one-line addition.\n\nGate: `tests-green: OK 1067 512845d 125s`  \nCommit: `5248d9a44e6b202e3dc48285eab8a15dbf9207e1`\n\nFiles changed: 7 scoped files, 222 insertions, 13 deletions.  \nFailures-only output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c9a9-1c03-7831-a086-54774a97f339",
+        "usage": {
+          "input_tokens": 1467176,
+          "cached_input_tokens": 1409664,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 11894,
+          "reasoning_output_tokens": 3045,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790090394.513858,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790090519.4392672,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790090519.943923,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        }
+      }
+    },
+    {
+      "ts": 1790090520.03853,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        },
+        "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+      }
+    },
+    {
+      "ts": 1790090520.0469341,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        },
+        "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+        "gated_at_done": 1790090520.046773
+      }
+    },
+    {
+      "ts": 1790090848.90908,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790090869.1274712,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        },
+        "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+        "gated_at_done": 1790090520.046773,
+        "merged_at": 1790090869.127278,
+        "merged_at_lease": 1790091769.127278
+      }
+    },
+    {
+      "ts": 1790090997.487416,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "sha": "1d64d0e95f59ca7f049f47e691c7c5e46e87432b",
+      "merged_at": 1790090997.486086,
+      "changed_files": [
+        "docs/context-economy/05-context-router.md",
+        "orchestrator/bus.py",
+        "orchestrator/context_scorecard.py",
+        "orchestrator/spawn.py",
+        "tests/test_bus.py",
+        "tests/test_context_scorecard.py",
+        "tests/test_spawn.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        },
+        "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+        "gated_at_done": 1790090520.046773,
+        "merged_at": 1790090869.127278,
+        "merged_at_lease": 1790091769.127278
+      }
+    },
+    {
+      "ts": 1790090998.2354891,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        },
+        "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+        "gated_at_done": 1790090520.046773,
+        "merged_at": 1790090869.127278,
+        "merged_at_lease": 1790091769.127278,
+        "accepted_at": 1790090998.235052
+      }
+    },
+    {
+      "ts": 1790090998.368018,
+      "pipeline": {
+        "first_ready_at": 1790089672.080301,
+        "dispatched_at": 1790089672.0819042,
+        "dispatched_at_lease": 1790090572.0819042,
+        "dispatched_at_done": 1790089675.5859141,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790090519.439135,
+        "gated_at_lease": 1790091419.439135,
+        "first_green_at": 1790090519.4385412,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0800",
+          "goal_head": "goal/T-0760",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/daemon.py",
+            "tests/test_daemon.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790090519.943454,
+          "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+        },
+        "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+        "gated_at_done": 1790090520.046773,
+        "merged_at": 1790090869.127278,
+        "merged_at_lease": 1790091769.127278,
+        "accepted_at": 1790090998.235052,
+        "merged_at_done": 1790090998.36783
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 16:35: same spec as T-0795 (which inherited the v4 library review chain); only the dependency id changed",
+  "pipeline": {
+    "first_ready_at": 1790089672.080301,
+    "dispatched_at": 1790089672.0819042,
+    "dispatched_at_lease": 1790090572.0819042,
+    "dispatched_at_done": 1790089675.5859141,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "59713ad4855553b599f586ba84f19e20811e52dc",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790090519.439135,
+    "gated_at_lease": 1790091419.439135,
+    "first_green_at": 1790090519.4385412,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0800",
+      "goal_head": "goal/T-0760",
+      "moved_count": 2,
+      "stale_paths": [
+        "orchestrator/daemon.py",
+        "tests/test_daemon.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790090519.943454,
+      "head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1"
+    },
+    "reviewed_sha": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+    "gated_at_done": 1790090520.046773,
+    "merged_at": 1790090869.127278,
+    "merged_at_lease": 1790091769.127278,
+    "accepted_at": 1790090998.235052,
+    "merged_at_done": 1790090998.36783
+  },
+  "packet_meta": {
+    "chars": 1709,
+    "est_tokens": 427,
+    "hash": "cbf3d9b805e7",
+    "version": "cbf3d9b805e7",
+    "base": "e8c4687d6d62",
+    "sources": "pool.toml@958205df7bf1 gotchas@11656566bb08 memory@notes",
+    "policy_version": "958205df7bf1",
+    "gotchas": "11656566bb08"
+  },
+  "claimed_at": 1790089696.7088692,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "5248d9a44e6b202e3dc48285eab8a15dbf9207e1",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0760",
+  "sha": "1d64d0e95f59ca7f049f47e691c7c5e46e87432b",
+  "merged_at": 1790090997.486086,
+  "changed_files": [
+    "docs/context-economy/05-context-router.md",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/spawn.py",
+    "tests/test_bus.py",
+    "tests/test_context_scorecard.py",
+    "tests/test_spawn.py"
+  ]
+}

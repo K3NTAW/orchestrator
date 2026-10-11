@@ -1,0 +1,146 @@
+{
+  "id": "T-0535",
+  "created_at": 1789948034.725804,
+  "parent": "T-0503",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2 v4: execution waves in daemon.dispatch behind [scheduler].mode = shadow|active|off \u2014 full eligible candidate set with backfill, shared first-come helper, validated mode, waves logged to runs/sched/waves.jsonl (spec reviews T-0523, T-0525, T-0532 folded in; Planner-dispatched after three rounds)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P3 (select the best set of mutually compatible ready tasks; respect depends_on, capacity, budgets, cooldowns, safety policy) and Evaluation (retain what baseline scheduling would have done). Base goal/T-0503 with S0a (schedlog, dispatch.jsonl considered rows with a capacity_reason local of cooldown|account_capacity|executor_capacity, first_ready_at) and S1 (interference.select_wave, pairwise, classify with a transitive _depends_on walk that resolves ids from the tasks dict) merged. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods.\nFacts: daemon.dispatch walks bus.read(status=\"queued\", role=\"execute\") + retry_held (budget-held tasks with no dispatched_at) in id order and dispatches first-come until free_slots; _load_review_cfg(pool) (daemon.py:217-237) shows the pool.toml table pattern including notify-once and safe fallback on an unrecognised code_review value, but is called only from tick(), while the Daemon tests call daemon.dispatch(pool) directly. interference.select_wave(ready, running, tasks, capacity, order=None, graph=None, rules=None) -> {wave, deferred} takes and returns task ids and backfills a deferred slot from later candidates; interference.pairwise(tasks_list) takes task dicts.\n1. _load_scheduler_cfg(pool): table [scheduler] with defaults mode = \"shadow\", soft_conflict_policy = \"defer\", max_wave = 0 (0 = capacity); mode is validated against off|shadow|active: an unrecognised value notifies once and falls back to shadow (mirror the code_review handling); called at the top of dispatch(pool) so tests calling dispatch directly observe the mode. Add the table to .orchestrator/pool.toml with comments (default shadow: dispatch unchanged, waves only logged; active dispatches the wave; off disables both); touch install.py only if pool.toml is templated there.\n2. Define eligible(pool, candidates) -> the FULL eligibility-filtered ordered id list with NO slot cap (ready, non-stale, spec approved or below SPEC_REVIEW_MIN, fallback tier available in fallback mode; candidates = queued execute tasks plus the budget-held retries from retry_held, held status irrelevant), and _first_come_order(eligible_ids, slots) -> the first slots of that list. Both are side-effect-free; the real off/shadow dispatch path dispatches exactly _first_come_order(eligible(...), slots), so baseline_order can never diverge from the real path.\n3. Once per tick: candidate_ids = eligible(...) (uncapped, so select_wave can backfill a slot freed by a deferral with a later clean candidate); running = execute tasks with status running plus dispatched-but-unclaimed ones; tasks = dict id -> task covering candidates, running and the full transitive depends_on ancestry of every candidate and running task (walk depends_on through bus.get; missing ids are skipped, never raise; no goal-sibling requirement). order = _wave_order(candidate_ids, tasks), a module-level hook returning its input unchanged (a later task replaces it). result = interference.select_wave(candidate_ids, running_ids, tasks, capacity=min(slots, max_wave or slots), order=order, rules={\"soft_conflict_policy\": ...}). predicted = interference.pairwise([tasks[i] for i in result[\"wave\"]]). When mode != off and candidate_ids is non-empty: schedlog.append(\"waves\", {\"ts\",\"mode\",\"ready\": candidate_ids,\"running\": running_ids,\"baseline_order\": _first_come_order(candidate_ids, slots),\"wave\",\"deferred\",\"predicted\",\"priority\": {},\"applied\": mode == \"active\"}).\n4. mode off or shadow: dispatch exactly as before. mode active: dispatch result[\"wave\"] in wave order and no other task this tick; each deferred candidate is recorded in the dispatch.jsonl considered row as skipped with reason \"predicted_interference\" for hard or soft deferrals and the existing capacity_reason value (cooldown|account_capacity|executor_capacity) for capacity deferrals. Invariants in every mode: never more dispatches than slots; never a task whose dependencies are not merged; never a hard-conflicting pair co-dispatched in active mode; spec-review creation and the review respawn loop unchanged.\n5. README Pipeline section: one paragraph on [scheduler] modes and the waves log.\n6. Tests in tests/test_daemon.py: ::test_scheduler_cfg_defaults, ::test_scheduler_cfg_rejects_unknown_mode, ::test_dispatch_shadow_logs_wave_and_keeps_first_come, ::test_dispatch_active_defers_hard_conflict_with_running_task, ::test_dispatch_active_backfills_deferred_slot (capacity 2, three ready candidates, A hard-conflicts with a running task, B and C clean: active dispatches B and C), ::test_dispatch_active_respects_slots_and_dependencies, ::test_dispatch_mode_off_writes_no_wave_rows, ::test_dispatch_wave_includes_budget_retry_candidates, ::test_dispatch_active_capacity_deferral_keeps_capacity_reason, ::test_wave_tasks_cover_cross_goal_dependency_ancestry. Existing tests stay green.",
+  "inputs": [
+    "T-0534"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_scheduler_cfg_defaults, tests/test_daemon.py::test_scheduler_cfg_rejects_unknown_mode and tests/test_daemon.py::test_dispatch_shadow_logs_wave_and_keeps_first_come pass: [scheduler] mode defaults to shadow and an unknown mode falls back to shadow with one notification; in shadow the dispatch order and set are unchanged and every tick with candidates appends a waves.jsonl row with ready (the full eligible set), running, baseline_order, wave, deferred, predicted and applied false",
+    "tests/test_daemon.py::test_dispatch_active_defers_hard_conflict_with_running_task, tests/test_daemon.py::test_dispatch_active_backfills_deferred_slot, tests/test_daemon.py::test_dispatch_active_respects_slots_and_dependencies and tests/test_daemon.py::test_dispatch_active_capacity_deferral_keeps_capacity_reason pass: mode active dispatches only the selected wave, backfills a deferred slot from a later clean candidate, never co-dispatches a hard-conflicting pair, never exceeds free slots or dispatches unmet dependencies, and records deferred candidates in dispatch.jsonl as predicted_interference or the existing capacity_reason",
+    "tests/test_daemon.py::test_dispatch_mode_off_writes_no_wave_rows, tests/test_daemon.py::test_dispatch_wave_includes_budget_retry_candidates and tests/test_daemon.py::test_wave_tasks_cover_cross_goal_dependency_ancestry pass",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains ten tests"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "orchestrator/install.py",
+    "README.md",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0535",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "eligible(pool, candidates)'s candidate source is defined as queued execute tasks (bus.read(status=\"queued\", role=\"execute\")) plus retry_held, filtered only by ready/non-stale/spec-approved/fallback-tier. Nothing excludes a task whose pipeline.dispatched_at is already stamped (stamp() at daemon.py:274-288 is idempotent and returns False once dispatched_at exists, but status stays \"queued\" until the async-spawned worker later calls bus.claim() -- which can be many ticks later at the default 30s interval). Step 3 separately defines running_ids to include 'dispatched-but-unclaimed' tasks, so such a task lands in BOTH candidates and running in the same tick. In active mode this lets select_wave hand a wave slot to a task that cannot actually be freshly dispatched (its stamp() call will deterministically fail this same tick, since dispatched_at was already set before dispatch() ran), silently stealing a slot from a genuinely new candidate. It also breaks the stated invariant 'the real off/shadow dispatch path dispatches exactly _first_come_order(eligible(...), slots), so baseline_order can never diverge from the real path': the current loop self-heals from a failed stamp() by moving to the next candidate without consuming a slot, but a precomputed _first_come_order slice has no such fallthrough, so a dispatched-but-unclaimed task occupying a slot in that slice produces fewer real dispatches than the pre-refactor loop would have.",
+        "severity": "high",
+        "line": 605
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Same root cause as above manifests independently of mode: replacing the current single incremental loop (which tries the next id in order whenever stamp() loses a race, without decrementing slots) with a fixed pre-selected list (_first_come_order(eligible,slots) for shadow/off, or select_wave's wave for active) removes that retry-on-stamp-failure behavior. The spec never says what happens if stamping a chosen wave/first-come member fails -- it just says 'dispatch result[\"wave\"] in wave order and no other task this tick', which forecloses falling through to a later eligible candidate to fill the gap.",
+        "severity": "med",
+        "line": 636
+      }
+    ],
+    "suggested_spec_changes": [
+      "Define eligible()'s candidate set to exclude any queued execute task that already has pipeline.dispatched_at set (those belong only in running_ids as 'dispatched-but-unclaimed'), so a task can never appear in both candidates and running in the same tick.",
+      "Specify that when stamping a selected first-come or wave member fails (dispatched_at already set by a concurrent path), dispatch must fall through to the next candidate in eligible() order to fill the freed slot, matching the current loop's self-healing behaviour -- otherwise add an explicit test asserting the accepted (lower) throughput on that race instead of silently changing behaviour."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789948036.723371,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0535",
+      "claimed_at": 1789948036.7230542
+    },
+    {
+      "ts": 1789948036.7244549,
+      "account": "B"
+    },
+    {
+      "ts": 1789948037.024959,
+      "pid": 84099,
+      "account": "B"
+    },
+    {
+      "ts": 1789948246.543366,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "eligible(pool, candidates)'s candidate source is defined as queued execute tasks (bus.read(status=\"queued\", role=\"execute\")) plus retry_held, filtered only by ready/non-stale/spec-approved/fallback-tier. Nothing excludes a task whose pipeline.dispatched_at is already stamped (stamp() at daemon.py:274-288 is idempotent and returns False once dispatched_at exists, but status stays \"queued\" until the async-spawned worker later calls bus.claim() -- which can be many ticks later at the default 30s interval). Step 3 separately defines running_ids to include 'dispatched-but-unclaimed' tasks, so such a task lands in BOTH candidates and running in the same tick. In active mode this lets select_wave hand a wave slot to a task that cannot actually be freshly dispatched (its stamp() call will deterministically fail this same tick, since dispatched_at was already set before dispatch() ran), silently stealing a slot from a genuinely new candidate. It also breaks the stated invariant 'the real off/shadow dispatch path dispatches exactly _first_come_order(eligible(...), slots), so baseline_order can never diverge from the real path': the current loop self-heals from a failed stamp() by moving to the next candidate without consuming a slot, but a precomputed _first_come_order slice has no such fallthrough, so a dispatched-but-unclaimed task occupying a slot in that slice produces fewer real dispatches than the pre-refactor loop would have.",
+            "severity": "high",
+            "line": 605
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Same root cause as above manifests independently of mode: replacing the current single incremental loop (which tries the next id in order whenever stamp() loses a race, without decrementing slots) with a fixed pre-selected list (_first_come_order(eligible,slots) for shadow/off, or select_wave's wave for active) removes that retry-on-stamp-failure behavior. The spec never says what happens if stamping a chosen wave/first-come member fails -- it just says 'dispatch result[\"wave\"] in wave order and no other task this tick', which forecloses falling through to a later eligible candidate to fill the gap.",
+            "severity": "med",
+            "line": 636
+          }
+        ],
+        "suggested_spec_changes": [
+          "Define eligible()'s candidate set to exclude any queued execute task that already has pipeline.dispatched_at set (those belong only in running_ids as 'dispatched-but-unclaimed'), so a task can never appear in both candidates and running in the same tick.",
+          "Specify that when stamping a selected first-come or wave member fails (dispatched_at already set by a concurrent path), dispatch must fall through to the next candidate in eligible() order to fill the freed slot, matching the current loop's self-healing behaviour -- otherwise add an explicit test asserting the accepted (lower) throughput on that race instead of silently changing behaviour."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789948246.545217,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "eligible(pool, candidates)'s candidate source is defined as queued execute tasks (bus.read(status=\"queued\", role=\"execute\")) plus retry_held, filtered only by ready/non-stale/spec-approved/fallback-tier. Nothing excludes a task whose pipeline.dispatched_at is already stamped (stamp() at daemon.py:274-288 is idempotent and returns False once dispatched_at exists, but status stays \"queued\" until the async-spawned worker later calls bus.claim() -- which can be many ticks later at the default 30s interval). Step 3 separately defines running_ids to include 'dispatched-but-unclaimed' tasks, so such a task lands in BOTH candidates and running in the same tick. In active mode this lets select_wave hand a wave slot to a task that cannot actually be freshly dispatched (its stamp() call will deterministically fail this same tick, since dispatched_at was already set before dispatch() ran), silently stealing a slot from a genuinely new candidate. It also breaks the stated invariant 'the real off/shadow dispatch path dispatches exactly _first_come_order(eligible(...), slots), so baseline_order can never diverge from the real path': the current loop self-heals from a failed stamp() by moving to the next candidate without consuming a slot, but a precomputed _first_come_order slice has no such fallthrough, so a dispatched-but-unclaimed task occupying a slot in that slice produces fewer real dispatches than the pre-refactor loop would have.",
+          "severity": "high",
+          "line": 605
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Same root cause as above manifests independently of mode: replacing the current single incremental loop (which tries the next id in order whenever stamp() loses a race, without decrementing slots) with a fixed pre-selected list (_first_come_order(eligible,slots) for shadow/off, or select_wave's wave for active) removes that retry-on-stamp-failure behavior. The spec never says what happens if stamping a chosen wave/first-come member fails -- it just says 'dispatch result[\"wave\"] in wave order and no other task this tick', which forecloses falling through to a later eligible candidate to fill the gap.",
+          "severity": "med",
+          "line": 636
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789948036.7230542,
+  "account": "B",
+  "pid": 84099,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "eligible(pool, candidates)'s candidate source is defined as queued execute tasks (bus.read(status=\"queued\", role=\"execute\")) plus retry_held, filtered only by ready/non-stale/spec-approved/fallback-tier. Nothing excludes a task whose pipeline.dispatched_at is already stamped (stamp() at daemon.py:274-288 is idempotent and returns False once dispatched_at exists, but status stays \"queued\" until the async-spawned worker later calls bus.claim() -- which can be many ticks later at the default 30s interval). Step 3 separately defines running_ids to include 'dispatched-but-unclaimed' tasks, so such a task lands in BOTH candidates and running in the same tick. In active mode this lets select_wave hand a wave slot to a task that cannot actually be freshly dispatched (its stamp() call will deterministically fail this same tick, since dispatched_at was already set before dispatch() ran), silently stealing a slot from a genuinely new candidate. It also breaks the stated invariant 'the real off/shadow dispatch path dispatches exactly _first_come_order(eligible(...), slots), so baseline_order can never diverge from the real path': the current loop self-heals from a failed stamp() by moving to the next candidate without consuming a slot, but a precomputed _first_come_order slice has no such fallthrough, so a dispatched-but-unclaimed task occupying a slot in that slice produces fewer real dispatches than the pre-refactor loop would have.",
+      "severity": "high",
+      "line": 605
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Same root cause as above manifests independently of mode: replacing the current single incremental loop (which tries the next id in order whenever stamp() loses a race, without decrementing slots) with a fixed pre-selected list (_first_come_order(eligible,slots) for shadow/off, or select_wave's wave for active) removes that retry-on-stamp-failure behavior. The spec never says what happens if stamping a chosen wave/first-come member fails -- it just says 'dispatch result[\"wave\"] in wave order and no other task this tick', which forecloses falling through to a later eligible candidate to fill the gap.",
+      "severity": "med",
+      "line": 636
+    }
+  ]
+}

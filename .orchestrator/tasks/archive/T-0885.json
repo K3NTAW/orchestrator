@@ -1,0 +1,194 @@
+{
+  "id": "T-0885",
+  "created_at": 1790109731.4939039,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S7: external skill discovery, quarantine and static security inspection (metadata first, no execution): `orchestrator skills discover|inspect|import`, provenance preserved, quarantined skills invisible to routing (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P3, P4, P31, P32, P33, P34 (P37 stage 7). Depends on T-0863 (skills_registry with states discovered/quarantined/testing and state.json history, provenance field, content hash). Nothing here executes external content; discovery retrieves static text only.\nDo:\n1. orchestrator/skill_discovery.py (new). Sources: (a) a local path (another repository checkout) scanned for SKILL.md files under skills/, .claude/skills/, .codex/skills/; (b) a GitHub repository given as owner/repo[@ref] read through the GitHub contents API with `gh api` (static file retrieval only; no clone, no checkout, no script execution; a hard cap of 50 files and 200 KB per skill; unreachable or rate-limited \u2192 recorded error, never an exception into the CLI). Each candidate becomes a registry record with provenance \"external\" (or \"repository\" for a local path inside a trusted repo listed in pool.toml `[skills] trusted_repos`), trust \"untrusted\", state \"discovered\", and the P32 provenance block: source_repo, source_path, source_commit (the ref's sha), retrieved_at, license (from a LICENSE file when present, else None), content_hash, modifications [] (filled by compaction later). The skill body is stored under STATE/skills/quarantine/<id>/ (never under skills/ or .claude/skills), so it cannot be loaded by any worker.\n2. `orchestrator skills discover <path|owner/repo[@ref]>` lists the candidates and stores them as discovered; `orchestrator skills quarantine <id>` moves discovered \u2192 quarantined (P2 transition with reason); import of a builtin path is refused (already registered).\n3. Static inspection (P4): `skill_discovery.inspect(id)` runs deterministic checks over the quarantined text and any scripts/ files: shell commands and script files (any executable or fenced shell block), network access (curl, wget, http(s) URLs, raw sockets, pip/npm install, package managers), file writes outside the task worktree (absolute paths, ~, /etc, .git), credential access (env var names containing KEY/TOKEN/SECRET/PASSWORD, keychain, 1password, .env), MCP dependencies (mcp__ tool ids, server names), destructive operations (rm -rf, git push --force, reset --hard, DROP, truncate), prompt-injection and hidden instructions (phrases like \"ignore previous\", \"you are now\", \"system prompt\", HTML comments, zero-width or bidi characters, base64 blobs), unexpected external endpoints (domains not in an allowlist from pool.toml `[skills] allowed_domains`). Output: a findings list with severity (info/warn/block) and line references; a \"block\" finding forbids the quarantined \u2192 testing transition (registry.transition refuses with the finding ids until a human override reason starting \"override:\" is given, recorded in history). Model review is NOT called here (Stage 9/10 may add a Jev or sonnet judgement for warn-level findings).\n4. Invisibility guarantee: skills_registry.candidates and skill_router (when merged) only consider state active (and shadow for shadow logging); discovered/quarantined/testing skills never appear; test it with a quarantined copy of trace-callers under a new id.\n5. Update detection (P33, minimal): `orchestrator skills check-upstream <id>` re-fetches the source at the recorded ref's branch head, compares content_hash, and when different creates a new candidate version record in state discovered with a diff summary (lines added/removed); the local version is never replaced.\n6. docs/skill-intelligence/07-external.md (\u226470 lines): the flow discover \u2192 quarantine \u2192 inspect \u2192 (Stage 5/10) testing \u2192 shadow \u2192 active, the static checks table, what is refused, the P34 invariants sentence (skills are capability modules, not policy authorities), revert path (delete the quarantine folder and the state entries).\nTests (unittest, `import _harness` first, no network: patch the gh api call with a fake returning fixture files): tests/test_skill_discovery.py::test_local_path_discovery_records_provenance_and_stores_in_quarantine_dir, ::test_github_discovery_uses_static_contents_api_and_caps, ::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions, ::test_block_finding_prevents_testing_transition_without_override, ::test_quarantined_skill_never_in_candidates, ::test_check_upstream_creates_candidate_version_not_replace. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 00:55) after spec review T-0881 (request_changes), binding on top of v1:\n- skills_registry.py owns the record shape: SkillRecord gains an optional `provenance_info` dict with keys source_repo, source_path, source_commit, retrieved_at, license, modifications (None for builtins); skill_discovery.py fills it and skills_registry persists/reads it like any other field. For discovered and quarantined records the derived fields roles, task_classes, tools, est_tokens_l0/l1/l2, security_class and output_contract default to empty lists / 0 / \"unknown\" / \"\" and are NOT computed with the builtin P6 parsing helpers; only description (frontmatter or first heading), content_hash and provenance_info are filled at discovery. est_tokens_l2 is set to body chars // 4 as a plain size measure.\n- Inspection persistence: skill_discovery.inspect(id) writes STATE/skills/quarantine/<id>/findings.json = {\"inspected_at\", \"content_hash\", \"findings\": [{\"id\", \"severity\", \"check\", \"line\", \"excerpt\"}], \"max_severity\"}. skills_registry.transition() reads that file when the transition is quarantined \u2192 testing: refused with the block finding ids when max_severity == \"block\" and the given reason does not start with \"override:\"; when it does, the override and the finding ids are appended to the history entry. A missing findings.json also refuses the transition (reason \"not inspected\"). The check lives in transition() right after the ALLOWED_TRANSITIONS validation.\n- Trusted-repository provenance is deterministic: for a local path, run `git -C <path> remote get-url origin`, normalise to owner/repo (strip .git, https/ssh forms), and compare with pool.toml `[skills] trusted_repos` entries (owner/repo strings); a match gives provenance \"repository\", anything else (no remote, no match) gives \"external\". Test both branches with a temporary git repo whose origin is set to a fixture URL.\n- Add tests/test_skill_discovery.py::test_discovered_records_have_empty_derived_fields_and_provenance_info and ::test_transition_refuses_uninspected_quarantined_skill.\n\nSPEC v3 (2026-09-23 01:10) after spec review T-0883 (round 2; both points folded in, further review waived by the Planner, verdict set to approve):\n- Discovered, quarantined and testing records live in their own store STATE/skills/discovered.json (same record shape); skills_registry.sync() touches only provenance \"builtin\" records in registry.json and its \"source removed\" cleanup never sees or marks discovery records. Reads that need every record (list, show, candidates, transition, state) merge both stores; ids are unique across stores (the discovery id is f\"external/{owner}-{repo}/{name}\" or f\"repository/{owner}-{repo}/{name}\"). Test: tests/test_skill_discovery.py::test_sync_never_disables_discovered_records.\n- discover is idempotent: the dedup key is (source_repo, source_path); a re-run against an unchanged source updates retrieved_at only; a changed content_hash creates a new version entry in the same record's history (versions list with content_hash and retrieved_at) instead of a new id, and leaves the state untouched. Test: tests/test_skill_discovery.py::test_discover_rerun_is_idempotent_and_versions_on_change.",
+  "inputs": [
+    "T-0884"
+  ],
+  "acceptance": [
+    "tests/test_skill_discovery.py::test_local_path_discovery_records_provenance_and_stores_in_quarantine_dir passes",
+    "tests/test_skill_discovery.py::test_github_discovery_uses_static_contents_api_and_caps passes",
+    "tests/test_skill_discovery.py::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions passes",
+    "tests/test_skill_discovery.py::test_block_finding_prevents_testing_transition_without_override passes",
+    "tests/test_skill_discovery.py::test_quarantined_skill_never_in_candidates passes",
+    "tests/test_skill_discovery.py::test_check_upstream_creates_candidate_version_not_replace passes",
+    "docs/skill-intelligence/07-external.md exists; `uv run orchestrator skills discover skills` (local path) runs and refuses builtins; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_discovery.py::test_discovered_records_have_empty_derived_fields_and_provenance_info passes",
+    "tests/test_skill_discovery.py::test_transition_refuses_uninspected_quarantined_skill passes",
+    "tests/test_skill_discovery.py::test_sync_never_disables_discovered_records passes",
+    "tests/test_skill_discovery.py::test_discover_rerun_is_idempotent_and_versions_on_change passes"
+  ],
+  "scope": [
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_skill_discovery.py",
+    "docs/skill-intelligence/07-external.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0885",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/skills_registry.py",
+        "line": 304,
+        "issue": "discovered->testing and disabled->testing bypass the inspection gate, which only checks old_state == \"quarantined\"",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "7e84495493fe",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790109731.494835,
+      "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+    },
+    {
+      "ts": 1790109734.896864,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0885",
+      "claimed_at": 1790109734.896651
+    },
+    {
+      "ts": 1790109734.898005,
+      "account": "B"
+    },
+    {
+      "ts": 1790109735.930686,
+      "pid": 84661,
+      "account": "B"
+    },
+    {
+      "ts": 1790109892.982878,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/skills_registry.py",
+            "line": 304,
+            "issue": "Inspection gate only fires when old_state == \"quarantined\", but ALLOWED_TRANSITIONS still allows discovered->testing (line 21) and disabled->testing (line 27) directly, so an externally discovered skill can be promoted to testing (and onward to shadow/active) with zero static inspection, bypassing the P4 block-finding guarantee entirely.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790109897.123696,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/skills_registry.py",
+            "line": 304,
+            "issue": "discovered->testing and disabled->testing bypass the inspection gate, which only checks old_state == \"quarantined\"",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "7e84495493fe",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790109897.124649,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790109897.176846,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "packet_version": "7e84495493fe",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+      "packet_version": "7e84495493fe",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+  "claimed_at": 1790109734.896651,
+  "account": "B",
+  "pid": 84661,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+    "packet_version": "7e84495493fe",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "7e84495493fe",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

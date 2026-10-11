@@ -1,0 +1,121 @@
+{
+  "id": "T-0723",
+  "created_at": 1790000312.2561548,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Q6 v2: orchestrator/planner_shadow.py + .mcp.planner-shadow.json \u2014 non-mutating Opus shadow Planner launches, structured result parsing, agreement scoring (P6)",
+  "spec": "Why: the brief (P6) requires shadow mode where Fable stays the production Planner and an Opus shadow decision is recorded without any production effect. goals.launch_planner (goals.py:322-353) and planner_runs.launch_routed give the headless Planner the full MCP surface (.mcp.planner.json: orchestrator, bus, github) and all tools, so a shadow launch through them could mutate the bus, plan.md or git. (v2 only rewords v1 T-0684: its spec quoted the template placeholder literally, which breaks spawn.render.)\nWhat: new module orchestrator/planner_shadow.py and new file .mcp.planner-shadow.json whose content is a JSON object with an empty mcpServers map. The prompt template .orchestrator/prompts/planner-shadow.md already exists on goal/T-0674 and has one placeholder named packet; render it with spawn.render(\"planner-shadow\", packet=text). Do not edit any prompt file.\n- RouterDecision comes from orchestrator/planner_router.py (merged on goal/T-0674): fields tier, mode, hard, hold, hold_reason, reasons, hard_reasons, soft_score, shadow_tier, candidates, evidence, decision_type; cfg is planner_router.load_cfg(pool_cfg) with key shadow_sample_rate.\n- eligible(router_decision, cfg, *, sample) -> (bool, reason): True only when router_decision.mode == \"shadow\", router_decision.shadow_tier is not None, router_decision.hold is False and sample <= cfg[\"shadow_sample_rate\"]; reasons in order: mode_not_shadow, held, no_shadow_tier (covers hard decisions, whose shadow_tier is None), sampled_out, eligible.\n- argv(prompt, *, model, budget_usd, system_prompt_path) -> list: [\"claude\", \"-p\", prompt, \"--model\", model, \"--output-format\", \"json\", \"--max-budget-usd\", str(budget_usd), \"--mcp-config\", \".mcp.planner-shadow.json\", \"--strict-mcp-config\", \"--disallowedTools\", \"Edit,Write,MultiEdit,NotebookEdit,Bash,Task,WebFetch,WebSearch\", \"--append-system-prompt\", text of system_prompt_path (the caller passes .orchestrator/prompts/planner.md), \"--dangerously-skip-permissions\"]; no bus/orchestrator MCP server, no write tools.\n- launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None) -> {\"pid\", \"log\", \"stderr_log\", \"argv\"} or None on any exception (message to stderr, never raised; the production launch must not be affected). Env: CLAUDE_CONFIG_DIR from account.config_dir, ORCH_ROOT, ORCH_SHADOW=1, oauth token like goals.launch_planner; never resolve [secrets.planner] (a shadow has no GitHub or Jev access). popen defaults to goals.Popen so tests inject a fake; start_new_session=True; stdout to log, stderr to log + \".stderr\". Budget: the caller passes [limits].max_budget_usd.planner_shadow (default 1.5).\n- parse(log_path) -> dict or None: last JSON line of the log, take its \"result\" text, spawn.extract_json (orchestrator/spawn.py:646) it, whitelist keys proposed_action (one of fix_round, respec, escalate, noop, synthesize_now, wait_for_more, drop_low_confidence, write_specs, close, other; anything else -> other), summary (cap 800 chars, jev.redact applied), tasks_proposed (list of {title (cap 120), scope (list cap 10)} cap 10), confidence (float clamped 0-1 or None), needs_fable (bool), unresolved (list of str cap 10, each cap 200); plus usage via bus.normalize_usage(\"claude\", usage), total_cost_usd, session_id, is_error. Anything else dropped; a missing/non-JSON result -> {\"parse_error\": True, plus the usage fields}; unreadable log -> None.\n- record(*, launch_id, goal_id, decision_type, state_version, model, tier, started_at, parsed, latency_s, root=None) -> row appended to root/runs/sched/planner_shadow.jsonl (write the file directly like planner_telemetry does; no schedlog global swap) without prompt text.\n- score(shadow_row, production_materiality) -> {\"agreement\": True|False|None, \"basis\", \"needs_fable_matched\": True|False|None}: production action derived from planner_telemetry's materiality shape: fix_round when fix_strategy_for non-empty; write_specs when new_tasks non-empty and fix_strategy_for empty (shadow synthesize_now counts as agreeing with write_specs); escalate when escalated; noop when nothing material; agreement None when production_materiality is None or shadow parse_error; needs_fable_matched compares shadow needs_fable with production_materiality.get(\"reescalated\") when present, else None.\n- summary(root=None) -> {\"n\", \"agreement_rate\", \"needs_fable_rate\", \"parse_error_rate\", \"usd\", \"tokens\"} tolerant of malformed lines.",
+  "inputs": [
+    "T-0722"
+  ],
+  "acceptance": [
+    "tests/test_planner_shadow.py::test_argv_has_no_bus_mcp_and_no_write_tools \u2014 argv uses .mcp.planner-shadow.json (whose file content has an empty mcpServers map), --strict-mcp-config, a --disallowedTools list containing Edit, Write and Bash, the shadow model, and never .mcp.planner.json",
+    "tests/test_planner_shadow.py::test_launch_failure_is_isolated_and_production_unchanged \u2014 a popen that raises makes launch return None without raising; the bus tasks directory and plan.md hash are identical before and after a successful fake launch; env carries ORCH_SHADOW=1 and no secrets.planner values",
+    "tests/test_planner_shadow.py::test_parse_whitelists_and_caps \u2014 a log whose result JSON has proposed_action fix_round, a 3000-char summary, 15 tasks and an extra transcript key parses to summary 800 chars, 10 tasks, no transcript; a non-JSON result gives parse_error True with usage still read",
+    "tests/test_planner_shadow.py::test_score_agreement_against_production_materiality \u2014 shadow fix_round vs production fix_strategy_for gives agreement True; shadow escalate vs production new_tasks gives False; shadow synthesize_now vs new_tasks gives True; missing materiality gives None",
+    "tests/test_planner_shadow.py::test_eligible_and_summary \u2014 eligible is False with reasons mode_not_shadow, held, no_shadow_tier and sampled_out for the matching RouterDecision inputs and True for a shadow decision; summary over three rows including one malformed line reports n and rates without raising"
+  ],
+  "scope": [
+    "orchestrator/planner_shadow.py",
+    ".mcp.planner-shadow.json",
+    "tests/test_planner_shadow.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0723",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "score()'s needs_fable_matched is specified to read production_materiality.get(\"reescalated\"), but planner_telemetry.materiality() (the only producer of the 'materiality shape' the spec cites) never emits a \"reescalated\" key \u2014 it emits \"escalated\" (planner_telemetry.py:188-191). The only reescalation-named field in the codebase is \"reescalation\", a boolean on a different jsonl schema (planner_invocations launch rows, planner_telemetry.py:88), not part of materiality()'s output. As specified, needs_fable_matched will always fall through to None for every real caller, silently disabling the metric it exists to compute. No acceptance test in the packet exercises a 'reescalated present' case (test_score_agreement_against_production_materiality only checks agreement, not needs_fable_matched), so an executor implementing this literally will ship dead code that passes all listed tests.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "In score()'s needs_fable_matched rule, replace production_materiality.get(\"reescalated\") with production_materiality.get(\"escalated\") to match planner_telemetry.materiality()'s actual output shape (new_tasks, dependencies_changed, fix_strategy_for, escalated, plan_changed), or explicitly define where a 'reescalated' key would come from if a different producer is intended.",
+      "Add an acceptance case to test_score_agreement_against_production_materiality that exercises needs_fable_matched with a materiality dict that has the escalation key present and absent, so the key-name bug (or any regression of it) is actually caught."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790000314.472935,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0723",
+      "claimed_at": 1790000314.472598
+    },
+    {
+      "ts": 1790000314.473859,
+      "account": "B"
+    },
+    {
+      "ts": 1790000314.90577,
+      "pid": 39570,
+      "account": "B"
+    },
+    {
+      "ts": 1790000477.5380611,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "score()'s needs_fable_matched is specified to read production_materiality.get(\"reescalated\"), but planner_telemetry.materiality() (the only producer of the 'materiality shape' the spec cites) never emits a \"reescalated\" key \u2014 it emits \"escalated\" (planner_telemetry.py:188-191). The only reescalation-named field in the codebase is \"reescalation\", a boolean on a different jsonl schema (planner_invocations launch rows, planner_telemetry.py:88), not part of materiality()'s output. As specified, needs_fable_matched will always fall through to None for every real caller, silently disabling the metric it exists to compute. No acceptance test in the packet exercises a 'reescalated present' case (test_score_agreement_against_production_materiality only checks agreement, not needs_fable_matched), so an executor implementing this literally will ship dead code that passes all listed tests.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "In score()'s needs_fable_matched rule, replace production_materiality.get(\"reescalated\") with production_materiality.get(\"escalated\") to match planner_telemetry.materiality()'s actual output shape (new_tasks, dependencies_changed, fix_strategy_for, escalated, plan_changed), or explicitly define where a 'reescalated' key would come from if a different producer is intended.",
+          "Add an acceptance case to test_score_agreement_against_production_materiality that exercises needs_fable_matched with a materiality dict that has the escalation key present and absent, so the key-name bug (or any regression of it) is actually caught."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790000477.539658,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "score()'s needs_fable_matched is specified to read production_materiality.get(\"reescalated\"), but planner_telemetry.materiality() (the only producer of the 'materiality shape' the spec cites) never emits a \"reescalated\" key \u2014 it emits \"escalated\" (planner_telemetry.py:188-191). The only reescalation-named field in the codebase is \"reescalation\", a boolean on a different jsonl schema (planner_invocations launch rows, planner_telemetry.py:88), not part of materiality()'s output. As specified, needs_fable_matched will always fall through to None for every real caller, silently disabling the metric it exists to compute. No acceptance test in the packet exercises a 'reescalated present' case (test_score_agreement_against_production_materiality only checks agreement, not needs_fable_matched), so an executor implementing this literally will ship dead code that passes all listed tests.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790000314.472598,
+  "account": "B",
+  "pid": 39570,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "score()'s needs_fable_matched is specified to read production_materiality.get(\"reescalated\"), but planner_telemetry.materiality() (the only producer of the 'materiality shape' the spec cites) never emits a \"reescalated\" key \u2014 it emits \"escalated\" (planner_telemetry.py:188-191). The only reescalation-named field in the codebase is \"reescalation\", a boolean on a different jsonl schema (planner_invocations launch rows, planner_telemetry.py:88), not part of materiality()'s output. As specified, needs_fable_matched will always fall through to None for every real caller, silently disabling the metric it exists to compute. No acceptance test in the packet exercises a 'reescalated present' case (test_score_agreement_against_production_materiality only checks agreement, not needs_fable_matched), so an executor implementing this literally will ship dead code that passes all listed tests.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

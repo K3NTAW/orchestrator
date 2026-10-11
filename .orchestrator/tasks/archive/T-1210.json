@@ -1,0 +1,570 @@
+{
+  "id": "T-1210",
+  "created_at": 1790169568.066678,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 8,
+  "title": "spec review: S2f1 worker_control.steer: recorded steering messages delivered as interrupt plus resume for Codex threads and Claude sessions, original spec immutable (P13)",
+  "spec": "Extend orchestrator/worker_control.py with steer(task_id, message, *, reason, source=\"planner\") -> dict. Record first: append {ts, task, reason, message, source} to .orchestrator/workers/<task>.steering.jsonl and a registry event steer (message length only in the event, the text lives in the steering file); bus event on the task (bus.update with an events entry if the bus supports it, else reason field untouched) and packet_meta.steering_count incremented; the task's spec, acceptance and scope are never modified. Delivery: registry status steering; interrupt the running process as cancel does but with hold skipped (SIGTERM, grace, SIGKILL), then resume with the steering text prepended by 'Steering from <source> (<reason>):' and followed by 'The original task contract is unchanged.': Codex workers via executor.resume-style call on the recorded thread (see codex_reply and executor.argv_for kind resume; the worktree cwd selects the thread's worktree); Claude workers via spawn with the recorded packet_meta.session_id using claude -p --resume <session_id> (add a resume path to spawn.run_worker or a small spawn.resume_worker(task, prompt, session_id) that reuses the launch code, tools and env of the original role). When no session or thread is recorded, steer refuses with a clear error and leaves the worker running. Registry status back to running after resume with event steered. CLI: `orchestrator workers steer <task> --reason <text> --message <text>`. Docs: docs/hermes-hardening/11-worker-control.md gains the steering section including the immutability rule.\nSpec review T-1197 folded in: (1) Coordination with the interrupted worker's thread: the registry entry carries an integer epoch (starts at 1 on spawn); steer() increments it when it interrupts and records it on the entry; spawn and executor capture the epoch at launch and pass it to worker_registry.finish(task_id, ..., epoch=) and to their bus.post_result path, and finish() (scope adds orchestrator/worker_registry.py and tests/test_worker_registry.py) ignores a call whose epoch is older than the entry's, so the killed worker's late cleanup can never clobber the resumed run; the resumed run uses the new epoch. (2) worker_registry.FIELDS gains message_chars (int) for the steer event. (3) Codex delivery uses a dedicated executor.steer_resume(task, thread, message) that runs codex exec resume <thread> with the framed message directly (same access flags as argv_for kind resume), never executor.reply() and never resume_plan(), and does not touch the fix-loop rounds counter; a test asserts reply() is not called.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1201"
+  ],
+  "acceptance": [
+    "tests/test_worker_control.py::test_steer_records_before_delivery_and_never_edits_spec (steering file row, registry event, spec/acceptance/scope byte-identical)",
+    "tests/test_worker_control.py::test_steer_codex_resumes_thread_with_message (patched executor resume receives the thread id and the framed message)",
+    "tests/test_worker_control.py::test_steer_claude_resumes_session (patched Popen argv contains --resume and the session id)",
+    "tests/test_worker_control.py::test_steer_refuses_without_session_or_thread",
+    "tests/test_worker_registry.py::test_finish_ignores_stale_epoch_after_steer",
+    "tests/test_worker_control.py::test_steer_codex_uses_steer_resume_not_reply",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/worker_control.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/cli.py",
+    "tests/test_worker_control.py",
+    "docs/hermes-hardening/11-worker-control.md",
+    "orchestrator/worker_registry.py",
+    "tests/test_worker_registry.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1210",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/worker_registry.py",
+        "issue": "upsert(status=\"starting\") always replaces the doc with a fresh _document(task_id) (lines 105-107), which the spec never says to change. Both executor._run() (executor.py:155-158) and spawn.run_claude() (spawn.py:1172-1175) call worker_registry.upsert(task_id, status=\"starting\", ...) at the top of every launch, including a resumed run if steer's Codex/Claude resume path reuses _run()/run_claude() for bookkeeping. Since _document() has no way to carry forward the caller's incremented epoch, a resume launch that goes through upsert(status=\"starting\") will silently reset epoch back to its default, making the old (killed) thread's stale finish() call indistinguishable from current -- defeating the exact clobber protection this task exists to build.",
+        "severity": "high",
+        "line": 106
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "executor.start()'s finally block (line 509-510) unconditionally calls pool.release(task_id, ...) once the killed subprocess's communicate() returns, even though steer() has since resumed the task under a new epoch and the reservation is still in active use. Same pattern in spawn.py:1505 for run_worker. The spec's epoch guard only covers worker_registry.finish(); it says nothing about guarding these release calls, so a steer'd task's capacity/budget slot gets erroneously freed mid-resume, corrupting pool concurrency accounting.",
+        "severity": "high",
+        "line": 510
+      },
+      {
+        "path": "orchestrator/worker_control.py",
+        "issue": "The actual authoritative task state lives on the bus (worker_registry.py's own module docstring: \"task state belongs to bus\"), but bus.update/bus.post_result (bus.py:126-169) have no epoch or generation check at all and are out of scope for this task. daemon.py's _dispatch_worker (daemon.py:559-568, also out of scope) is what calls bus.post_result/bus.update with the interrupted thread's stale result once its killed subprocess dies -- this can clobber the resumed run's status/result on the bus even though worker_registry.finish() correctly ignores the stale epoch. The spec guards the wrong layer for the stated goal (\"the killed worker's late cleanup can never clobber the resumed run\").",
+        "severity": "high",
+        "line": 140
+      },
+      {
+        "path": "orchestrator/worker_control.py",
+        "issue": "steer() is specced to duplicate cancel()'s SIGTERM/grace/SIGKILL loop (cancel is inline in worker_control.py:118-133, not a reusable helper) rather than sharing an extracted function. Not fatal but invites drift between the two kill loops.",
+        "severity": "low",
+        "line": 118
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "spawn.resume_worker is specced to reuse \"the launch code, tools and env of the original role,\" but the original run's actual tool allowlist can differ from the plain role default TOOLS[role] when tool-disclosure escalation occurred (spawn.py:1396-1398, 1448-1449). Reconstructing the allowlist purely from role on resume can grant a different tool set than the interrupted run had.",
+        "severity": "low",
+        "line": 1397
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify how epoch survives a resume launch: either have worker_registry expose a way to set status=\"starting\" without resetting epoch (e.g. upsert accepts epoch explicitly and _document only supplies a default when none is passed), or have steer's resume path never call upsert(status=\"starting\") and instead call a dedicated event/update that preserves the bumped epoch.",
+      "Extend the epoch guard to the bus write path: require executor.start()/spawn.run_worker()'s finally-block pool.release() and daemon.py's post-dispatch bus.post_result/bus.update to check the captured epoch against the current registry epoch before writing, or explicitly widen scope to include orchestrator/daemon.py and the release/post-result call sites.",
+      "Extract a shared interrupt helper (SIGTERM, grace loop, SIGKILL) in worker_control.py used by both cancel() and steer() instead of specifying a second inline copy.",
+      "Drop the hedge \"bus event ... if the bus supports it, else reason field untouched\" -- bus.update already appends an events entry for any fields passed, so this branch is dead and unverifiable as written."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790169570.414477,
+      "packet_meta": {
+        "chars": 5347,
+        "est_tokens": 1336,
+        "presented_tokens": 1336,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a31bcafb0c79f632c3e5d7ec79ebe91d91140d9e5ba001af6d04574d9f5aa033"
+          },
+          "spec": {
+            "chars": 3545,
+            "est_tokens": 886,
+            "sha256": "9b1574dc6599eb2b2a78970e145803f6731e6611ffa6ef3776886b6b20b6ae37"
+          },
+          "acceptance": {
+            "chars": 719,
+            "est_tokens": 179,
+            "sha256": "cbd55a5c1b04722ffb2d4c467c1d76cee2b285adc4d78422089735caca331c49"
+          },
+          "scope": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "ba9eb19849c1a1051ba5054e513328ed44fb14c658c52c377a280186ab3fe3cc"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "55679adeceb99a355987aac72b872854de00a2cd77c1e734d70fdc8ead286f55"
+          },
+          "existing tests": {
+            "chars": 583,
+            "est_tokens": 145,
+            "sha256": "d021816cf555376fcf9c35ced3ade49dfcd0b5e04683f5bc7fea3eeb9b61d3d5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "1b1e17a0991812afaa0c0e8c13a8cbacf9399491f8c7528be725046503db2162"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "91e9939a2c4c",
+        "version": "91e9939a2c4c",
+        "candidate_known": false,
+        "base": "8258a7230c8b",
+        "sources": "task@T-1201 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790169572.842475,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1210",
+      "claimed_at": 1790169572.841542
+    },
+    {
+      "ts": 1790169572.8443468,
+      "account": "A"
+    },
+    {
+      "ts": 1790169574.6003468,
+      "pid": 55110,
+      "account": "A"
+    },
+    {
+      "ts": 1790169819.283998,
+      "packet_meta": {
+        "chars": 5347,
+        "est_tokens": 1336,
+        "presented_tokens": 1336,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a31bcafb0c79f632c3e5d7ec79ebe91d91140d9e5ba001af6d04574d9f5aa033"
+          },
+          "spec": {
+            "chars": 3545,
+            "est_tokens": 886,
+            "sha256": "9b1574dc6599eb2b2a78970e145803f6731e6611ffa6ef3776886b6b20b6ae37"
+          },
+          "acceptance": {
+            "chars": 719,
+            "est_tokens": 179,
+            "sha256": "cbd55a5c1b04722ffb2d4c467c1d76cee2b285adc4d78422089735caca331c49"
+          },
+          "scope": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "ba9eb19849c1a1051ba5054e513328ed44fb14c658c52c377a280186ab3fe3cc"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "55679adeceb99a355987aac72b872854de00a2cd77c1e734d70fdc8ead286f55"
+          },
+          "existing tests": {
+            "chars": 583,
+            "est_tokens": 145,
+            "sha256": "d021816cf555376fcf9c35ced3ade49dfcd0b5e04683f5bc7fea3eeb9b61d3d5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "1b1e17a0991812afaa0c0e8c13a8cbacf9399491f8c7528be725046503db2162"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "91e9939a2c4c",
+        "version": "91e9939a2c4c",
+        "candidate_known": false,
+        "base": "8258a7230c8b",
+        "sources": "task@T-1201 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3368bd1f-e515-4427-ab53-775187f176b3"
+      }
+    },
+    {
+      "ts": 1790169819.307392,
+      "packet_meta": {
+        "chars": 5347,
+        "est_tokens": 1336,
+        "presented_tokens": 1336,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "a31bcafb0c79f632c3e5d7ec79ebe91d91140d9e5ba001af6d04574d9f5aa033"
+          },
+          "spec": {
+            "chars": 3545,
+            "est_tokens": 886,
+            "sha256": "9b1574dc6599eb2b2a78970e145803f6731e6611ffa6ef3776886b6b20b6ae37"
+          },
+          "acceptance": {
+            "chars": 719,
+            "est_tokens": 179,
+            "sha256": "cbd55a5c1b04722ffb2d4c467c1d76cee2b285adc4d78422089735caca331c49"
+          },
+          "scope": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "ba9eb19849c1a1051ba5054e513328ed44fb14c658c52c377a280186ab3fe3cc"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "55679adeceb99a355987aac72b872854de00a2cd77c1e734d70fdc8ead286f55"
+          },
+          "existing tests": {
+            "chars": 583,
+            "est_tokens": 145,
+            "sha256": "d021816cf555376fcf9c35ced3ade49dfcd0b5e04683f5bc7fea3eeb9b61d3d5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "1b1e17a0991812afaa0c0e8c13a8cbacf9399491f8c7528be725046503db2162"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "91e9939a2c4c",
+        "version": "91e9939a2c4c",
+        "candidate_known": false,
+        "base": "8258a7230c8b",
+        "sources": "task@T-1201 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3368bd1f-e515-4427-ab53-775187f176b3",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790169819.312743,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/worker_registry.py",
+            "issue": "upsert(status=\"starting\") always replaces the doc with a fresh _document(task_id) (lines 105-107), which the spec never says to change. Both executor._run() (executor.py:155-158) and spawn.run_claude() (spawn.py:1172-1175) call worker_registry.upsert(task_id, status=\"starting\", ...) at the top of every launch, including a resumed run if steer's Codex/Claude resume path reuses _run()/run_claude() for bookkeeping. Since _document() has no way to carry forward the caller's incremented epoch, a resume launch that goes through upsert(status=\"starting\") will silently reset epoch back to its default, making the old (killed) thread's stale finish() call indistinguishable from current -- defeating the exact clobber protection this task exists to build.",
+            "severity": "high",
+            "line": 106
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "executor.start()'s finally block (line 509-510) unconditionally calls pool.release(task_id, ...) once the killed subprocess's communicate() returns, even though steer() has since resumed the task under a new epoch and the reservation is still in active use. Same pattern in spawn.py:1505 for run_worker. The spec's epoch guard only covers worker_registry.finish(); it says nothing about guarding these release calls, so a steer'd task's capacity/budget slot gets erroneously freed mid-resume, corrupting pool concurrency accounting.",
+            "severity": "high",
+            "line": 510
+          },
+          {
+            "path": "orchestrator/worker_control.py",
+            "issue": "The actual authoritative task state lives on the bus (worker_registry.py's own module docstring: \"task state belongs to bus\"), but bus.update/bus.post_result (bus.py:126-169) have no epoch or generation check at all and are out of scope for this task. daemon.py's _dispatch_worker (daemon.py:559-568, also out of scope) is what calls bus.post_result/bus.update with the interrupted thread's stale result once its killed subprocess dies -- this can clobber the resumed run's status/result on the bus even though worker_registry.finish() correctly ignores the stale epoch. The spec guards the wrong layer for the stated goal (\"the killed worker's late cleanup can never clobber the resumed run\").",
+            "severity": "high",
+            "line": 140
+          },
+          {
+            "path": "orchestrator/worker_control.py",
+            "issue": "steer() is specced to duplicate cancel()'s SIGTERM/grace/SIGKILL loop (cancel is inline in worker_control.py:118-133, not a reusable helper) rather than sharing an extracted function. Not fatal but invites drift between the two kill loops.",
+            "severity": "low",
+            "line": 118
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "spawn.resume_worker is specced to reuse \"the launch code, tools and env of the original role,\" but the original run's actual tool allowlist can differ from the plain role default TOOLS[role] when tool-disclosure escalation occurred (spawn.py:1396-1398, 1448-1449). Reconstructing the allowlist purely from role on resume can grant a different tool set than the interrupted run had.",
+            "severity": "low",
+            "line": 1397
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify how epoch survives a resume launch: either have worker_registry expose a way to set status=\"starting\" without resetting epoch (e.g. upsert accepts epoch explicitly and _document only supplies a default when none is passed), or have steer's resume path never call upsert(status=\"starting\") and instead call a dedicated event/update that preserves the bumped epoch.",
+          "Extend the epoch guard to the bus write path: require executor.start()/spawn.run_worker()'s finally-block pool.release() and daemon.py's post-dispatch bus.post_result/bus.update to check the captured epoch against the current registry epoch before writing, or explicitly widen scope to include orchestrator/daemon.py and the release/post-result call sites.",
+          "Extract a shared interrupt helper (SIGTERM, grace loop, SIGKILL) in worker_control.py used by both cancel() and steer() instead of specifying a second inline copy.",
+          "Drop the hedge \"bus event ... if the bus supports it, else reason field untouched\" -- bus.update already appends an events entry for any fields passed, so this branch is dead and unverifiable as written."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790169819.314042,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/worker_registry.py",
+          "issue": "upsert(status=\"starting\") always replaces the doc with a fresh _document(task_id) (lines 105-107), which the spec never says to change. Both executor._run() (executor.py:155-158) and spawn.run_claude() (spawn.py:1172-1175) call worker_registry.upsert(task_id, status=\"starting\", ...) at the top of every launch, including a resumed run if steer's Codex/Claude resume path reuses _run()/run_claude() for bookkeeping. Since _document() has no way to carry forward the caller's incremented epoch, a resume launch that goes through upsert(status=\"starting\") will silently reset epoch back to its default, making the old (killed) thread's stale finish() call indistinguishable from current -- defeating the exact clobber protection this task exists to build.",
+          "severity": "high",
+          "line": 106
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "executor.start()'s finally block (line 509-510) unconditionally calls pool.release(task_id, ...) once the killed subprocess's communicate() returns, even though steer() has since resumed the task under a new epoch and the reservation is still in active use. Same pattern in spawn.py:1505 for run_worker. The spec's epoch guard only covers worker_registry.finish(); it says nothing about guarding these release calls, so a steer'd task's capacity/budget slot gets erroneously freed mid-resume, corrupting pool concurrency accounting.",
+          "severity": "high",
+          "line": 510
+        },
+        {
+          "path": "orchestrator/worker_control.py",
+          "issue": "The actual authoritative task state lives on the bus (worker_registry.py's own module docstring: \"task state belongs to bus\"), but bus.update/bus.post_result (bus.py:126-169) have no epoch or generation check at all and are out of scope for this task. daemon.py's _dispatch_worker (daemon.py:559-568, also out of scope) is what calls bus.post_result/bus.update with the interrupted thread's stale result once its killed subprocess dies -- this can clobber the resumed run's status/result on the bus even though worker_registry.finish() correctly ignores the stale epoch. The spec guards the wrong layer for the stated goal (\"the killed worker's late cleanup can never clobber the resumed run\").",
+          "severity": "high",
+          "line": 140
+        },
+        {
+          "path": "orchestrator/worker_control.py",
+          "issue": "steer() is specced to duplicate cancel()'s SIGTERM/grace/SIGKILL loop (cancel is inline in worker_control.py:118-133, not a reusable helper) rather than sharing an extracted function. Not fatal but invites drift between the two kill loops.",
+          "severity": "low",
+          "line": 118
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "spawn.resume_worker is specced to reuse \"the launch code, tools and env of the original role,\" but the original run's actual tool allowlist can differ from the plain role default TOOLS[role] when tool-disclosure escalation occurred (spawn.py:1396-1398, 1448-1449). Reconstructing the allowlist purely from role on resume can grant a different tool set than the interrupted run had.",
+          "severity": "low",
+          "line": 1397
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 5347,
+    "est_tokens": 1336,
+    "presented_tokens": 1336,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "a31bcafb0c79f632c3e5d7ec79ebe91d91140d9e5ba001af6d04574d9f5aa033"
+      },
+      "spec": {
+        "chars": 3545,
+        "est_tokens": 886,
+        "sha256": "9b1574dc6599eb2b2a78970e145803f6731e6611ffa6ef3776886b6b20b6ae37"
+      },
+      "acceptance": {
+        "chars": 719,
+        "est_tokens": 179,
+        "sha256": "cbd55a5c1b04722ffb2d4c467c1d76cee2b285adc4d78422089735caca331c49"
+      },
+      "scope": {
+        "chars": 257,
+        "est_tokens": 64,
+        "sha256": "ba9eb19849c1a1051ba5054e513328ed44fb14c658c52c377a280186ab3fe3cc"
+      },
+      "depends_on": {
+        "chars": 144,
+        "est_tokens": 36,
+        "sha256": "55679adeceb99a355987aac72b872854de00a2cd77c1e734d70fdc8ead286f55"
+      },
+      "existing tests": {
+        "chars": 583,
+        "est_tokens": 145,
+        "sha256": "d021816cf555376fcf9c35ced3ade49dfcd0b5e04683f5bc7fea3eeb9b61d3d5"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "1b1e17a0991812afaa0c0e8c13a8cbacf9399491f8c7528be725046503db2162"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "91e9939a2c4c",
+    "version": "91e9939a2c4c",
+    "candidate_known": false,
+    "base": "8258a7230c8b",
+    "sources": "task@T-1201 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "3368bd1f-e515-4427-ab53-775187f176b3",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790169572.841542,
+  "account": "A",
+  "pid": 55110,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/worker_registry.py",
+      "issue": "upsert(status=\"starting\") always replaces the doc with a fresh _document(task_id) (lines 105-107), which the spec never says to change. Both executor._run() (executor.py:155-158) and spawn.run_claude() (spawn.py:1172-1175) call worker_registry.upsert(task_id, status=\"starting\", ...) at the top of every launch, including a resumed run if steer's Codex/Claude resume path reuses _run()/run_claude() for bookkeeping. Since _document() has no way to carry forward the caller's incremented epoch, a resume launch that goes through upsert(status=\"starting\") will silently reset epoch back to its default, making the old (killed) thread's stale finish() call indistinguishable from current -- defeating the exact clobber protection this task exists to build.",
+      "severity": "high",
+      "line": 106
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "executor.start()'s finally block (line 509-510) unconditionally calls pool.release(task_id, ...) once the killed subprocess's communicate() returns, even though steer() has since resumed the task under a new epoch and the reservation is still in active use. Same pattern in spawn.py:1505 for run_worker. The spec's epoch guard only covers worker_registry.finish(); it says nothing about guarding these release calls, so a steer'd task's capacity/budget slot gets erroneously freed mid-resume, corrupting pool concurrency accounting.",
+      "severity": "high",
+      "line": 510
+    },
+    {
+      "path": "orchestrator/worker_control.py",
+      "issue": "The actual authoritative task state lives on the bus (worker_registry.py's own module docstring: \"task state belongs to bus\"), but bus.update/bus.post_result (bus.py:126-169) have no epoch or generation check at all and are out of scope for this task. daemon.py's _dispatch_worker (daemon.py:559-568, also out of scope) is what calls bus.post_result/bus.update with the interrupted thread's stale result once its killed subprocess dies -- this can clobber the resumed run's status/result on the bus even though worker_registry.finish() correctly ignores the stale epoch. The spec guards the wrong layer for the stated goal (\"the killed worker's late cleanup can never clobber the resumed run\").",
+      "severity": "high",
+      "line": 140
+    },
+    {
+      "path": "orchestrator/worker_control.py",
+      "issue": "steer() is specced to duplicate cancel()'s SIGTERM/grace/SIGKILL loop (cancel is inline in worker_control.py:118-133, not a reusable helper) rather than sharing an extracted function. Not fatal but invites drift between the two kill loops.",
+      "severity": "low",
+      "line": 118
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "spawn.resume_worker is specced to reuse \"the launch code, tools and env of the original role,\" but the original run's actual tool allowlist can differ from the plain role default TOOLS[role] when tool-disclosure escalation occurred (spawn.py:1396-1398, 1448-1449). Reconstructing the allowlist purely from role on resume can grant a different tool set than the interrupted run had.",
+      "severity": "low",
+      "line": 1397
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+{
+  "id": "T-0629",
+  "created_at": 1789976488.4373171,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R8 v2: orchestrator/jev_sched.py \u2014 Jev as a shadow scheduling signal for soft-interference pairs only: batched, locked cache, [scheduler.jev] table, fail-open, never overriding deterministic constraints (AP P15)",
+  "spec": "Why: waves are deterministic (interference.select_wave) and soft pairs are deferred or admitted by rule; AP P15 / brief P10 allow Jev to answer only ambiguous questions (semantic interference, stale-assumption risk) in shadow first, without O(n^2) calls. v2 after spec review T-0616.\nWhat: new module orchestrator/jev_sched.py using jev.ask (orchestrator/jev.py:184; returns {answers:{key:{noul, confidence}}, usage} or None) and decision_log.record(kind='jev_sched'). Tests are unittest.TestCase methods in the named file (this repo runs unittest; no pytest fixtures).\n- PAIR_QUESTIONS = {'semantic_interference': {'type': 'noul', 'instructions': 'Probability that these two tasks change the same behaviour or interface and would conflict if run concurrently'}, 'stale_assumption_risk': {'type': 'noul', 'instructions': 'Probability that finishing one task first invalidates assumptions the other relies on'}} (the dict shape jev.ask requires, as in jev_route.QUESTIONS). ambiguous_pairs(pairwise_rows) -> only rows with level soft whose reasons contain no 'dependency:' kind; hard and none are never asked.\n- cfg: nested table [scheduler.jev] read as (pool_config().get('scheduler') or {}).get('jev') or {} with keys mode off|shadow|active (default shadow; unknown -> shadow), max_pairs 8, cache_ttl_s 3600, cache_max_entries 200 (mirrors [jev.routing] in jev_route._routing_cfg). No pool.toml edit; defaults in code.\n- Privacy: the per-pair state is {a, b, titles, scope (the tasks' scope path lists, allowed: paths are metadata), spec excerpts spec[:400] passed through jev.redact, interference reasons}; never file contents, diffs or worktree reads (the module performs no file or git reads at all).\n- One jev.ask per annotate() call with at most max_pairs pairs, questions keyed '<a>|<b>:<question>'; state is the list of pair dicts.\n- Cache: STATE/runs/jev/sched_cache.json keyed sha1(sorted pair ids + scope tuples + goal_head); read/write with the same fcntl-locked sidecar (.lock) plus tempfile.mkstemp + os.replace discipline as jev_route._cache_read/_cache_write; TTL and cache_max_entries pruning; a different goal_head or scope misses.\n- annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {'mode', 'asked', 'cache': hit|miss|None, 'signals': {'a|b': {semantic_interference, stale_assumption_risk, confidence}}, 'would_defer': [ids Jev rates semantic_interference >= 0.7 for a pair whose members are both in the wave; the later one in wave order is listed], 'applied': [], 'wave', 'deferred', 'error': None|reason}. off -> input unchanged, asked 0, no ask call. shadow -> computes would_defer, changes nothing. active -> moves would_defer ids from wave to deferred with reason 'jev:<a>|<b>'; it only removes from the wave (never adds, never touches hard-deferred or dependency pairs, never exceeds capacity); any failure (ask None, malformed, value outside [0,1]) -> error set, wave and deferred returned unchanged (fail open).\n- Every annotate call with asked > 0 or mode active records decision_log.record(kind='jev_sched', subject=<goal id of the first candidate or first task id>, candidates=pair keys, hard_constraints=['dependency', 'hard_conflicts', 'capacity'], deterministic={'wave', 'deferred'}, jev=signals, selected=applied, rejected=would_defer, reason, confidence=mean confidence, n=asked, mode).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_sched.py::test_off_mode_never_calls_jev_and_returns_wave_unchanged \u2014 mode off: ask not called, asked 0, wave and deferred identical",
+    "tests/test_jev_sched.py::test_shadow_mode_records_would_defer_without_changing_wave \u2014 a soft pair rated 0.9 lands in would_defer, applied empty, wave unchanged, and a jev_sched decision row is written",
+    "tests/test_jev_sched.py::test_active_mode_defers_soft_pair_but_never_hard_or_dependency \u2014 active: the soft-pair task moves to deferred with reason jev:<a>|<b>; a hard pair and a soft pair carrying a dependency reason are never asked and never changed",
+    "tests/test_jev_sched.py::test_fail_open_and_single_batched_call_without_n_squared \u2014 ask returning None yields error set and the deterministic wave; with 12 soft pairs ask is called once with at most max_pairs pairs and no hard or none pair appears in the questions",
+    "tests/test_jev_sched.py::test_cache_locking_invalidation_and_privacy \u2014 the same pairs and goal_head hit the cache (ask called once across two calls) and a sidecar .lock file exists; a new goal_head misses; the state passed to ask contains only titles, scope paths, redacted spec excerpts and reasons, no file contents (a marker string planted in a scope file's contents never appears), and jev.redact was applied"
+  ],
+  "scope": [
+    "orchestrator/jev_sched.py",
+    "tests/test_jev_sched.py"
+  ],
+  "depends_on": [
+    "T-0570"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/jev.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/interference.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/daemon.py",
+      "tests/test_jev_route.py",
+      "tests/test_jev.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {mode, asked, cache, signals, would_defer, applied, wave, deferred, error}; ambiguous_pairs(pairwise_rows); PAIR_QUESTIONS in jev.ask dict shape; config table [scheduler.jev] mode off|shadow|active default shadow, max_pairs 8, cache_ttl_s 3600, cache_max_entries 200; cache file runs/jev/sched_cache.json with .lock sidecar; decision rows kind jev_sched; must not import daemon"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R8 v3 after spec review T-0632 (flat [scheduler].jev_mode matching promotion.FEATURES; promotion.collect('jev_sched') from decision rows; confidence aggregation pinned)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789977140.4228961,
+      "pipeline": {
+        "first_ready_at": 1789977140.422828
+      }
+    },
+    {
+      "ts": 1789977140.4711921,
+      "pipeline": {
+        "first_ready_at": 1789977140.422828,
+        "spec_review_at": 1789977140.471122,
+        "spec_review_at_lease": 1789978040.471122
+      }
+    },
+    {
+      "ts": 1789977140.4793851,
+      "pipeline": {
+        "first_ready_at": 1789977140.422828,
+        "spec_review_at": 1789977140.471122,
+        "spec_review_at_lease": 1789978040.471122,
+        "spec_review_at_done": 1789977140.478606
+      }
+    },
+    {
+      "ts": 1789977338.578461,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "promotion.py already registers a feature exactly named 'jev_sched' with config path table='scheduler', key='jev_mode' (a flat key on the existing [scheduler] table, alongside mode/soft_conflict_policy/max_wave/stale_rebase). The spec instead has annotate() read a nested [scheduler.jev] table with a 'mode' sub-key. These are two different config locations for the same feature: promotion.current_mode('jev_sched', cfg) will read scheduler.jev_mode and always report the default ('shadow') regardless of what an operator sets under [scheduler.jev].mode, and setting [scheduler.jev].mode has zero effect on the promotion/evidence tooling's view of the feature. This silently breaks the shadow->active promotion workflow for this exact feature with no error.",
+          "severity": "high",
+          "line": 15
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "collect(feature='jev_sched') sources evidence from runs/sched/waves.jsonl and runs/sched/stale.jsonl, not from decision_log rows (kind='jev_sched'). The spec's only evidence trail is decision_log.record(kind='jev_sched', ...); nothing in scope updates waves.jsonl/stale.jsonl, so promotion.evaluate('jev_sched', ...) will keep seeing n=0/insufficient_evidence forever even after annotate() runs repeatedly in shadow mode. Worth confirming this is intentional (a separate future wiring task) rather than an oversight.",
+          "severity": "med",
+          "line": 150
+        },
+        {
+          "path": "orchestrator/jev_sched.py",
+          "issue": "Spec doesn't specify how the per-pair 'confidence' in signals (one value) is derived from the two sub-question confidences (semantic_interference, stale_assumption_risk) each pair asks. Undefined aggregation (e.g. average vs min vs first) is exactly the kind of ambiguity that produces divergent executor/reviewer interpretations and an acceptance test that can't be pinned down.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789977388.523198,
+      "pipeline": {
+        "first_ready_at": 1789977140.422828,
+        "spec_review_at": 1789977140.471122,
+        "spec_review_at_lease": 1789978040.471122,
+        "spec_review_at_done": 1789977140.478606,
+        "spec_review_held_at": 1789977388.5231302
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789977389.355009,
+      "pipeline": {
+        "first_ready_at": 1789977140.422828,
+        "spec_review_at": 1789977140.471122,
+        "spec_review_at_lease": 1789978040.471122,
+        "spec_review_at_done": 1789977140.478606,
+        "spec_review_held_at": 1789977388.5231302,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789977389.400362,
+      "pipeline": {
+        "first_ready_at": 1789977140.422828,
+        "spec_review_at": 1789977140.471122,
+        "spec_review_at_lease": 1789978040.471122,
+        "spec_review_at_done": 1789977140.478606,
+        "spec_review_held_at": 1789977388.5231302,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789977388.523198": true
+        }
+      }
+    },
+    {
+      "ts": 1789977523.563987,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R8 v3 after spec review T-0632 (flat [scheduler].jev_mode matching promotion.FEATURES; promotion.collect('jev_sched') from decision rows; confidence aggregation pinned)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789977140.422828,
+    "spec_review_at": 1789977140.471122,
+    "spec_review_at_lease": 1789978040.471122,
+    "spec_review_at_done": 1789977140.478606,
+    "spec_review_held_at": 1789977388.5231302,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789977388.523198": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "promotion.py already registers a feature exactly named 'jev_sched' with config path table='scheduler', key='jev_mode' (a flat key on the existing [scheduler] table, alongside mode/soft_conflict_policy/max_wave/stale_rebase). The spec instead has annotate() read a nested [scheduler.jev] table with a 'mode' sub-key. These are two different config locations for the same feature: promotion.current_mode('jev_sched', cfg) will read scheduler.jev_mode and always report the default ('shadow') regardless of what an operator sets under [scheduler.jev].mode, and setting [scheduler.jev].mode has zero effect on the promotion/evidence tooling's view of the feature. This silently breaks the shadow->active promotion workflow for this exact feature with no error.",
+      "severity": "high",
+      "line": 15
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "collect(feature='jev_sched') sources evidence from runs/sched/waves.jsonl and runs/sched/stale.jsonl, not from decision_log rows (kind='jev_sched'). The spec's only evidence trail is decision_log.record(kind='jev_sched', ...); nothing in scope updates waves.jsonl/stale.jsonl, so promotion.evaluate('jev_sched', ...) will keep seeing n=0/insufficient_evidence forever even after annotate() runs repeatedly in shadow mode. Worth confirming this is intentional (a separate future wiring task) rather than an oversight.",
+      "severity": "med",
+      "line": 150
+    },
+    {
+      "path": "orchestrator/jev_sched.py",
+      "issue": "Spec doesn't specify how the per-pair 'confidence' in signals (one value) is derived from the two sub-question confidences (semantic_interference, stale_assumption_risk) each pair asks. Undefined aggregation (e.g. average vs min vs first) is exactly the kind of ambiguity that produces divergent executor/reviewer interpretations and an acceptance test that can't be pinned down.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

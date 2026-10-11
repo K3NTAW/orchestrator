@@ -1,0 +1,187 @@
+{
+  "id": "T-0893",
+  "created_at": 1790110303.464597,
+  "parent": "T-0861",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S1b: skill telemetry in shadow: which skills each worker was exposed to and invoked, skill tokens per run, skill_selection decision rows, skill columns in the economy scorecard; exposure unchanged (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P0 telemetry, P29, P30 (P37 stage 1). Depends on S1a T-0863 (orchestrator/skills_registry.py: SkillRecord, sync, registry records with roles/est tokens). Facts: Claude workers run in worktrees that carry .claude/skills (11 symlinked skills; all descriptions are in context, bodies load on Skill-tool invocation); Codex executors load implement-spec via AGENTS.md and their final message says \"Skill used: <name>\" when they did; bus.log_run rows carry packet_meta and a context object (P1 telemetry); decision_log.KINDS has the context-program kinds; context_scorecard builds per role/goal/task_class rows and `scorecard --economy` joins sources.\nDo:\n1. Exposure: in spawn.run_worker (and the Claude execute fallback) compute `skills_exposed` = registry records whose roles include the worker's role or \"*\" and whose state is active (today: all 11 for Claude roles; implement-spec for codex_execute via AGENTS.md), with skill_tokens_l0 = sum est_tokens_l0; write them into the task's packet_meta (\"skills_exposed\": ids, \"skill_tokens_l0\") so bus.log_run carries them into the run context (add the keys to bus.py's copied list). Codex dispatch (daemon/executor.start) records [\"executor/implement-spec\"] and its l0 tokens the same way.\n2. Usage: after a worker finishes, detect invoked skills: for Claude workers parse the run transcript (the path recorded for the run; the executor verifies the exact JSON shape of a Skill tool_use in .orchestrator/runs transcripts and documents it) for tool_use names \"Skill\" with input.skill or the skill name; for Codex parse the result summary for \"Skill used: <name>\" lines. Record `skills_used` (ids), `skill_tokens_l2` (sum est_tokens_l2 of used skills) in the run row's context and in the task pipeline (\"skills_used\").\n3. decision_log: add kind \"skill_selection\" to KINDS (and CONTEXT_KINDS docstring mapping); record one row per worker spawn: candidates = all registry ids for the role, hard_constraints = [\"static exposure (stage 1)\"], deterministic = {\"role\", \"task_class\", \"exposed\": ids, \"skill_tokens_l0\"}, selected = exposed ids, reason = \"stage1 static\", mode = \"shadow\"; and after completion decision_log.outcome(task, \"skill_selection\", skills_used=..., skill_tokens_l2=...).\n4. Scorecard (P30 first metrics): orchestrator/skill_scorecard.py (new): from run rows: per role and per skill id: exposures, uses, use_rate, skill_tokens_l0 avg, skill_tokens_l2 avg, skill_overhead_ratio = (skill_tokens_l0 + skill_tokens_l2) / input tokens of the run (when input tokens known), plus per accepted task (lineage merged) skill_tokens_per_accepted_task. `orchestrator scorecard --skills` prints it; `scorecard --economy` gains a skills block.\n5. docs/skill-intelligence/02-telemetry.md (\u226460 lines): fields, where they live, how usage is detected for each worker kind, limits (Claude Code loads descriptions itself; l0 tokens are an estimate), revert path (nothing to revert: pure logging; remove the keys).\nConstraints: no change to prompts, allowlists, symlinks or which skills a worker sees; a telemetry failure never breaks a spawn (try/except + one notify line). Never quote double-brace placeholder tokens literally.\nTests (unittest): tests/test_spawn.py::test_run_worker_records_skills_exposed_and_l0_tokens, ::test_skill_usage_from_gate_rows_for_claude_workers, ::test_skill_usage_parsed_from_codex_summary; tests/test_bus.py::test_log_run_carries_skill_keys; tests/test_decision_log.py::test_skill_selection_kind_records_and_outcome; tests/test_skill_scorecard.py::test_use_rate_and_overhead_ratio_per_skill, ::test_skill_tokens_per_accepted_task.\nDo not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 01:50) after spec review T-0872 (request_changes), binding on top of v1:\n- Session handle: spawn.run_claude reads `session_id` from the CLI's JSON result (`--output-format json`; the executor verifies the field name from a real run row or the CLI docs and records what it found) and stores it on the run row (bus.log_run field session_id) and on the task's packet_meta; when absent, session_id is None and Claude-side usage detection is best-effort.\n- Usage detection for Claude workers uses two sources, no transcript parsing required: (1) the Jev gate log (.orchestrator/runs/jev/gate.jsonl, one row per gated tool call keyed by ORCH_TASK_ID / session): a Read of skills/<role>/<name>/SKILL.md or a Bash call of skills/<role>/<name>/scripts/* counts as a use of that skill; (2) jev_gate.run records Skill tool invocations too: when tool_name == \"Skill\" it logs {\"tool\": \"Skill\", \"skill\": input.skill or input.name} without asking Jev and without ever blocking (should_skip stays true for Skill after logging). orchestrator/jev_gate.py joins the scope for that one logging branch; tests/test_jev_gate.py gains ::test_skill_tool_invocation_is_logged_not_gated. Transcript parsing is descoped; if a transcript path is derivable from session_id (CLAUDE_CONFIG_DIR/projects/\u2026), document it in 02-telemetry.md as a future source only.\n- decision_log: \"skill_selection\" is added to KINDS with a docstring line stating it has no legacy synonym (no invented pairing).",
+  "inputs": [
+    "T-0888"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_run_worker_records_skills_exposed_and_l0_tokens passes",
+    "tests/test_spawn.py::test_skill_usage_parsed_from_codex_summary passes",
+    "tests/test_bus.py::test_log_run_carries_skill_keys passes",
+    "tests/test_decision_log.py::test_skill_selection_kind_records_and_outcome passes",
+    "tests/test_skill_scorecard.py::test_use_rate_and_overhead_ratio_per_skill passes",
+    "tests/test_skill_scorecard.py::test_skill_tokens_per_accepted_task passes",
+    "docs/skill-intelligence/02-telemetry.md exists; `uv run orchestrator scorecard --skills` runs; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_skill_usage_from_gate_rows_for_claude_workers passes",
+    "tests/test_jev_gate.py::test_skill_tool_invocation_is_logged_not_gated passes"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_spawn.py",
+    "tests/test_bus.py",
+    "tests/test_decision_log.py",
+    "tests/test_skill_scorecard.py",
+    "docs/skill-intelligence/02-telemetry.md",
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0893",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/skills_registry.py",
+        "issue": "Spec step 1 defines skills_exposed as 'registry records whose roles include the worker's role or \"*\"'. Actual SKILL.md frontmatter (verified in all 12 files) tags roles narrowly per directory (e.g. skills/scout/* -> roles:[scout]; skills/review/challenge -> roles:[challenge]; none use \"*\"). This filter yields 1-5 matching skills per role, not 11, contradicting the spec's own stated fact that all 11 skills are symlinked into every worktree's .claude/skills and visible to every Claude worker regardless of role. skills_exposed and skill_tokens_l0 will be wrong for every role, and every downstream P30 metric (use_rate = uses/exposures, overhead_ratio) will be wrong from day one.",
+        "severity": "high",
+        "line": 390
+      },
+      {
+        "path": ".claude/settings.json",
+        "issue": "Spec v2 requires jev_gate.run to log 'Skill' tool_use invocations, but the PreToolUse hook matcher wiring jev-gate.sh only covers 'Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch' -- 'Skill' is absent, so Claude Code never invokes this hook for a Skill call. .claude/settings.json is outside the task's scope list, and scope-guard.sh (PreToolUse Edit|Write) would block an executor from editing it anyway. The acceptance test can pass by calling jev_gate.run() directly with a synthetic payload, but the feature is unreachable in any real session -- usage source 2 (Skill tool logging) is dead on arrival as scoped.",
+        "severity": "high",
+        "line": 78
+      },
+      {
+        "path": "orchestrator/decision_log.py",
+        "issue": "Spec says add kind 'skill_selection' to KINDS 'and CONTEXT_KINDS docstring mapping' but doesn't say whether it belongs in the CONTEXT_KINDS tuple (which flows into KINDS) or is appended standalone to KINDS. Existing context-program kinds (tool_disclosure, model_routing, etc.) all live in CONTEXT_KINDS; leaving skill_selection out of that tuple while calling it context-program work is inconsistent and untested by any acceptance criterion.",
+        "severity": "low",
+        "line": 17
+      }
+    ],
+    "suggested_spec_changes": [
+      "Redefine skills_exposed for Claude workers as the full set of active registry records (today: all 11), not a roles-membership filter, since exposure is determined by the shared .claude/skills symlink directory, not per-role registry tags; keep the roles field only for stage-2 trigger-based candidate selection (skills_registry.candidates), which is a separate concern.",
+      "Either add a .claude/settings.json scope exception (with an explicit acceptance test asserting 'Skill' is in the jev-gate PreToolUse matcher) or descope 'Skill tool invocation logged via jev_gate' entirely and rely only on usage source 1 (gate.jsonl Read/Bash rows) until the hook wiring task is filed separately.",
+      "State explicitly that skill_selection is added to CONTEXT_KINDS (not just KINDS) to match the existing context-program kind convention."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790110308.210571,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0893",
+      "claimed_at": 1790110308.207236
+    },
+    {
+      "ts": 1790110308.219792,
+      "account": "B"
+    },
+    {
+      "ts": 1790110311.13437,
+      "pid": 16982,
+      "account": "B"
+    },
+    {
+      "ts": 1790110589.9718559,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/skills_registry.py",
+            "issue": "Spec step 1 defines skills_exposed as 'registry records whose roles include the worker's role or \"*\"'. Actual SKILL.md frontmatter (verified in all 12 files) tags roles narrowly per directory (e.g. skills/scout/* -> roles:[scout]; skills/review/challenge -> roles:[challenge]; none use \"*\"). This filter yields 1-5 matching skills per role, not 11, contradicting the spec's own stated fact that all 11 skills are symlinked into every worktree's .claude/skills and visible to every Claude worker regardless of role. skills_exposed and skill_tokens_l0 will be wrong for every role, and every downstream P30 metric (use_rate = uses/exposures, overhead_ratio) will be wrong from day one.",
+            "severity": "high",
+            "line": 390
+          },
+          {
+            "path": ".claude/settings.json",
+            "issue": "Spec v2 requires jev_gate.run to log 'Skill' tool_use invocations, but the PreToolUse hook matcher wiring jev-gate.sh only covers 'Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch' -- 'Skill' is absent, so Claude Code never invokes this hook for a Skill call. .claude/settings.json is outside the task's scope list, and scope-guard.sh (PreToolUse Edit|Write) would block an executor from editing it anyway. The acceptance test can pass by calling jev_gate.run() directly with a synthetic payload, but the feature is unreachable in any real session -- usage source 2 (Skill tool logging) is dead on arrival as scoped.",
+            "severity": "high",
+            "line": 78
+          },
+          {
+            "path": "orchestrator/decision_log.py",
+            "issue": "Spec says add kind 'skill_selection' to KINDS 'and CONTEXT_KINDS docstring mapping' but doesn't say whether it belongs in the CONTEXT_KINDS tuple (which flows into KINDS) or is appended standalone to KINDS. Existing context-program kinds (tool_disclosure, model_routing, etc.) all live in CONTEXT_KINDS; leaving skill_selection out of that tuple while calling it context-program work is inconsistent and untested by any acceptance criterion.",
+            "severity": "low",
+            "line": 17
+          }
+        ],
+        "suggested_spec_changes": [
+          "Redefine skills_exposed for Claude workers as the full set of active registry records (today: all 11), not a roles-membership filter, since exposure is determined by the shared .claude/skills symlink directory, not per-role registry tags; keep the roles field only for stage-2 trigger-based candidate selection (skills_registry.candidates), which is a separate concern.",
+          "Either add a .claude/settings.json scope exception (with an explicit acceptance test asserting 'Skill' is in the jev-gate PreToolUse matcher) or descope 'Skill tool invocation logged via jev_gate' entirely and rely only on usage source 1 (gate.jsonl Read/Bash rows) until the hook wiring task is filed separately.",
+          "State explicitly that skill_selection is added to CONTEXT_KINDS (not just KINDS) to match the existing context-program kind convention."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790110589.972946,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/skills_registry.py",
+          "issue": "Spec step 1 defines skills_exposed as 'registry records whose roles include the worker's role or \"*\"'. Actual SKILL.md frontmatter (verified in all 12 files) tags roles narrowly per directory (e.g. skills/scout/* -> roles:[scout]; skills/review/challenge -> roles:[challenge]; none use \"*\"). This filter yields 1-5 matching skills per role, not 11, contradicting the spec's own stated fact that all 11 skills are symlinked into every worktree's .claude/skills and visible to every Claude worker regardless of role. skills_exposed and skill_tokens_l0 will be wrong for every role, and every downstream P30 metric (use_rate = uses/exposures, overhead_ratio) will be wrong from day one.",
+          "severity": "high",
+          "line": 390
+        },
+        {
+          "path": ".claude/settings.json",
+          "issue": "Spec v2 requires jev_gate.run to log 'Skill' tool_use invocations, but the PreToolUse hook matcher wiring jev-gate.sh only covers 'Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch' -- 'Skill' is absent, so Claude Code never invokes this hook for a Skill call. .claude/settings.json is outside the task's scope list, and scope-guard.sh (PreToolUse Edit|Write) would block an executor from editing it anyway. The acceptance test can pass by calling jev_gate.run() directly with a synthetic payload, but the feature is unreachable in any real session -- usage source 2 (Skill tool logging) is dead on arrival as scoped.",
+          "severity": "high",
+          "line": 78
+        },
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "Spec says add kind 'skill_selection' to KINDS 'and CONTEXT_KINDS docstring mapping' but doesn't say whether it belongs in the CONTEXT_KINDS tuple (which flows into KINDS) or is appended standalone to KINDS. Existing context-program kinds (tool_disclosure, model_routing, etc.) all live in CONTEXT_KINDS; leaving skill_selection out of that tuple while calling it context-program work is inconsistent and untested by any acceptance criterion.",
+          "severity": "low",
+          "line": 17
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790110308.207236,
+  "account": "B",
+  "pid": 16982,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/skills_registry.py",
+      "issue": "Spec step 1 defines skills_exposed as 'registry records whose roles include the worker's role or \"*\"'. Actual SKILL.md frontmatter (verified in all 12 files) tags roles narrowly per directory (e.g. skills/scout/* -> roles:[scout]; skills/review/challenge -> roles:[challenge]; none use \"*\"). This filter yields 1-5 matching skills per role, not 11, contradicting the spec's own stated fact that all 11 skills are symlinked into every worktree's .claude/skills and visible to every Claude worker regardless of role. skills_exposed and skill_tokens_l0 will be wrong for every role, and every downstream P30 metric (use_rate = uses/exposures, overhead_ratio) will be wrong from day one.",
+      "severity": "high",
+      "line": 390
+    },
+    {
+      "path": ".claude/settings.json",
+      "issue": "Spec v2 requires jev_gate.run to log 'Skill' tool_use invocations, but the PreToolUse hook matcher wiring jev-gate.sh only covers 'Bash|Read|Grep|Glob|Edit|Write|WebFetch|WebSearch' -- 'Skill' is absent, so Claude Code never invokes this hook for a Skill call. .claude/settings.json is outside the task's scope list, and scope-guard.sh (PreToolUse Edit|Write) would block an executor from editing it anyway. The acceptance test can pass by calling jev_gate.run() directly with a synthetic payload, but the feature is unreachable in any real session -- usage source 2 (Skill tool logging) is dead on arrival as scoped.",
+      "severity": "high",
+      "line": 78
+    },
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "Spec says add kind 'skill_selection' to KINDS 'and CONTEXT_KINDS docstring mapping' but doesn't say whether it belongs in the CONTEXT_KINDS tuple (which flows into KINDS) or is appended standalone to KINDS. Existing context-program kinds (tool_disclosure, model_routing, etc.) all live in CONTEXT_KINDS; leaving skill_selection out of that tuple while calling it context-program work is inconsistent and untested by any acceptance criterion.",
+      "severity": "low",
+      "line": 17
+    }
+  ]
+}

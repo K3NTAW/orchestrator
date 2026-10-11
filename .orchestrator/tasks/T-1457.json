@@ -1,0 +1,45 @@
+{
+  "id": "T-1457",
+  "created_at": 1790874383.934314,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "base_for follows the whole fix chain: a fix round cuts from the newest existing task branch in its fix_round_for lineage, falling back to the goal branch, never origin/main for a task with a parent",
+  "spec": "Goal T-1403, wave 2, plan label B7. Evidence: plan.md backlog 2026-09-24 (fix round T-0222 cut from goal/T-0201\nbefore the Planner could base it on the held task) and 2026-09-25 (`orchestrator merge <fix-round>` stamps only\nthat task); a fix round of a fix round whose direct parent branch was deleted (worktree cleanup, C5b later)\nfalls through to the goal branch and loses the earlier round's commits.\n\nFacts (goal/T-1403 at 92c1a98):\n- spawn.py:277-308 base_for(task): execute + constraints.fix_round_for -> task/<fix_round_for> only when that\n  single branch exists (301-303); otherwise goal/<parent> when it exists (304-305); else 'origin/main' (306).\n- spawn.py:309-330 ensure_worktree(task_id, base=None): base = base_for(bus.get(task_id)); a base that does not\n  rev-parse becomes 'HEAD' (321-322).\n- daemon.root(t) / lineage(t) (grep 'def root' and 'def lineage' in daemon.py) walk fix_round_for; spawn must\n  not import daemon: re-implement the walk locally with bus.get, bounded to 20 hops and cycle-safe.\n\nChange:\n1. spawn.base_for: for an execute task with constraints.fix_round_for, walk the chain fix_round_for ->\n   fix_round_for ... (bounded, cycle-safe, missing task ids skipped) and return the first task/<id> branch that\n   exists, nearest ancestor first; when none exists fall back to goal/<parent> when it exists; for a task with a\n   parent whose goal branch does not exist, return 'origin/main' as today. Record the choice:\n   spawn.base_choice(task) -> {'base': branch, 'via': 'fix_chain' | 'goal' | 'trunk', 'chain': [ids walked]};\n   base_for returns base_choice(task)['base'].\n2. ensure_worktree: when it cuts a new worktree, bus.update(task_id, pipeline={**pipeline, 'worktree_base':\n   base_choice}) so the daemon and reviews can see where a worktree came from (one write, under bus.locked()).\n\nTests that assert the old behaviour (SPEC RULE): tests/test_spawn.py base_for tests (grep 'base_for' and\n'fix_round_for'): the single-hop case keeps passing; add the multi-hop and missing-branch cases. Run\ntests/test_spawn.py.\n\nDepends on B4v2 T-1453 (spawn.py chain). Out of scope: daemon.py (B6), merge.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_base_for_follows_fix_chain_to_nearest_existing_branch: passes: for fix round C (fix_round_for B, B fix_round_for A) base_for returns task/B when it exists, task/A when only A's branch exists, goal/<parent> when neither exists and the goal branch does, and 'origin/main' when there is no goal branch; a cycle or a missing task id in the chain does not raise; base_choice reports via and the chain walked",
+    "tests/test_spawn.py::test_ensure_worktree_records_worktree_base: passes: ensure_worktree for a fresh fix-round worktree stores pipeline.worktree_base with base and via on the task",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [
+    "T-1453"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B7",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790878815.909411,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1472 (2026-10-01 wave 2 respec)"
+    }
+  ],
+  "hold_reason": "superseded by T-1472 (2026-10-01 wave 2 respec)"
+}

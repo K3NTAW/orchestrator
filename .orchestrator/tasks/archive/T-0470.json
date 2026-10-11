@@ -1,0 +1,105 @@
+{
+  "id": "T-0470",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P1b fix round 1: review packet honours the complexity-7 security bump and the fail-closed review reasons (diff_unavailable, security_paths_empty), one bounding pass for the diff without nested truncation, and render() requires a packet for review, spec-review and scout instead of a kwarg fallback (review T-0467)",
+  "spec": "Fix round for T-0462 (P1b) on its branch task/T-0462 at 250486c, addressing security review T-0467 (three findings). Base goal/T-0445.\n1. spawn.review_packet security section (spawn.py around 433): the section is included when any of these hold: a scope path matches [review].security_paths; the semantic trigger fires; the review task's complexity >= the checklist threshold daemon uses (SECURITY_CHECKLIST_COMPLEXITY, 7; import the constant or read it from one shared place so the two cannot drift); the reviewed task's pipeline.review_reason is one of security_paths, diff_unavailable, security_paths_empty (fail closed: an unavailable diff or an empty security_paths list always yields the section with the checklist pointer and a line naming the reason). review_packet takes the review task (for complexity and review_reason) as well as the reviewed task. Test: test_review_packet_security_section_on_complexity_bump_and_fail_closed_reasons (three cases: complexity 7 with no glob match; review_reason diff_unavailable; security_paths empty; each yields the section; complexity 4 with no trigger yields none).\n2. Bounding (around 452): a single pass. Compute the budget left for the diff from the lengths of the other sections first (cap total about 8000 chars as today), call bounded_diff once with that budget, and never re-wrap the result with bounded_text; acceptance and gate stay untrimmed. Test: test_review_packet_single_bounding_pass_no_nested_truncation (large acceptance, scope and gate plus a 30k-char diff: the packet is under the cap, contains exactly one \"expand with:\" hint, and the hint is intact).\n3. render() (around 87): remove the ad-hoc kwarg fallback that builds a packet from raw kwargs for review, spec-review and scout; when packet is missing for those roles render raises ValueError naming the role (so no unbounded, security-unaware prompt can be produced). Update the three legacy tests (test_templates_fill, test_scout_prompt_names_base, test_render_does_not_rebound_diff) to pass a packet built by the P1b packet builders; add test_render_requires_packet_for_review_spec_review_scout.\nKeep every T-0462 test and all existing tests green; .claude/hooks/tests-green.sh exits 0; commit on task/T-0462's branch with the task id including every named test; report sha and failures only.",
+  "inputs": [
+    "T-0469"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_review_packet_security_section_on_complexity_bump_and_fail_closed_reasons, test_review_packet_single_bounding_pass_no_nested_truncation, test_render_requires_packet_for_review_spec_review_scout pass",
+    "review_packet includes the security section for complexity >= 7 and for review_reason diff_unavailable or security_paths_empty; the diff is bounded exactly once; render raises without a packet for review, spec-review and scout",
+    "all T-0462 tests and existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0470",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 435,
+        "issue": "review_reason exact-match list ('security_paths', 'diff_unavailable', 'security_paths_empty') doesn't match the real values daemon.py's _review_plan() produces for a security-path or semantic hit: 'security_paths:<glob>', 'semantic_path:<match>', 'semantic_pattern:<match>' (see daemon.py _open_reviews' own `.startswith('security_paths:')`/`.startswith('semantic_')` check). The literal 'security_paths' branch here is unreachable. Currently masked because _open_reviews already bumps the review task's own complexity to >=7 whenever security is true, so review_packet's complexity>=7 check still forces the section \u2014 but the 'review_reason: ...' trigger text silently never shows the actual reason for these cases, and if that complexity-bump ever changes, this fallback would fail open. Should use startswith('security_paths:') / startswith('semantic_') to match daemon.py's own semantics.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 463,
+        "issue": "review_packet() constructs Pool() twice (line 427 for security_paths, line 463 for review_diff_chars), each doing full config load + account/executor init + _load()/_sync_legacy_codex() I/O, on every single review packet render. Reuse one Pool() instance.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789928630.338374,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0470",
+      "claimed_at": 1789928630.3380969
+    },
+    {
+      "ts": 1789928630.339295,
+      "account": "B"
+    },
+    {
+      "ts": 1789928630.3677518,
+      "pid": 55568,
+      "account": "B"
+    },
+    {
+      "ts": 1789928900.629358,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 435,
+            "issue": "review_reason exact-match list ('security_paths', 'diff_unavailable', 'security_paths_empty') doesn't match the real values daemon.py's _review_plan() produces for a security-path or semantic hit: 'security_paths:<glob>', 'semantic_path:<match>', 'semantic_pattern:<match>' (see daemon.py _open_reviews' own `.startswith('security_paths:')`/`.startswith('semantic_')` check). The literal 'security_paths' branch here is unreachable. Currently masked because _open_reviews already bumps the review task's own complexity to >=7 whenever security is true, so review_packet's complexity>=7 check still forces the section \u2014 but the 'review_reason: ...' trigger text silently never shows the actual reason for these cases, and if that complexity-bump ever changes, this fallback would fail open. Should use startswith('security_paths:') / startswith('semantic_') to match daemon.py's own semantics.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 463,
+            "issue": "review_packet() constructs Pool() twice (line 427 for security_paths, line 463 for review_diff_chars), each doing full config load + account/executor init + _load()/_sync_legacy_codex() I/O, on every single review packet render. Reuse one Pool() instance.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789928900.6312609,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789928630.3380969,
+  "account": "B",
+  "pid": 55568,
+  "review_verdict": "approve"
+}

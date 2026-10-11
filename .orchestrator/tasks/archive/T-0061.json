@@ -1,0 +1,70 @@
+{
+  "id": "T-0061",
+  "parent": "T-0043",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "review: C-D: spec_review role \u2014 prompt template, run_worker branch, verdict on the execute task, spawn_spec_review tool",
+  "spec": "Why: two of five fix rounds in goal T-0005 were design-level and would have been caught by reading the spec before code existed. Scout T-0046 mapped the insertion points. Depends on C-A (T-0047) merged (tests go in tests/test_spawn.py). Disjoint from C-B (does not touch bus.py: the hold is applied by the daemon or Planner via bus.update, and the verdict is read from the task json).\n\nWhat (4 files + 1 template: orchestrator/spawn.py, orchestrator/mcp.py, .orchestrator/prompts/spec-review.md, tests/test_spawn.py; and bus.ROLES needs \"spec_review\" \u2014 since bus.py is C-B's scope, add the role name via `bus.ROLES.add(\"spec_review\")` at import time in spawn.py with a one-line comment, and C-E moves it into bus.py later; worktree off goal/T-0043):\n1. .orchestrator/prompts/spec-review.md: \"You did not write this spec and will not implement it. Review the execute task spec below against the current code at its scoped paths BEFORE any code is written. Complexity {{complexity}}. Spec: {{spec}} Acceptance: {{acceptance}} Scope: {{scope}} Current code excerpts: {{code}}. Look for: wrong or missing insertion points, hidden coupling with files outside scope, acceptance criteria that cannot be verified, design choices that a reviewer would reject (state that never decreases, double counting, unguarded external calls, silent fallbacks), missing rollback. Return ONLY JSON: {\"verdict\":\"approve|request_changes\",\"risks\":[{\"path\":\"\",\"issue\":\"\",\"severity\":\"low|med|high\"}],\"suggested_spec_changes\":[\"\"]}\" (under 3,000 chars).\n2. spawn.py: TOOLS[\"spec_review\"] = the review entry (read-only); run_worker: `elif role == \"spec_review\":` render spec-review.md with the execute task from inputs[0] (spec, acceptance, scope, complexity) and `code` = for each scope glob, the first 120 lines of each matching file in the reviewed task's base branch worktree or ROOT (cap 12,000 chars total); after the run, write `spec_review_verdict` (and `spec_review_risks`) via bus.update on both the spec_review task and inputs[0], mirroring the review path. base_for: spec_review tasks base like challenge (goal/<parent> else origin/main).\n3. mcp.py: `spawn_spec_review(task_id)` calling _bg(task_id), docstring \"inputs[0] = the execute task whose spec is under review\".\n4. tests/test_spawn.py: FakeProc-style test: patch spawn.subprocess.Popen/run so the worker returns a JSON result with verdict request_changes and one risk; assert spec_review_verdict lands on both tasks and the rendered prompt contains the execute task's spec text and a scoped file excerpt.\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"spawn: spec_review role, prompt, verdict capture; mcp spawn_spec_review\" with a revert-path body.",
+  "inputs": [
+    "T-0049"
+  ],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the new spec_review test",
+    "a spec_review task run via run_worker (faked process) writes spec_review_verdict on itself and on inputs[0]",
+    ".orchestrator/prompts/spec-review.md exists and renders spec, acceptance, scope and code excerpts",
+    "mcp.py exposes spawn_spec_review",
+    "git diff --stat limited to orchestrator/spawn.py, orchestrator/mcp.py, .orchestrator/prompts/spec-review.md, tests/test_spawn.py"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/mcp.py",
+    ".orchestrator/prompts/spec-review.md",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0061",
+  "codex_thread": null,
+  "result": {
+    "summary": "stale: daemon smoke run review of T-0049, already reviewed (T-0053) and merged via T-0055; worker thread died with the smoke process. Superseded.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789674118.774845,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0061",
+      "claimed_at": 1789674118.774582
+    },
+    {
+      "ts": 1789674118.803961,
+      "pid": 55999,
+      "account": "A"
+    },
+    {
+      "ts": 1789678771.973993,
+      "status": "failed",
+      "result": {
+        "summary": "stale: daemon smoke run review of T-0049, already reviewed (T-0053) and merged via T-0055; worker thread died with the smoke process. Superseded.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789674118.774582,
+  "pid": 55999,
+  "account": "A"
+}

@@ -1,0 +1,196 @@
+{
+  "id": "T-0180",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): C-O7b fix round 1 on task/T-0179 \u2014 delta 41cf86a..3657876 (T-0179, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0179 delta: `git diff 41cf86a 3657876` in worktree wt/T-0179 (orchestrator/handover.py, orchestrator/daemon.py, tests/test_handover.py). Fix round for review T-0177; confirm each item resolved: (1) failed children render under a failed group with reason and resume_hint keys, unknown statuses under other (<status>), a goal with only a failed child never says \"no child tasks\" (test); (2) plan.md written via sibling temp file + os.replace inside bus.locked(), temp cleaned on error, a failing replace leaves plan.md unchanged (test); (3) throttle timestamp in .orchestrator/handover_state.json under a flock with truncate+write, pool_state untouched (test adjusted); (4) the LAST Auto-handover heading is replaced, earlier quoted headings survive (test); (5) tasks read once per write; (6) worktree list excludes merged tasks and _state (test). Also re-check the T-0119 guarantees (section under 120 lines with truncation, Europe/Zurich ISO timestamp, titles and ids only, no result bodies) and that the new flock file cannot deadlock with bus.locked() (different files, acquired in a fixed order or never nested). Run `uv run python -m unittest tests.test_handover -q` once. Second review of C-O7b: approve unless a defect would corrupt plan.md or hide tasks in production; smaller points as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0179"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the six T-0177 items confirmed resolved or named unresolved with evidence",
+    "T-0119 guarantees and lock ordering confirmed"
+  ],
+  "scope": [
+    "orchestrator/handover.py",
+    "orchestrator/daemon.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0119",
+      "T-0179"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0180",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 424,
+        "issue": ".orchestrator/plan.md is a tracked file (12+ commits touch it, e.g. 7e9c688) and the daemon runs in ROOT, so this call leaves the main checkout permanently dirty on plan.md. merge.merge() (merge.py:36) does `git merge --ff-only` in ROOT when the target branch is checked out there; that refuses whenever the merged branch also touched plan.md ('local changes would be overwritten'), so the merge silently falls through to update-ref and reports checkout_stale. It degrades rather than corrupts, but the stale-checkout path becomes the normal case instead of the exception once the daemon is running. Consider committing the section (or writing it to an untracked sibling that plan.md includes).",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 387,
+        "issue": "The throttle is check-then-act: _handover_last_at() reads outside the flock that _save_handover_last_at() takes, so two concurrent callers can both pass the 15-min gate and both write the section. Unreachable today (acquire_lock() makes the daemon single-instance and tick() is single-threaded), but the docstring at line 360 claims the flock stops 'another daemon process briefly racing the lock file' from clobbering the timestamp \u2014 it only protects other keys in the file, not the throttle decision. Either take the flock around the read+check or drop the claim.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 15,
+        "issue": "handover_state.json is a new runtime state file in .orchestrator/ but is not added to .gitignore, which already lists .orchestrator/pool_state.json. It will sit untracked in `git status` forever and can be swept into a commit by `git add -A`. (planner_usage.json has the same omission, so the precedent is mixed, but the ignore entry is one line.)",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_handover.py",
+        "line": 145,
+        "issue": "test_truncates_long_lists only exercises _join_truncated (the '\u2026 and 12 more' item cap); the section-wide branch at handover.py:173 is never entered, and its assertLessEqual(len(lines), 120) passes trivially on an ~11-line section. That branch looks unreachable in practice: MAX_GOALS=12 goals x <=7 lines plus ~6 fixed lines is ~93, under the 116-line budget. The 'resume sentence always survives truncation' guarantee the comment at handover.py:170 calls out is therefore untested. The arithmetic (extra = len(body) - (budget - 1)) is correct on inspection; a direct test of _render_section with a shrunken MAX_SECTION_LINES would pin it.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/handover.py",
+        "line": 198,
+        "issue": "tempfile.mkstemp() creates the temp file 0600, and os.replace carries that mode onto plan.md, so the first daemon write narrows a previously 0644 tracked file to owner-only. Harmless single-user, but it is a silent permission change on a file the feature exists to protect. os.chmod(tmp_name, 0o644) before the replace keeps it stable. Separately, there is no fsync of the temp file before the rename, so the atomicity guarantee covers a crash mid-write but not a power loss.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789755142.098112,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0180",
+      "claimed_at": 1789755142.0977988
+    },
+    {
+      "ts": 1789755142.127928,
+      "pid": 42867,
+      "account": "A"
+    },
+    {
+      "ts": 1789755401.9682171,
+      "status": "done",
+      "result": {
+        "verdict": "approve",
+        "summary": "All six T-0177 items resolved in the delta 41cf86a..3657876, each with a test; suite 216/216 green (uv run python -m unittest discover -q tests). Scope held to the three named files. Lock ordering verified: handover.write takes only bus.locked() (reentrant per thread, so the nested bus.read/db inside _render_section cannot self-deadlock), and daemon._save_handover_last_at takes its flock only after write() returned and the bus lock is released -- no inversion with merge.lock, which handover never touches. Item evidence: (1) handover.py:41-55 _status_groups buckets failed and any unknown status under other; test_failed_group_and_other_bucket asserts a failed-only goal never renders 'no child tasks'. (2) handover.py:198-204 mkstemp+os.replace inside bus.locked(), temp unlinked on error; test_write_failure_leaves_plan_unchanged. (3) daemon.py:359-377 handover_state.json read-modify-write under flock, a faithful copy of pool._save_planner_account (pool.py:35-54); test asserts pool_state.json untouched. (4) handover.py:191-193 finditer -> matches[-1]; test_replaces_last_heading_only keeps the fenced-quoted heading. (5) handover.py:113-121 one bus.read() + children_by_parent map. (6) handover.py:79-95 excludes _state and merged_into worktrees. T-0119 guarantees hold: _open_goals matches real goals (goals.py:34 creates role=triage, parent unset), the four named tests exist, and the resume sentence is outside the truncated body. Findings below are non-blocking.",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 424,
+            "issue": ".orchestrator/plan.md is a tracked file (12+ commits touch it, e.g. 7e9c688) and the daemon runs in ROOT, so this call leaves the main checkout permanently dirty on plan.md. merge.merge() (merge.py:36) does `git merge --ff-only` in ROOT when the target branch is checked out there; that refuses whenever the merged branch also touched plan.md ('local changes would be overwritten'), so the merge silently falls through to update-ref and reports checkout_stale. It degrades rather than corrupts, but the stale-checkout path becomes the normal case instead of the exception once the daemon is running. Consider committing the section (or writing it to an untracked sibling that plan.md includes).",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 387,
+            "issue": "The throttle is check-then-act: _handover_last_at() reads outside the flock that _save_handover_last_at() takes, so two concurrent callers can both pass the 15-min gate and both write the section. Unreachable today (acquire_lock() makes the daemon single-instance and tick() is single-threaded), but the docstring at line 360 claims the flock stops 'another daemon process briefly racing the lock file' from clobbering the timestamp -- it only protects other keys in the file, not the throttle decision. Either take the flock around the read+check or drop the claim.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 15,
+            "issue": "handover_state.json is a new runtime state file in .orchestrator/ but is not added to .gitignore, which already lists .orchestrator/pool_state.json. It will sit untracked in `git status` forever and can be swept into a commit by `git add -A`. (planner_usage.json has the same omission, so the precedent is mixed, but the ignore entry is one line.)",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_handover.py",
+            "line": 145,
+            "issue": "test_truncates_long_lists only exercises _join_truncated (the '\u2026 and 12 more' item cap); the section-wide branch at handover.py:173 is never entered, and its assertLessEqual(len(lines), 120) passes trivially on an ~11-line section. In fact that branch looks unreachable in practice: MAX_GOALS=12 goals x <=7 lines plus ~6 fixed lines is ~93, under the 116-line budget. The 'resume sentence always survives truncation' guarantee the comment at handover.py:170 calls out is therefore untested. The arithmetic (extra = len(body) - (budget - 1)) is correct on inspection; a direct test of _render_section with a shrunken MAX_SECTION_LINES would pin it.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 198,
+            "issue": "tempfile.mkstemp() creates the temp file 0600, and os.replace carries that mode onto plan.md, so the first daemon write narrows a previously 0644 tracked file to owner-only. Harmless single-user, but it is a silent permission change on a file the feature exists to protect. os.chmod(tmp_name, 0o644) (or copying the existing file's mode) before the replace keeps it stable. Separately, there is no fsync of the temp file before the rename, so the atomicity guarantee covers a crash mid-write but not a power loss.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755413.065681,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 424,
+            "issue": ".orchestrator/plan.md is a tracked file (12+ commits touch it, e.g. 7e9c688) and the daemon runs in ROOT, so this call leaves the main checkout permanently dirty on plan.md. merge.merge() (merge.py:36) does `git merge --ff-only` in ROOT when the target branch is checked out there; that refuses whenever the merged branch also touched plan.md ('local changes would be overwritten'), so the merge silently falls through to update-ref and reports checkout_stale. It degrades rather than corrupts, but the stale-checkout path becomes the normal case instead of the exception once the daemon is running. Consider committing the section (or writing it to an untracked sibling that plan.md includes).",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 387,
+            "issue": "The throttle is check-then-act: _handover_last_at() reads outside the flock that _save_handover_last_at() takes, so two concurrent callers can both pass the 15-min gate and both write the section. Unreachable today (acquire_lock() makes the daemon single-instance and tick() is single-threaded), but the docstring at line 360 claims the flock stops 'another daemon process briefly racing the lock file' from clobbering the timestamp \u2014 it only protects other keys in the file, not the throttle decision. Either take the flock around the read+check or drop the claim.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 15,
+            "issue": "handover_state.json is a new runtime state file in .orchestrator/ but is not added to .gitignore, which already lists .orchestrator/pool_state.json. It will sit untracked in `git status` forever and can be swept into a commit by `git add -A`. (planner_usage.json has the same omission, so the precedent is mixed, but the ignore entry is one line.)",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_handover.py",
+            "line": 145,
+            "issue": "test_truncates_long_lists only exercises _join_truncated (the '\u2026 and 12 more' item cap); the section-wide branch at handover.py:173 is never entered, and its assertLessEqual(len(lines), 120) passes trivially on an ~11-line section. That branch looks unreachable in practice: MAX_GOALS=12 goals x <=7 lines plus ~6 fixed lines is ~93, under the 116-line budget. The 'resume sentence always survives truncation' guarantee the comment at handover.py:170 calls out is therefore untested. The arithmetic (extra = len(body) - (budget - 1)) is correct on inspection; a direct test of _render_section with a shrunken MAX_SECTION_LINES would pin it.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 198,
+            "issue": "tempfile.mkstemp() creates the temp file 0600, and os.replace carries that mode onto plan.md, so the first daemon write narrows a previously 0644 tracked file to owner-only. Harmless single-user, but it is a silent permission change on a file the feature exists to protect. os.chmod(tmp_name, 0o644) before the replace keeps it stable. Separately, there is no fsync of the temp file before the rename, so the atomicity guarantee covers a crash mid-write but not a power loss.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755413.067605,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789755426.220758,
+      "pipeline": {
+        "merged_at": 1789755426.220684
+      }
+    }
+  ],
+  "claimed_at": 1789755142.0977988,
+  "pid": 42867,
+  "account": "A",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789755426.220684
+  }
+}

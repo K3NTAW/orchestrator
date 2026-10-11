@@ -1,0 +1,538 @@
+{
+  "id": "T-1400",
+  "created_at": 1790749909.4559832,
+  "parent": "T-1391",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Route every gate run through gate.run_gate; timeout holds as gate_timeout infra failure (v2, test seams migrated)",
+  "spec": "What: wire the bounded runner from T-1392 (orchestrator/gate.py, merged on goal/T-1391: settings, run_bounded, run_gate, running_gates) into every gate invocation, and make a final timeout an infrastructure failure instead of gate_red. Replaces T-1393 (held: spec review request_changes); its six findings are resolved below.\nWhy: a hung tests-green (luna xcodebuild 6 h) stalled goals, and killing it by hand marked the task gate_red, so the daemon filed a pointless code fix round.\n\nImport rule: daemon.py, merge.py and failures.py do `from orchestrator import gate` (module import, so tests can patch `daemon.gate.run_gate`, `merge.gate.run_gate`, `failures.gate.run_bounded`). gate.py must not import daemon, merge or failures.\n\nChanges:\n1. daemon.gate (daemon.py:1448): replace `subprocess.run([str(merge.TESTS_GREEN), worktree], ...)` with `result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t[\"id\"], cfg=pool.cfg)`. Order after the call: first the existing `_hold_stale_high(t)` check (unchanged, still runs on a timeout: finding 5), then `if result[\"timed_out\"]:` stamp(t[\"id\"], \"gated_at\", pipeline_fields={\"infra_failure\": \"gate_timeout\", \"gate_timeouts\": pipeline.get(\"gate_timeouts\", 0) + result[\"timeouts\"]}, status=\"held\", hold_reason=\"gate_timeout\", resume_hint={\"gate_timeout_s\": gate.settings(pool.cfg)[\"timeout_s\"], \"output_tail\": (result[\"stdout\"] + result[\"stderr\"])[-4000:]}), notify(f\"{t['id']}: gate timed out twice; held as infra failure\"), continue. gate_reds is NOT incremented on a timeout. Then the existing red branch using result[\"returncode\"] and result[\"stderr\"], and the green path, unchanged.\n2. merge.merge (merge.py:57): replace the subprocess.run with `result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)` (cfg omitted: gate.settings(None) reads pool.config(); no signature change to merge.merge, finding 6). If result[\"timed_out\"]: bus.update(task_id, status=\"held\", hold_reason=\"gate_timeout\", pipeline={**(task.get(\"pipeline\") or {}), \"infra_failure\": \"gate_timeout\"}, resume_hint={\"output_tail\": (result[\"stdout\"]+result[\"stderr\"])[-4000:]}) and return {\"status\": \"gate_timeout\", \"reason\": \"gate_timeout\"}; the target branch must not move. Red stays status failed / tests_red exactly as today, using result[\"returncode\"] and result[\"stderr\"]. Keep `merge.TESTS_GREEN` as the module attribute tests patch.\n3. Flaky rerun (failures.failure_kind, failures.py:152): replace `subprocess.run(command, cwd=worktree, capture_output=True, text=True, timeout=rerun_timeout)` with `rerun = gate.run_bounded(command, cwd=worktree, timeout_s=rerun_timeout)`. If rerun[\"timed_out\"]: append {\"ids\": ids, \"timed_out\": True, \"timeout_s\": rerun_timeout, \"output\": (rerun[\"stdout\"] + rerun[\"stderr\"])[-2000:]} and classify \"code_defect\", exactly the shape today's TimeoutExpired branch produces. Otherwise use rerun[\"returncode\"], rerun[\"stdout\"], rerun[\"stderr\"] where the CompletedProcess fields were used. The runner probe (failures.py:106, subprocess.run with timeout 60) stays as it is. daemon.auto_fix_round (daemon.py:171) passes rerun_timeout=min(flaky_rerun_timeout_s, gate.settings(pool.cfg)[\"timeout_s\"]).\n4. daemon.auto_fix_round (daemon.py:149): skip a held task whose hold_reason is \"gate_timeout\" or whose pipeline.infra_failure is set, before failure_kind runs: no fix round, no rerun, no probe.\n5. planner_runs.build_ctx (planner_runs.py:1021-1026): AFTER the cooling-source loop that may reassign `infra` (the `for source in [...]` block), add: `pipeline_infra = (task.get(\"pipeline\") or {}).get(\"infra_failure\"); if pipeline_infra: infra = pipeline_infra`. So a gate_timeout hold yields ctx[\"infra_failure_kind\"] == \"gate_timeout\" even when an account is also cooling (finding 4), and decision.route (decision.py:89) returns route \"none\". Do not change decision.py.\n\nTest migration (findings 1-3; these files are in scope, keep every existing test's intent):\n6. tests/test_daemon.py gate_green helper (line 1538): keep the subprocess.run fake for osascript and git passthrough, drop its TESTS_GREEN branch, and additionally `self.swap(daemon.gate, \"run_gate\", fake_gate)` where fake_gate(worktree, *, script, task_id=None, cfg=None) returns {\"returncode\": 0 if green else 1, \"stdout\": \"\", \"stderr\": \"\", \"timed_out\": False, \"attempts\": 1, \"timeouts\": 0}. The direct sites that match argv on [str(merge.TESTS_GREEN)] (around lines 3135, 3145, 3171, 3207, 3228, 3305) migrate the same way: patch daemon.gate.run_gate, record (worktree, script, task_id) per call, and assert on those instead of argv (e.g. line 3145 becomes assertEqual(gate_calls, [(str(self.sandbox), merge.TESTS_GREEN, tid)]); line 3171 asserts no gate call; 3207 asserts one).\n7. tests/test_daemon.py test_flaky_rerun_has_timeout_and_timeout_is_not_flaky (line 1907): keep the subprocess.run swap for the probe (return FakeProc(\"\", 1) for the `-c import pytest` argv; any other argv fails the test), and swap failures.gate.run_bounded with a fake that asserts timeout_s == 17 and returns {\"returncode\": None, \"stdout\": \"hung test\", \"stderr\": \"\", \"timed_out\": True, \"duration_s\": 17.0}. The assertions on failure_kind code_defect and flaky_runs [{\"ids\": [...], \"timed_out\": True, \"timeout_s\": 17, \"output\": \"hung test\"}] stay. test_runner_probe_timeout_does_not_block_or_mark_flaky (line 1767) is unchanged (the probe still uses subprocess.run).\n8. tests/test_merge.py lines 320-331: patch merge.gate.run_gate instead of orchestrator.merge.subprocess.run; assert it was called once with (str(wt)) positional and script=merge.TESTS_GREEN. Other test_merge tests that patch merge.TESTS_GREEN to a real script path keep working because gate.run_gate executes `script` (do not fake them).\n\nNew tests in tests/test_gate_timeout.py (created by T-1392; keep its tests): patch daemon.gate.run_gate / merge.TESTS_GREEN with a real sleeping script and a tiny [gate] timeout_s in the cfg, per the acceptance list. Never treat a timeout as success anywhere. Grep first for exact current names and line numbers; they may have shifted.",
+  "inputs": [
+    "T-1399"
+  ],
+  "acceptance": [
+    "tests/test_gate_timeout.py::test_daemon_gate_timeout_holds_as_infra_failure passes: daemon.gate on a done task whose gate always times out leaves status held, hold_reason gate_timeout, pipeline.infra_failure gate_timeout, gate_reds unchanged, and the gate was attempted twice",
+    "tests/test_gate_timeout.py::test_gate_timeout_files_no_fix_round passes: auto_fix_round on that held task creates no task and runs no rerun or probe, and planner_runs.build_ctx for it yields infra_failure_kind gate_timeout so decision.route returns route none",
+    "tests/test_gate_timeout.py::test_gate_timeout_ctx_wins_over_cooling_account passes: build_ctx for a gate_timeout task whose account is cooling still yields infra_failure_kind gate_timeout",
+    "tests/test_gate_timeout.py::test_merge_path_honours_timeout passes: merge.merge with TESTS_GREEN pointing at a sleeping script and a tiny timeout returns status gate_timeout, the target branch sha is unchanged, and the task is held gate_timeout with pipeline.infra_failure set",
+    "tests/test_gate_timeout.py::test_flaky_rerun_kills_tree_on_timeout passes: a hung rerun (a script that spawns a sleeping child) in failure_kind is killed with its children and recorded as timed_out, classification unchanged (code_defect)",
+    "tests/test_gate_timeout.py::test_daemon_fast_red_gate_unchanged passes: a fast red gate still holds gate_red with gate_reds incremented and no infra_failure",
+    "tests/test_daemon.py::test_flaky_rerun_has_timeout_and_timeout_is_not_flaky passes with the rerun faked through failures.gate.run_bounded",
+    "existing tests/test_daemon.py, tests/test_merge.py, tests/test_failures.py, tests/test_planner_runs.py pass; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/failures.py",
+    "orchestrator/planner_runs.py",
+    "tests/test_gate_timeout.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1400",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "risks": [
+      {
+        "path": "orchestrator/merge.py",
+        "issue": "Step 2 pseudocode uses `task.get(\"pipeline\")` but merge.merge's local variable is `t` (from `t = bus.get(task_id)`); `task` is undefined in that scope and a literal transcription raises NameError on the first gate timeout during merge.",
+        "severity": "low",
+        "line": 57
+      }
+    ],
+    "suggested_spec_changes": [
+      "In step 2, change the pipeline-merge expression from `task.get(\"pipeline\")` to `t.get(\"pipeline\")` to match merge.merge's existing local variable name."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790749912.360594,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9345,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790749912.3790898,
+      "packet_meta": {
+        "chars": 8606,
+        "est_tokens": 2151,
+        "presented_tokens": 2151,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7ede5437153274c9e11aa67db65a3a71d503dc3a6a056515cfe045de1b1241b3"
+          },
+          "spec": {
+            "chars": 6064,
+            "est_tokens": 1516,
+            "sha256": "85b7df859542e5f5ae4eb5d0aae62a5be4c7ad2666615922bd010facf11d4ff5"
+          },
+          "acceptance": {
+            "chars": 1710,
+            "est_tokens": 427,
+            "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+          },
+          "scope": {
+            "chars": 190,
+            "est_tokens": 47,
+            "sha256": "0dd0bfa3c03f4779b81d06aaaab2550784bc21bd74304e35f68145d1d94adb13"
+          },
+          "depends_on": {
+            "chars": 87,
+            "est_tokens": 21,
+            "sha256": "167962bd2f6273eb40344128dc48bb3ec9c7abe03de2d9d11fa7077cdb6c0769"
+          },
+          "existing tests": {
+            "chars": 457,
+            "est_tokens": 114,
+            "sha256": "21c9cdd779a5c8e9ad3158a132d2f59c3a830c56fc7c4607cf9df37a8b068dda"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "1ad7ec421486",
+        "version": "1ad7ec421486",
+        "candidate_known": false,
+        "base": "b1bab215484f",
+        "sources": "task@T-1399 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9345,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790749913.5886521,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1400",
+      "claimed_at": 1790749913.5882711
+    },
+    {
+      "ts": 1790749913.59121,
+      "account": "A"
+    },
+    {
+      "ts": 1790749915.523283,
+      "pid": 3759,
+      "account": "A"
+    },
+    {
+      "ts": 1790750159.946947,
+      "packet_meta": {
+        "chars": 8606,
+        "est_tokens": 2151,
+        "presented_tokens": 2151,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7ede5437153274c9e11aa67db65a3a71d503dc3a6a056515cfe045de1b1241b3"
+          },
+          "spec": {
+            "chars": 6064,
+            "est_tokens": 1516,
+            "sha256": "85b7df859542e5f5ae4eb5d0aae62a5be4c7ad2666615922bd010facf11d4ff5"
+          },
+          "acceptance": {
+            "chars": 1710,
+            "est_tokens": 427,
+            "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+          },
+          "scope": {
+            "chars": 190,
+            "est_tokens": 47,
+            "sha256": "0dd0bfa3c03f4779b81d06aaaab2550784bc21bd74304e35f68145d1d94adb13"
+          },
+          "depends_on": {
+            "chars": 87,
+            "est_tokens": 21,
+            "sha256": "167962bd2f6273eb40344128dc48bb3ec9c7abe03de2d9d11fa7077cdb6c0769"
+          },
+          "existing tests": {
+            "chars": 457,
+            "est_tokens": 114,
+            "sha256": "21c9cdd779a5c8e9ad3158a132d2f59c3a830c56fc7c4607cf9df37a8b068dda"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "1ad7ec421486",
+        "version": "1ad7ec421486",
+        "candidate_known": false,
+        "base": "b1bab215484f",
+        "sources": "task@T-1399 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9345,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "47ed9fa9-abac-4b0c-bff5-e95fea6535b6"
+      }
+    },
+    {
+      "ts": 1790750159.977508,
+      "packet_meta": {
+        "chars": 8606,
+        "est_tokens": 2151,
+        "presented_tokens": 2151,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7ede5437153274c9e11aa67db65a3a71d503dc3a6a056515cfe045de1b1241b3"
+          },
+          "spec": {
+            "chars": 6064,
+            "est_tokens": 1516,
+            "sha256": "85b7df859542e5f5ae4eb5d0aae62a5be4c7ad2666615922bd010facf11d4ff5"
+          },
+          "acceptance": {
+            "chars": 1710,
+            "est_tokens": 427,
+            "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+          },
+          "scope": {
+            "chars": 190,
+            "est_tokens": 47,
+            "sha256": "0dd0bfa3c03f4779b81d06aaaab2550784bc21bd74304e35f68145d1d94adb13"
+          },
+          "depends_on": {
+            "chars": 87,
+            "est_tokens": 21,
+            "sha256": "167962bd2f6273eb40344128dc48bb3ec9c7abe03de2d9d11fa7077cdb6c0769"
+          },
+          "existing tests": {
+            "chars": 457,
+            "est_tokens": 114,
+            "sha256": "21c9cdd779a5c8e9ad3158a132d2f59c3a830c56fc7c4607cf9df37a8b068dda"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "1ad7ec421486",
+        "version": "1ad7ec421486",
+        "candidate_known": false,
+        "base": "b1bab215484f",
+        "sources": "task@T-1399 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 9345,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "47ed9fa9-abac-4b0c-bff5-e95fea6535b6",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790750160.416225,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "risks": [
+          {
+            "path": "orchestrator/merge.py",
+            "issue": "Step 2 pseudocode uses `task.get(\"pipeline\")` but merge.merge's local variable is `t` (from `t = bus.get(task_id)`); `task` is undefined in that scope and a literal transcription raises NameError on the first gate timeout during merge.",
+            "severity": "low",
+            "line": 57
+          }
+        ],
+        "suggested_spec_changes": [
+          "In step 2, change the pipeline-merge expression from `task.get(\"pipeline\")` to `t.get(\"pipeline\")` to match merge.merge's existing local variable name."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790750160.4173691,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/merge.py",
+          "issue": "Step 2 pseudocode uses `task.get(\"pipeline\")` but merge.merge's local variable is `t` (from `t = bus.get(task_id)`); `task` is undefined in that scope and a literal transcription raises NameError on the first gate timeout during merge.",
+          "severity": "low",
+          "line": 57
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 8606,
+    "est_tokens": 2151,
+    "presented_tokens": 2151,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "7ede5437153274c9e11aa67db65a3a71d503dc3a6a056515cfe045de1b1241b3"
+      },
+      "spec": {
+        "chars": 6064,
+        "est_tokens": 1516,
+        "sha256": "85b7df859542e5f5ae4eb5d0aae62a5be4c7ad2666615922bd010facf11d4ff5"
+      },
+      "acceptance": {
+        "chars": 1710,
+        "est_tokens": 427,
+        "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+      },
+      "scope": {
+        "chars": 190,
+        "est_tokens": 47,
+        "sha256": "0dd0bfa3c03f4779b81d06aaaab2550784bc21bd74304e35f68145d1d94adb13"
+      },
+      "depends_on": {
+        "chars": 87,
+        "est_tokens": 21,
+        "sha256": "167962bd2f6273eb40344128dc48bb3ec9c7abe03de2d9d11fa7077cdb6c0769"
+      },
+      "existing tests": {
+        "chars": 457,
+        "est_tokens": 114,
+        "sha256": "21c9cdd779a5c8e9ad3158a132d2f59c3a830c56fc7c4607cf9df37a8b068dda"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 13,
+        "est_tokens": 3,
+        "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+      }
+    },
+    "hash": "1ad7ec421486",
+    "version": "1ad7ec421486",
+    "candidate_known": false,
+    "base": "b1bab215484f",
+    "sources": "task@T-1399 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 9345,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "47ed9fa9-abac-4b0c-bff5-e95fea6535b6",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790749913.5882711,
+  "account": "A",
+  "pid": 3759,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/merge.py",
+      "issue": "Step 2 pseudocode uses `task.get(\"pipeline\")` but merge.merge's local variable is `t` (from `t = bus.get(task_id)`); `task` is undefined in that scope and a literal transcription raises NameError on the first gate timeout during merge.",
+      "severity": "low",
+      "line": 57
+    }
+  ]
+}

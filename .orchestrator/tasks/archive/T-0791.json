@@ -1,0 +1,159 @@
+{
+  "id": "T-0791",
+  "created_at": 1790084043.920213,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P20 Jev privacy boundary: every Jev call site declares what leaves the machine, a central test enforces it, jev.ask refuses undeclared raw payloads",
+  "spec": "Brief .orchestrator/roadmap-context.md P19/P20. Inventory (P0 audit, provenance repo): jev_gate.py:221 (title, spec[:1500], acceptance, scope, role, 20 recent tool calls redacted, proposed input[:300]); jev_route.py:97-120 (redacted spec[:1500], acceptance, scope, complexity, task_class, memory titles[:10]); jev_planner.py:126-138 (state() capped 4000 chars via _clip at :30); jev_sched.py:158-194 (pair titles, scope, spec[:400], reasons, \u22648 pairs); jev_points.py:72-83 (title[:300], spec[:600], scope[:300], evidence with content stripped); jev_rank.py:41 (goal_text NOT redacted by rank itself; caller's job; 40-item batches). jev.ask (jev.py:184-202) redacts the serialized state centrally with jev.redact (KEY/TOKEN/SECRET/PASSWORD assignments and 32+ char hex/base64 runs) and caps at max_state_chars.\nDo:\n1. orchestrator/jev.py: add a BOUNDARY registry: `declare_boundary(site, *, fields, max_chars, raw_source_allowed=False, notes=\"\")` and `BOUNDARIES` dict; ask() gains a required keyword `site` (default None keeps old callers working but logs one warning row via notify and counts it in a module counter `undeclared_calls`); when site is declared, ask() asserts the top-level keys of `state` (when it is a dict) are a subset of the declared fields, and drops (not raises) any undeclared key with a warning, so a code change cannot silently widen the payload. Redaction and cap stay as they are. Never log the payload itself.\n2. Each call site declares its boundary at import time with the fields it actually sends (list them exactly from the current code) and passes site=... to jev.ask: jev_gate (\"gate\"), jev_route (\"route\"), jev_planner (\"planner\"), jev_sched (\"sched\"), jev_points (\"points\"), jev_rank (\"rank\": declare raw_source_allowed=False and apply jev.redact to goal_text and item texts inside rank itself instead of relying on callers; keep the batch size).\n3. Policy hook for P19: `jev.allowed_for_class(data_class)` returning True for PUBLIC and INTERNAL, False for SENSITIVE and SECRET, read from pool.toml `[jev] max_data_class = \"INTERNAL\"` (add the key with a dated comment). ask() takes an optional `data_class` kwarg (default \"INTERNAL\") and returns None without sending when not allowed, recording the refusal in the same counter style. No caller passes SENSITIVE yet; this is the boundary future work must go through.\n4. tests/test_jev_boundary.py (unittest, `import _harness` first): test_every_call_site_declares_boundary (importing the six modules registers six sites and every ask call in their source passes site=; grep the module source for \"jev.ask(\" / \"ask_fn(\" and assert a site kwarg or a declared default), test_ask_drops_undeclared_fields (a fake transport captures the payload; an extra key is absent and a warning was counted), test_ask_refuses_sensitive_class (no transport call, None returned), test_rank_redacts_goal_text (a goal_text containing `API_KEY=abc123...` reaches the fake transport redacted). Use the existing fake-transport pattern from tests/test_jev.py.\n5. docs/context-economy/04-jev-boundary.md (\u226460 lines): table of site \u2192 fields \u2192 caps \u2192 redaction \u2192 mode; the data-class policy; the revert path.\nKeep all current behaviour and existing tests green (tests/test_jev*.py). Do not ask questions; decide and note decisions in the result.",
+  "inputs": [
+    "T-0774"
+  ],
+  "acceptance": [
+    "tests/test_jev_boundary.py::test_every_call_site_declares_boundary passes",
+    "tests/test_jev_boundary.py::test_ask_drops_undeclared_fields passes",
+    "tests/test_jev_boundary.py::test_ask_refuses_sensitive_class passes",
+    "tests/test_jev_boundary.py::test_rank_redacts_goal_text passes",
+    "docs/context-economy/04-jev-boundary.md lists all six sites; existing tests/test_jev*.py stay green; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/jev.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/jev_route.py",
+    "orchestrator/jev_planner.py",
+    "orchestrator/jev_sched.py",
+    "orchestrator/jev_points.py",
+    "orchestrator/jev_rank.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_boundary.py",
+    "docs/context-economy/04-jev-boundary.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0791",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified against T-0774 commit 6ae7183. All six sites (gate, route, planner, sched, points, rank) declare boundaries at import time matching their actual state fields exactly (spot-checked jev_planner.state() line-by-line against its 16 declared fields \u2014 exact match). ask() enforces site+field filtering before redact/truncate, drops undeclared top-level dict keys without mutating caller state, counts undeclared_calls/refused_calls, warns via fixed messages only (no payload/key leakage). allowed_for_class fails closed on unknown data_class or unknown config value. rank.py redacts goal_text and item criteria locally before sending. pool.toml adds max_data_class with dated comment. docs/context-economy/04-jev-boundary.md documents all six sites, caps, redaction, mode, policy, and revert path. Ran full test suite (uv run python -m unittest discover tests): 1036 tests, OK, exit 0 \u2014 includes all four required test_jev_boundary.py tests plus existing test_jev*.py suites, all green. No correctness, security, or scope issues found.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "0a1e4944c142",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790084043.9216871,
+      "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27"
+    },
+    {
+      "ts": 1790084047.5582788,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0791",
+      "claimed_at": 1790084047.557884
+    },
+    {
+      "ts": 1790084047.559774,
+      "account": "B"
+    },
+    {
+      "ts": 1790084048.3005598,
+      "pid": 62065,
+      "account": "B"
+    },
+    {
+      "ts": 1790084375.648036,
+      "status": "done",
+      "result": {
+        "summary": "Verified against T-0774 commit 6ae7183. All six sites (gate, route, planner, sched, points, rank) declare boundaries at import time matching their actual state fields exactly (spot-checked jev_planner.state() line-by-line against its 16 declared fields \u2014 exact match). ask() enforces site+field filtering before redact/truncate, drops undeclared top-level dict keys without mutating caller state, counts undeclared_calls/refused_calls, warns via fixed messages only (no payload/key leakage). allowed_for_class fails closed on unknown data_class or unknown config value. rank.py redacts goal_text and item criteria locally before sending. pool.toml adds max_data_class with dated comment. docs/context-economy/04-jev-boundary.md documents all six sites, caps, redaction, mode, policy, and revert path. Ran full test suite (uv run python -m unittest discover tests): 1036 tests, OK, exit 0 \u2014 includes all four required test_jev_boundary.py tests plus existing test_jev*.py suites, all green. No correctness, security, or scope issues found.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "0a1e4944c142",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790084375.649278,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790084375.740542,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+        "packet_version": "0a1e4944c142",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+      "packet_version": "0a1e4944c142",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+  "claimed_at": 1790084047.557884,
+  "account": "B",
+  "pid": 62065,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "6ae7183eb8df61faafa3e3b6cf18169acfae4f27",
+    "packet_version": "0a1e4944c142",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "0a1e4944c142",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

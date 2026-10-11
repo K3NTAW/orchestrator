@@ -1,0 +1,84 @@
+{
+  "id": "T-0025",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "B1 fix round: codex_available(complexity) and a mirroring legacy sync (review T-0021 request_changes)",
+  "spec": "Why: review T-0021 (sonnet, account B) on B1 commit 361b7ce returned request_changes. Full comment text: read /Users/k3ntaw/code/orchestrator/.orchestrator/tasks/T-0021.json (result.comments). Summary:\n- HIGH pool.py:~213 \u2014 codex_available() probes pick_executor(\"execute\", 1): returns True when any codex executor has headroom at complexity 1, even if the task's real complexity has no eligible executor (e.g. complexity 8 with astra out of budget but luna/terra/sol free). Also the provider check is trivially true because every row is codex.\n- MED pool.py:~204 \u2014 _sync_legacy_codex folds self.codex.running/day_tasks into the matched row with max() only, never assigning down. executor.py builds a fresh Pool() per call, so after executor._run decrements pool.codex.running the row keeps the old maximum; running ratchets up to max_parallel and the executor looks permanently busy.\n\nWhat (2 files: orchestrator/pool.py, tests/test_orchestrator.py; this worktree branches from task/T-0016 so B1's code is present):\n1. `codex_available(self, complexity: int = 1) -> bool`: return True iff pick_executor(\"execute\", complexity) is not None. Keep the default so existing callers (mcp.status, cli, executor.start until B2) work; document that B2 must pass the task's complexity. Drop the redundant provider filter or make it meaningful (provider == \"codex\" of the returned executor only).\n2. `_sync_legacy_codex`: mirror, do not max: set the matched row's running = self.codex.running and day_tasks = max(row.day_tasks, self.codex.day_tasks) only when the day matches (day_tasks is monotonic within a day, running is not). Cooldown: row.cooldown_until = max(row.cooldown_until, self.codex.cooldown_until) and apply the group cooldown when the legacy value is in the future. Add a docstring line saying this bridge is removed by B2.\n3. Tests (class Executors): (a) astra.day_tasks = astra.daily_budget_tasks \u2192 codex_available(8) is False while codex_available(3) is True; (b) legacy sync: set pool.codex.running = 2, save, new Pool() shows astra.running == 2; then pool.codex.running = 0, save, new Pool() shows astra.running == 0 (ratchet regression test); (c) existing Executors tests still pass.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"pool: codex_available takes complexity; legacy codex sync mirrors running instead of ratcheting (review T-0021)\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the two new regression tests",
+    "Pool().codex_available(8) is False when astra is over budget and the 1\u20136 executors are free",
+    "running count on the astra row follows pool.codex.running down as well as up across fresh Pool() instances",
+    "git diff --stat limited to orchestrator/pool.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0025",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed at `5cc7d0b`. All green.\n\n**Summary:** Fixed T-0021's two review findings in `orchestrator/pool.py`:\n1. `codex_available()` now takes a `complexity` param (default 1) and checks `pick_executor(\"execute\", complexity)` against the real band instead of always probing complexity 1, so a busy/exhausted high-complexity executor (astra) is no longer masked by idle low-band ones (luna/terra/sol).\n2. `_sync_legacy_codex` now mirrors `running` directly instead of `max()`-ing it, fixing the ratchet where `executor.py`'s per-call fresh `Pool()` could never bring the row's `running` back down. `day_tasks` stays maxed within the same day (still monotonic there).\n\n**Files changed:** `orchestrator/pool.py`, `tests/test_orchestrator.py` (matches scope exactly).\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2014 30 tests, all pass, no failures. New regression tests `test_codex_available_respects_complexity` and `test_legacy_running_syncs_down_not_just_up` both pass. `tests_green.sh` gate also exits 0.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789658453.741915,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789658453.746628,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0025",
+      "claimed_at": 1789658453.74646
+    },
+    {
+      "ts": 1789658453.7552052,
+      "pid": 20548,
+      "account": "A"
+    },
+    {
+      "ts": 1789658573.8157911,
+      "status": "done",
+      "result": {
+        "summary": "Committed at `5cc7d0b`. All green.\n\n**Summary:** Fixed T-0021's two review findings in `orchestrator/pool.py`:\n1. `codex_available()` now takes a `complexity` param (default 1) and checks `pick_executor(\"execute\", complexity)` against the real band instead of always probing complexity 1, so a busy/exhausted high-complexity executor (astra) is no longer masked by idle low-band ones (luna/terra/sol).\n2. `_sync_legacy_codex` now mirrors `running` directly instead of `max()`-ing it, fixing the ratchet where `executor.py`'s per-call fresh `Pool()` could never bring the row's `running` back down. `day_tasks` stays maxed within the same day (still monotonic there).\n\n**Files changed:** `orchestrator/pool.py`, `tests/test_orchestrator.py` (matches scope exactly).\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2014 30 tests, all pass, no failures. New regression tests `test_codex_available_respects_complexity` and `test_legacy_running_syncs_down_not_just_up` both pass. `tests_green.sh` gate also exits 0.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789658610.537243,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "5cc7d0b60f4373aa5a4155270cbbe53de85d7f5c"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789658453.74646,
+  "pid": 20548,
+  "account": "A",
+  "merged_into": "goal/T-0005",
+  "sha": "5cc7d0b60f4373aa5a4155270cbbe53de85d7f5c"
+}

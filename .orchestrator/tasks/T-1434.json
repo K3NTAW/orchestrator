@@ -1,0 +1,210 @@
+{
+  "id": "T-1434",
+  "created_at": 1790872035.726838,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "Remove the Codex gates: fallback mode only with an enabled codex row, requeue not hold without one, free_slots caps Claude rows by max_parallel_claude_workers, executed_by from the row provider",
+  "spec": "Goal T-1403, wave 2, plan label B2. With Codex cancelled the pool is Claude-only (codex rows disabled\nin the live pool.toml). Today the daemon and executor still treat 'no Codex' as an outage.\n\nFacts (main 355583c):\n- orchestrator/daemon.py:459-464 _codex_available(pool) is true when ANY enabled execute row (Claude rows\n  included) is not cooling; daemon.py:467-471 _fallback_mode(pool) = not _codex_available and\n  cfg.codex.on_exhausted == 'fallback_claude'. With only Claude rows, all cooling, it reports fallback mode.\n- daemon.py:488-503 free_slots(): outside fallback mode returns sum(max_parallel - running) over every enabled\n  execute row that is not cooling (Claude rows included, uncapped: 3 + 2 = 5 > max_parallel_claude_workers 4,\n  pool.toml [limits]); only fallback mode applies the cap via running_claude_workers (474-478) and\n  inflight_claude_dispatches (481-485).\n- daemon.py:697-707 eligible() and 906-908/929-930 dispatch() use fallback/fallback_tier: unchanged contract,\n  they only follow _fallback_mode.\n- daemon.py:1943-1945 notifies 'Executor (Codex) cooling; execute tasks held' whenever not\n  pool.codex_available() and pool.codex.cooling(), regardless of whether any codex row is enabled.\n- daemon.py:397 (reconcile_dead orphan re-gate) posts executed_by = t.get('executor') or 'claude:<tier>', so a\n  codex task gets a bare 'astra' while executor.py:324 and :678 and daemon.py:576/:647 post 'codex:<id>'.\n- orchestrator/executor.py:487-496 start(): a Claude row -> _exhausted(pool, t, tier=...); ex None ->\n  _exhausted(pool, t). executor.py:545-597 _exhausted(): when not routed it reads pool.cfg['codex']['on_exhausted']\n  (551, KeyError without [codex]) and HOLDS the task 'codex unavailable; policy=...; no Claude fallback for\n  complexity N' (553-555) when no fallback tier applies. The requeue shape already exists at 559-566\n  (status queued, pipeline.hold_note 'claude_capacity', dispatched_at popped).\n\nChange:\n1. daemon.py: add a helper returning the enabled execute-role rows with provider 'codex'. _fallback_mode(pool) is\n   True only when that list is non-empty, every row in it is cooling, and on_exhausted == 'fallback_claude' (read\n   with .get and default 'hold'). _codex_available keeps its name but counts only codex rows.\n2. free_slots(pool): fallback mode unchanged. Otherwise codex_slots = free parallelism of non-cooling enabled codex\n   rows; claude_slots = min(free parallelism of non-cooling enabled Claude execute rows,\n   max(0, max_parallel_claude_workers - running_claude_workers(pool) - inflight_claude_dispatches())); return\n   codex_slots + claude_slots. Keep the [limits] default of 4 when the table is missing.\n3. daemon.py:1943: the Codex cooling notice fires only when at least one codex row is enabled.\n4. executed_by from the row provider: add executor.executed_by(task, cfg) -> str: executor field naming a codex row\n   -> 'codex:<id>'; a 'claude:<tier>' executor -> itself; no executor -> 'claude:<tier>' (use\n   pool.executor_identity(field, cfg) for the provider). Use it at daemon.py:397 and keep 'codex:<id>' output at\n   executor.py:324/678 and daemon.py:576/647 (route those through the helper too if trivial).\n5. executor._exhausted(): read the policy with pool.cfg.get('codex', {}).get('on_exhausted', 'hold'). When not\n   routed (tier None on entry) and no enabled codex row exists, requeue exactly like 559-566 (status queued,\n   hold_note 'claude_capacity', pop dispatched_at, no hold_reason) and return {'status': 'claude_capacity',\n   'reason': 'no eligible executor'}; never hold in that case. With an enabled codex row the legacy path (policy\n   fallback tier or the 'codex unavailable' hold) is unchanged.\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract):\n- tests/test_executor.py claude_pool() (~388-400) builds cfg['executors'] = [claude:opus] only, so these tests rely\n  on the legacy fallback with NO codex row and change meaning under rule 5:\n  test_complexity_nine_fallback_still_held (expects the 'codex unavailable ... complexity 9' hold),\n  test_claude_dispatch_below_cap_dispatches (expects fallback tier sonnet),\n  test_claude_dispatch_requeues_at_worker_cap (expects reason 'claude workers at cap'). Give claude_pool an\n  option to add one enabled, cooling codex row and use it in these three so they keep testing the legacy path;\n  the new acceptance test covers the Claude-only path.\n- tests/test_daemon.py free_slots/fallback tests (~2109-2195: test_free_slots_uses_claude_capacity_under_fallback,\n  test_free_slots_zero_under_hold_policy, test_free_slots_subtracts_running_claude_executes,\n  test_daemon_once_dispatches_under_fallback_when_codex_cooling, test_saturated_codex_returns_zero_not_fallback,\n  test_fallback_counts_running_claude_roles_and_inflight_dispatches, test_fallback_skips_complexity_without_tier,\n  test_free_slots_survives_missing_cfg_tables) run on the harness pool.toml, which keeps codex rows and strips\n  Claude rows (tests/_harness.py), so they should pass unchanged; if one fails, update it to the new contract,\n  never weaken the cap.\n- tests/test_daemon.py::test_dispatch_worker_posts_codex_done (~3770) pins executed_by 'codex:astra': must stay.\n\nOut of scope: pool.py (B1), spawn.py (B4), mcp.py/tool_catalog.py (B3), concurrency.py/speculation.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_claude_only_pool_never_enters_fallback_and_caps_free_slots: passes: with every codex row disabled and enabled claude:sonnet (max_parallel 3) and claude:opus (max_parallel 2) rows, _fallback_mode(pool) is False, free_slots(pool) == min(5, max_parallel_claude_workers - running Claude workers - in-flight dispatches) (4 with the shipped cap and nothing running, 1 with three running), and a daemon tick with every Codex row disabled sends no 'Codex cooling' notice",
+    "tests/test_executor.py::test_no_codex_row_requeues_instead_of_holding: passes: executor.start on a pool whose executors are only Claude rows, with pick_executor returning None, leaves the task queued with pipeline.hold_note 'claude_capacity', no dispatched_at and no hold_reason, returns status 'claude_capacity', and does not raise when pool.cfg has no [codex] table",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "B2",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790872059.6928482,
+      "pipeline": {
+        "first_ready_at": 1790872059.692805
+      }
+    },
+    {
+      "ts": 1790872060.184417,
+      "pipeline": {
+        "first_ready_at": 1790872059.692805,
+        "spec_review_at": 1790872060.1843698,
+        "spec_review_at_lease": 1790872960.1843698
+      }
+    },
+    {
+      "ts": 1790872060.194394,
+      "pipeline": {
+        "first_ready_at": 1790872059.692805,
+        "spec_review_at": 1790872060.1843698,
+        "spec_review_at_lease": 1790872960.1843698,
+        "spec_review_at_done": 1790872060.194278
+      }
+    },
+    {
+      "ts": 1790872180.329345,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Rule 5 requeues every unrouted no-executor case as claude_capacity with no bound and no signal. A complexity outside every row's band, all rows disabled or all rows cooling would re-dispatch every tick and never surface. It used to be held visibly.",
+          "severity": "high",
+          "line": 545
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "claude_slots subtracts inflight_claude_dispatches(), which also counts Codex-bound dispatches. In a mixed pool, Claude capacity is under-reported while codex_slots is added separately.",
+          "severity": "med",
+          "line": 481
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The mixed pool (non-cooling codex plus Claude rows) sums both slot counts, but pick_executor assigns tasks to rows later. No acceptance test covers this case.",
+          "severity": "med",
+          "line": 488
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "executor.executed_by does not say what to return for an unknown or stale executor field, such as the bare 'astra' already on tasks, or for a codex task with no executor field. The spec also does not confirm a pool or cfg is in scope at daemon.py:397.",
+          "severity": "med",
+          "line": 397
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The 'no Codex cooling notice' check passes against the old code unless the test cools the legacy pool.codex while every codex row is disabled.",
+          "severity": "low",
+          "line": 1943
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "The harness strips Claude rows, so the acceptance test has to build the fixture by hand. The 'three running' case needs bus tasks with executor 'claude:sonnet' or 'claude:opus', because the row's running count is derived from the executor id.",
+          "severity": "low",
+          "line": 2109
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "No rollback path or decisions.md entry. If a live pool.toml loses its codex rows by mistake, fallback silently turns off.",
+          "severity": "low",
+          "line": 467
+        }
+      ]
+    },
+    {
+      "ts": 1790872217.895413,
+      "pipeline": {
+        "first_ready_at": 1790872059.692805,
+        "spec_review_at": 1790872060.1843698,
+        "spec_review_at_lease": 1790872960.1843698,
+        "spec_review_at_done": 1790872060.194278,
+        "spec_review_held_at": 1790872217.895147
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790872245.117126,
+      "pipeline": {
+        "first_ready_at": 1790872059.692805,
+        "spec_review_at": 1790872060.1843698,
+        "spec_review_at_lease": 1790872960.1843698,
+        "spec_review_at_done": 1790872060.194278,
+        "spec_review_held_at": 1790872217.895147,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790872247.562596,
+      "pipeline": {
+        "first_ready_at": 1790872059.692805,
+        "spec_review_at": 1790872060.1843698,
+        "spec_review_at_lease": 1790872960.1843698,
+        "spec_review_at_done": 1790872060.194278,
+        "spec_review_held_at": 1790872217.895147,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790872217.895413": true
+        }
+      }
+    },
+    {
+      "ts": 1790874133.774465,
+      "status": "superseded",
+      "reason": "respec as B2v2 T-1451 after spec review T-1444 request_changes (bounded requeue vs visible hold, mixed-pool test, executed_by rules, cooling-notice test)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790872059.692805,
+    "spec_review_at": 1790872060.1843698,
+    "spec_review_at_lease": 1790872960.1843698,
+    "spec_review_at_done": 1790872060.194278,
+    "spec_review_held_at": 1790872217.895147,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790872217.895413": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Rule 5 requeues every unrouted no-executor case as claude_capacity with no bound and no signal. A complexity outside every row's band, all rows disabled or all rows cooling would re-dispatch every tick and never surface. It used to be held visibly.",
+      "severity": "high",
+      "line": 545
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "claude_slots subtracts inflight_claude_dispatches(), which also counts Codex-bound dispatches. In a mixed pool, Claude capacity is under-reported while codex_slots is added separately.",
+      "severity": "med",
+      "line": 481
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The mixed pool (non-cooling codex plus Claude rows) sums both slot counts, but pick_executor assigns tasks to rows later. No acceptance test covers this case.",
+      "severity": "med",
+      "line": 488
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "executor.executed_by does not say what to return for an unknown or stale executor field, such as the bare 'astra' already on tasks, or for a codex task with no executor field. The spec also does not confirm a pool or cfg is in scope at daemon.py:397.",
+      "severity": "med",
+      "line": 397
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The 'no Codex cooling notice' check passes against the old code unless the test cools the legacy pool.codex while every codex row is disabled.",
+      "severity": "low",
+      "line": 1943
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "The harness strips Claude rows, so the acceptance test has to build the fixture by hand. The 'three running' case needs bus tasks with executor 'claude:sonnet' or 'claude:opus', because the row's running count is derived from the executor id.",
+      "severity": "low",
+      "line": 2109
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "No rollback path or decisions.md entry. If a live pool.toml loses its codex rows by mistake, fallback silently turns off.",
+      "severity": "low",
+      "line": 467
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "respec as B2v2 T-1451 after spec review T-1444 request_changes (bounded requeue vs visible hold, mixed-pool test, executed_by rules, cooling-notice test)"
+}

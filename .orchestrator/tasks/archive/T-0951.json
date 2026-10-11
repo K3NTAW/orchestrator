@@ -1,0 +1,157 @@
+{
+  "id": "T-0951",
+  "created_at": 1790119045.2370958,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S8: learned skill proposals: detect repeated successful procedures across tasks, synthesise an evidence-backed draft skill into the quarantine store (never active), with source tasks, counterexamples and confidence; one-off behaviour never becomes a candidate (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P20, P21, P22 (version on change), P36 learned-skills tests (P37 stage 8). Depends on T-0938 (skill_scorecard.usage_rows with lineage outcomes and dimensions) and T-0884 (discovery store STATE/skills/discovered.json + quarantine dir, provenance_info, inspect gate). Facts: run rows carry role, task, skills_used, context (packet sections), outcome; the Jev gate log carries per-call tool/tool_target per task; memory holds dated decisions and gotchas; the Planner writes specs with recurring instruction sentences; fix rounds carry failure kinds.\nDo:\n1. orchestrator/skill_learning.py (new). `patterns(root, since_s=None, min_support=3)` mines three deterministic sources: (a) tool-call sequences per task from the gate log (tool + normalised target: path stem, script path, command verb) collapsed into an ordered signature per role; (b) recurring instruction sentences across execute/scout/review specs (sentences \u2265 8 words appearing in \u2265 min_support distinct tasks, case-folded); (c) recurring fix strategies (fix-round specs whose Planner note or failure kind repeats). A pattern qualifies only when it appears in \u2265 min_support distinct tasks of which \u2265 80% reached merged/accepted; each pattern records support tasks, success count, failures (tasks where it appeared and the lineage failed: the counterexamples), roles, task classes, and confidence = successes / support capped by min(1, support / 10).\n2. `propose(pattern, root)` synthesises a draft SKILL.md in the P6 structure (Trigger from the task classes and title keywords of the support tasks; Objective from the shared spec sentence; Procedure from the tool sequence rendered as steps; Tools from the sequence; Evidence requirements from the packet sections those tasks used most; Output contract from the role's result shape; Stop conditions and Failure/recovery from the fix-round evidence) plus frontmatter provenance \"learned\" and a `provenance_info` block {source_tasks, successes, failures, procedure_signature, confidence, synthesised_at}. The draft is written ONLY to STATE/skills/quarantine/learned/<slug>/SKILL.md and registered in discovered.json with state \"discovered\" then \"quarantined\" (P2 transitions with reason \"learned proposal\"), never under skills/ and never active; the inspect gate (T-0884) applies before any transition into testing. A proposal is refused (reason recorded) when support < min_support or confidence < 0.6.\n3. Re-proposal and versions: proposing the same procedure_signature again updates the existing learned record (history entry, new content_hash version) instead of creating a duplicate; a pattern whose later evidence drops below the thresholds marks the record \"stale evidence\" in history.\n4. CLI: `orchestrator skills learn [--since 30d] [--min-support 3] [--propose]` lists qualifying patterns; with --propose writes the drafts and prints the ids. `orchestrator skills show <id>` renders the draft with its evidence block.\n5. docs/skill-intelligence/09-learned.md (\u226470 lines): the three pattern sources, thresholds, what a draft contains, the path to shadow/active (inspect \u2192 testing \u2192 S10 promotion), what is never automatic, revert path (delete the quarantine folder entries).\nTests (unittest, `import _harness` first; fixtures seed gate rows, specs and run rows in the harness root): tests/test_skill_learning.py::test_repeated_successful_sequence_becomes_pattern_with_support_and_counterexamples, ::test_one_off_behaviour_never_qualifies, ::test_propose_writes_quarantined_draft_never_active (draft under the quarantine dir; skills_registry.candidates never returns it; state quarantined), ::test_reproposal_updates_version_not_duplicate, ::test_low_confidence_refused_with_reason, ::test_cli_learn_lists_and_proposes. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 08:30) after spec review T-0949 (request_changes), binding on top of v1:\n- Confidence = successes / support (a fully successful pattern at the default min_support 3 scores 1.0 and clears the 0.6 bar); evidence strength = min(1, support / 10) is a SEPARATE reported field used only for ordering and shown in the draft's evidence block, never for refusal.\n- Persistence: propose() uses a dedicated write path in skill_learning.py (`_store_learned(record)`) that writes to discovered.json with provenance \"learned\"; skill_discovery._store's dedup lookup guards the source_repo/source_path read (records without them are skipped by that dedup), and learned dedup is by procedure_signature only. Test: tests/test_skill_learning.py::test_learned_records_coexist_with_external_records_in_store.\n- CLI: reuse the existing `orchestrator skills show <id>` (it dumps the record incl. provenance_info, which carries the evidence block); no new subparser. The learned-specific listing is `orchestrator skills learn` only.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_skill_learning.py::test_repeated_successful_sequence_becomes_pattern_with_support_and_counterexamples passes",
+    "tests/test_skill_learning.py::test_one_off_behaviour_never_qualifies passes",
+    "tests/test_skill_learning.py::test_propose_writes_quarantined_draft_never_active passes",
+    "tests/test_skill_learning.py::test_reproposal_updates_version_not_duplicate passes",
+    "tests/test_skill_learning.py::test_low_confidence_refused_with_reason passes",
+    "tests/test_skill_learning.py::test_cli_learn_lists_and_proposes passes",
+    "docs/skill-intelligence/09-learned.md exists; `uv run orchestrator skills learn` runs; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_learning.py::test_learned_records_coexist_with_external_records_in_store passes"
+  ],
+  "scope": [
+    "orchestrator/skill_learning.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    "tests/test_skill_learning.py",
+    "docs/skill-intelligence/09-learned.md"
+  ],
+  "depends_on": [
+    "T-0938"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790119069.997442,
+      "pipeline": {
+        "first_ready_at": 1790119069.997407
+      }
+    },
+    {
+      "ts": 1790119070.054671,
+      "pipeline": {
+        "first_ready_at": 1790119069.997407,
+        "spec_review_at": 1790119070.054626,
+        "spec_review_at_lease": 1790119970.054626
+      }
+    },
+    {
+      "ts": 1790119070.0609658,
+      "pipeline": {
+        "first_ready_at": 1790119069.997407,
+        "spec_review_at": 1790119070.054626,
+        "spec_review_at_lease": 1790119970.054626,
+        "spec_review_at_done": 1790119070.060752
+      }
+    },
+    {
+      "ts": 1790119300.890063,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/skills_registry.py",
+          "issue": "SPEC v2 says propose() persists learned drafts via a dedicated `_store_learned(record)` path that writes only to discovered.json, bypassing skill_discovery._store(). But skills_registry.transition(skill_id, ...) (line 321) raises KeyError unless skill_id already exists in the state.json states document, and _store() is the only place that currently seeds that states entry (skill_discovery.py line 247, `states.setdefault(skill_id, ...)`). The base spec explicitly requires the discovered\u2192quarantined move to be 'P2 transitions with reason \"learned proposal\"' (P2 in roadmap-skills.md requires transitions be 'observable and reversible', i.e. go through transition()/rollback()). If `_store_learned` only writes discovered.json without also seeding a matching state.json entry, the quarantine transition call will crash with KeyError, or the implementer will silently skip the standard transition/history/rollback machinery, contradicting P2.",
+          "severity": "high",
+          "line": 321
+        },
+        {
+          "path": "tests/test_skill_discovery.py",
+          "issue": "Packet's 'existing tests' table lists tests/test_skill_discovery.py and tests/test_skills_registry.py as 'missing', but both already exist (255 and 98 lines respectively) and already exercise skill_discovery._store and skills_registry.transition/rollback, which this spec modifies (the _store dedup-guard change). tests-green.sh runs the full `unittest discover tests` suite so a regression would still be caught, but the wrong table could lead the executor to misjudge existing coupling/coverage around _store's dedup lookup and skip checking these suites explicitly before making the change.",
+          "severity": "low",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "ts": 1790119317.0066,
+      "pipeline": {
+        "first_ready_at": 1790119069.997407,
+        "spec_review_at": 1790119070.054626,
+        "spec_review_at_lease": 1790119970.054626,
+        "spec_review_at_done": 1790119070.060752,
+        "spec_review_held_at": 1790119317.0065532
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790119318.828379,
+      "pipeline": {
+        "first_ready_at": 1790119069.997407,
+        "spec_review_at": 1790119070.054626,
+        "spec_review_at_lease": 1790119970.054626,
+        "spec_review_at_done": 1790119070.060752,
+        "spec_review_held_at": 1790119317.0065532,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790119319.1959062,
+      "pipeline": {
+        "first_ready_at": 1790119069.997407,
+        "spec_review_at": 1790119070.054626,
+        "spec_review_at_lease": 1790119970.054626,
+        "spec_review_at_done": 1790119070.060752,
+        "spec_review_held_at": 1790119317.0065532,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790119317.0066": true
+        }
+      }
+    },
+    {
+      "ts": 1790119371.3196611,
+      "status": "failed",
+      "reason": "superseded 08:55 by T-0954 (v3, Planner-approved)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790119069.997407,
+    "spec_review_at": 1790119070.054626,
+    "spec_review_at_lease": 1790119970.054626,
+    "spec_review_at_done": 1790119070.060752,
+    "spec_review_held_at": 1790119317.0065532,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790119317.0066": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/skills_registry.py",
+      "issue": "SPEC v2 says propose() persists learned drafts via a dedicated `_store_learned(record)` path that writes only to discovered.json, bypassing skill_discovery._store(). But skills_registry.transition(skill_id, ...) (line 321) raises KeyError unless skill_id already exists in the state.json states document, and _store() is the only place that currently seeds that states entry (skill_discovery.py line 247, `states.setdefault(skill_id, ...)`). The base spec explicitly requires the discovered\u2192quarantined move to be 'P2 transitions with reason \"learned proposal\"' (P2 in roadmap-skills.md requires transitions be 'observable and reversible', i.e. go through transition()/rollback()). If `_store_learned` only writes discovered.json without also seeding a matching state.json entry, the quarantine transition call will crash with KeyError, or the implementer will silently skip the standard transition/history/rollback machinery, contradicting P2.",
+      "severity": "high",
+      "line": 321
+    },
+    {
+      "path": "tests/test_skill_discovery.py",
+      "issue": "Packet's 'existing tests' table lists tests/test_skill_discovery.py and tests/test_skills_registry.py as 'missing', but both already exist (255 and 98 lines respectively) and already exercise skill_discovery._store and skills_registry.transition/rollback, which this spec modifies (the _store dedup-guard change). tests-green.sh runs the full `unittest discover tests` suite so a regression would still be caught, but the wrong table could lead the executor to misjudge existing coupling/coverage around _store's dedup lookup and skip checking these suites explicitly before making the change.",
+      "severity": "low",
+      "line": 1
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 08:55 by T-0954 (v3, Planner-approved)"
+}

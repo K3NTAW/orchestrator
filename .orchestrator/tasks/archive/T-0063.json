@@ -1,0 +1,88 @@
+{
+  "id": "T-0063",
+  "parent": "T-0043",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "Daemon autostarts with the orchestrator MCP server; single-instance lock; skips tasks of closed goals",
+  "spec": "Why: the pipeline daemon (T-0050/T-0056) had to be started by hand in a second terminal. The orchestrator MCP server already starts and dies with every `f orch` session, so it should own the daemon loop. Also the first `daemon --once` smoke run acted on tasks of an already-closed goal (T-0020 re-merge, T-0016 stale notify).\n\nWhat (5 files: orchestrator/daemon.py, orchestrator/mcp.py, .orchestrator/pool.toml, tests/test_daemon.py, README.md; worktree off goal/T-0043):\n1. pool.toml: add\n```\n[daemon]\nautostart = true   # the orchestrator MCP server starts the pipeline loop in a background thread; ORCH_DAEMON=0 overrides\ninterval_s = 30\n```\n2. daemon.py: `def acquire_lock() -> file|None` \u2014 non-blocking fcntl.flock on STATE/daemon.lock; None if another daemon holds it. `def start_background(cfg: dict, env=os.environ) -> threading.Thread|None`: returns None when cfg.get(\"daemon\", {}).get(\"autostart\", False) is false, or env.get(\"ORCH_DAEMON\") == \"0\", or the lock is held; otherwise starts a daemon Thread running main(interval) that keeps the lock for its lifetime, logs one stderr line \"[daemon] autostarted (pid N)\", and returns the thread. `main()` (CLI path) also acquires the lock and exits with a stderr message if another instance runs. Guard in tick(): skip any task whose parent task exists and has status done (closed goal), and skip tasks with no parent unless role == execute and status queued (top-level goals are containers). Keep everything else from T-0056.\n3. mcp.py: after the Pool import and before `srv.run()` (module level or in a `main()` guarded by `if __name__ == \"__main__\"`), call `daemon.start_background(Pool().cfg)`; store the thread on a module global for introspection; never let a failure there stop the MCP server (try/except \u2192 stderr).\n4. tests/test_daemon.py: (a) start_background with autostart false \u2192 None; (b) env ORCH_DAEMON=0 \u2192 None; (c) autostart true \u2192 returns a Thread that is alive; then a second start_background \u2192 None because the lock is held (release via the thread's lock handle or a helper `stop_background()` for tests; keep main's loop interruptible via a threading.Event so the test does not hang); (d) tick() skips a queued execute task whose parent goal is done (monkeypatched executor.start not called) but dispatches one whose parent is not done.\n5. README Pipeline section: one sentence: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart`; `ORCH_DAEMON=0` or `autostart = false` disables it; `uv run orchestrator daemon` takes the same lock so two loops never run.\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"daemon: autostart inside the MCP server behind a single-instance lock; skip tasks of closed goals\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the four new tests",
+    "start_background returns None when autostart is false, when ORCH_DAEMON=0, or when the lock is held; otherwise an alive Thread",
+    "importing orchestrator.mcp with ORCH_DAEMON=0 starts no thread; without it and autostart true, exactly one daemon thread starts",
+    "tick() never touches tasks whose parent goal is done",
+    "git diff --stat limited to orchestrator/daemon.py, orchestrator/mcp.py, .orchestrator/pool.toml, tests/test_daemon.py, README.md"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/mcp.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py",
+    "README.md"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0063",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean.\n\n## Summary\n\nImplemented T-0063: the orchestrator MCP server now autostarts the pipeline daemon in a background thread, and `tick()` no longer touches tasks belonging to an already-closed goal.\n\n**orchestrator/daemon.py**\n- `stale(t)`: skip a task if its parent goal task exists and is `done`, or if it's parentless and not itself a queued execute task. Applied as the first check in `dispatch()`, `gate()`, and `merge_reviewed()`.\n- `acquire_lock()`: non-blocking `fcntl.flock` on `STATE/daemon.lock`; returns the file handle or `None` if held.\n- `_loop(interval, stop_event)`: the tick loop, now interruptible via `threading.Event.wait` instead of `time.sleep`.\n- `start_background(cfg, env=os.environ)`: returns `None` when `autostart` is false, `ORCH_DAEMON=0`, or the lock is held; otherwise starts and returns a daemon `Thread`, logging `[daemon] autostarted (pid N)`.\n- `stop_background(thread)`: test helper to signal and join a background thread, releasing the lock.\n- `main()`: CLI path now also acquires the lock itself and exits with a stderr message if another instance holds it (`--once` bypasses locking, unchanged single-pass behavior).\n\n**orchestrator/mcp.py** \u2014 calls `daemon.start_background(Pool().cfg)` at module level, storing the thread on `daemon_thread`; wrapped in try/except so a failure never blocks the server from starting.\n\n**.orchestrator/pool.toml** \u2014 added `[daemon]` section (`autostart = true`, `interval_s = 30`).\n\n**tests/test_daemon.py** \u2014 5 new tests: `start_background` returns `None` for autostart-false / no `[daemon]` section / `ORCH_DAEMON=0`; autostart-true returns a live thread and blocks a second `start_background` until `stop_background` releases the lock; `tick()` skips a queued execute task whose parent goal is `done` but dispatches one whose parent isn't.\n\n**README.md** \u2014 one-sentence update to the Pipeline section describing autostart/`ORCH_DAEMON=0`/the shared lock.\n\nTest output: `uv run python -m unittest discover -q tests` \u2192 **86 tests, OK**. `.claude/hooks/tests-green.sh` (the actual gate script; `scripts/tests_green.sh` named in the task doesn't exist in this repo) \u2192 exit 0, no failures.\n\n`git diff --stat` is limited to exactly the 5 scoped files. Committed on `task/T-0063` as `34e9e5d`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789678764.233879,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789678764.23738,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0063",
+      "claimed_at": 1789678764.237277
+    },
+    {
+      "ts": 1789678764.2454941,
+      "pid": 73572,
+      "account": "B"
+    },
+    {
+      "ts": 1789679072.6257658,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean.\n\n## Summary\n\nImplemented T-0063: the orchestrator MCP server now autostarts the pipeline daemon in a background thread, and `tick()` no longer touches tasks belonging to an already-closed goal.\n\n**orchestrator/daemon.py**\n- `stale(t)`: skip a task if its parent goal task exists and is `done`, or if it's parentless and not itself a queued execute task. Applied as the first check in `dispatch()`, `gate()`, and `merge_reviewed()`.\n- `acquire_lock()`: non-blocking `fcntl.flock` on `STATE/daemon.lock`; returns the file handle or `None` if held.\n- `_loop(interval, stop_event)`: the tick loop, now interruptible via `threading.Event.wait` instead of `time.sleep`.\n- `start_background(cfg, env=os.environ)`: returns `None` when `autostart` is false, `ORCH_DAEMON=0`, or the lock is held; otherwise starts and returns a daemon `Thread`, logging `[daemon] autostarted (pid N)`.\n- `stop_background(thread)`: test helper to signal and join a background thread, releasing the lock.\n- `main()`: CLI path now also acquires the lock itself and exits with a stderr message if another instance holds it (`--once` bypasses locking, unchanged single-pass behavior).\n\n**orchestrator/mcp.py** \u2014 calls `daemon.start_background(Pool().cfg)` at module level, storing the thread on `daemon_thread`; wrapped in try/except so a failure never blocks the server from starting.\n\n**.orchestrator/pool.toml** \u2014 added `[daemon]` section (`autostart = true`, `interval_s = 30`).\n\n**tests/test_daemon.py** \u2014 5 new tests: `start_background` returns `None` for autostart-false / no `[daemon]` section / `ORCH_DAEMON=0`; autostart-true returns a live thread and blocks a second `start_background` until `stop_background` releases the lock; `tick()` skips a queued execute task whose parent goal is `done` but dispatches one whose parent isn't.\n\n**README.md** \u2014 one-sentence update to the Pipeline section describing autostart/`ORCH_DAEMON=0`/the shared lock.\n\nTest output: `uv run python -m unittest discover -q tests` \u2192 **86 tests, OK**. `.claude/hooks/tests-green.sh` (the actual gate script; `scripts/tests_green.sh` named in the task doesn't exist in this repo) \u2192 exit 0, no failures.\n\n`git diff --stat` is limited to exactly the 5 scoped files. Committed on `task/T-0063` as `34e9e5d`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789679111.780119,
+      "status": "done",
+      "merged_into": "goal/T-0043",
+      "sha": "34e9e5d564fab8032c1a6850aa30c97a215e0e92"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789678764.237277,
+  "pid": 73572,
+  "account": "B",
+  "merged_into": "goal/T-0043",
+  "sha": "34e9e5d564fab8032c1a6850aa30c97a215e0e92"
+}

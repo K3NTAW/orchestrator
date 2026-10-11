@@ -1,0 +1,156 @@
+{
+  "id": "T-0411",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 3,
+  "title": "H4 fix round 7: drop the dispatch-side pre-reservation and placeholder account ids; the run that actually starts (executor.start for Codex, spawn.run_worker for Claude) reserves for exactly its executor or account and releases in its own finally; dispatch only checks slots (review T-0409)",
+  "spec": "STEP 0: the worktree must contain the T-0362 lineage through 43ab83f (T-0408) in git log; never drop or amend them.\nReview T-0409 on T-0408, one high finding: daemon.dispatch defaults account_id to the placeholder strings \"codex\" or \"claude\" when pick_executor or pick returns None; the placeholder flows into executor.start(executor_id=\"codex\"), which is not a real executor key, then into _exhausted(account_id=\"codex\"), where a truthy account_id makes it look up an account literally named codex instead of falling back to pool.pick(\"execute\"), so the fallback path breaks. This is the seventh defect in the dispatch-to-worker reservation hand-off; the Planner decision is to remove the hand-off rather than patch it again.\nDesign (simplify): (1) daemon.dispatch no longer reserves and no longer picks an account or executor for the worker; it checks free_slots as before, stamps dispatched_at, and calls the worker with the task id only (the T-0400 backward-compatible signature stays, the optional executor argument is simply not passed). (2) The run that actually starts owns the reservation: executor.start reserves for the executor it selected (real executor id) immediately after selection and releases in its finally on every path except the fallback hand-off, where ownership passes to spawn.run_worker exactly as T-0404 arranged; spawn.run_worker reserves for the account it selected (real account id) when it did not inherit one and releases in its finally. A refused reservation inside the worker leaves the task queued with pipeline.hold_note budget and clears dispatched_at so the next tick can retry (no hold_reason, no fix round). (3) No placeholder ids anywhere: grep for the literals \"codex\" and \"claude\" used as account ids in daemon.py and executor.py shows none. (4) Keep the reservation ledger, estimate rule, lease sweep, notify-per-transition and goal-budget semantics from the lineage unchanged.\nTests: replace test_reservation_owner_matches_running_executor with the same assertion driven through the new flow (the reservation's owner is the executor or account that ran); add tests/test_daemon.py::test_dispatch_passes_no_placeholder_ids (pick returns None: dispatch still calls the worker with the task id only and no account_id argument) and tests/test_executor.py::test_worker_refusal_requeues_without_hold (reserve refused inside the worker: task queued, hold_note budget, dispatched_at cleared). Keep every other lineage test green: test_parallel_reservations_cannot_exceed_daily_budget, test_expired_lease_with_live_pid_still_counts, test_release_reconciles_estimate_with_actual, test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap, test_two_parallel_execute_dispatches_allowed_without_goal_budget, test_estimate_never_zero_without_history, test_budget_refusal_leaves_task_queued_without_repair (adapt its trigger point to the worker), test_notify_once_per_transition, test_depends_on_gates_dispatch, test_failed_dispatch_stamp_releases_reservation (now trivially: dispatch holds no reservation; keep or retire with a comment), test_exhausted_hold_releases_dispatch_reservation (adapt: the worker's own reservation is released on the exhausted hold), test_fallback_handoff_keeps_reservation_until_worker_finishes, test_refused_or_exception_path_releases_immediately, test_fallback_claude_when_codex_cooling. Run .claude/hooks/tests-green.sh from the worktree root twice (exit 0 both), then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0408",
+    "T-0409",
+    "T-0397"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 43ab83f and the rest of the T-0362 lineage below your commit",
+    "grep of orchestrator/daemon.py and orchestrator/executor.py shows no account_id or executor_id defaulted to the literal strings codex or claude, and dispatch calls no reserve",
+    "tests/test_daemon.py::test_dispatch_passes_no_placeholder_ids and tests/test_executor.py::test_worker_refusal_requeues_without_hold pass",
+    "tests/test_daemon.py::test_reservation_owner_matches_running_executor, ::test_depends_on_gates_dispatch, ::test_budget_refusal_leaves_task_queued_without_repair, ::test_notify_once_per_transition and tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes, ::test_refused_or_exception_path_releases_immediately, ::test_fallback_claude_when_codex_cooling and the tests/test_pool.py reservation tests pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/pool.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "fix_round_for": "T-0408",
+    "task_class": "budget"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0411",
+  "codex_thread": "01a0bf01-fe95-7ed1-9561-6789b7823dd0",
+  "result": {
+    "summary": "Summary: Moved reservation ownership from dispatch to executor/worker paths; added refusal requeue behavior and no-placeholder dispatch tests.  \nCommit: `5976bb2`  \nLineage preserved through `43ab83f`.\n\nFiles changed:\n- `orchestrator/daemon.py`\n- `orchestrator/executor.py`\n- `orchestrator/spawn.py`\n- `tests/test_daemon.py`\n- `tests/test_executor.py`\n\nTests: `.claude/hooks/tests-green.sh` passed twice, 569 tests each. No failures. `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent.",
+    "executed_by": "codex:luna",
+    "thread": "01a0bf01-fe95-7ed1-9561-6789b7823dd0",
+    "usage": {
+      "input_tokens": 1988699,
+      "cached_input_tokens": 1918208,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10697,
+      "reasoning_output_tokens": 3721
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789910972.591607,
+      "pipeline": {
+        "dispatched_at": 1789910972.591561
+      }
+    },
+    {
+      "ts": 1789910974.051662,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0411",
+      "claimed_at": 1789910974.051216
+    },
+    {
+      "ts": 1789910974.052917,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789911405.3018298,
+      "codex_thread": "01a0bf01-fe95-7ed1-9561-6789b7823dd0"
+    },
+    {
+      "ts": 1789911405.30427,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Moved reservation ownership from dispatch to executor/worker paths; added refusal requeue behavior and no-placeholder dispatch tests.  \nCommit: `5976bb2`  \nLineage preserved through `43ab83f`.\n\nFiles changed:\n- `orchestrator/daemon.py`\n- `orchestrator/executor.py`\n- `orchestrator/spawn.py`\n- `tests/test_daemon.py`\n- `tests/test_executor.py`\n\nTests: `.claude/hooks/tests-green.sh` passed twice, 569 tests each. No failures. `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent.",
+        "executed_by": "codex:luna",
+        "thread": "01a0bf01-fe95-7ed1-9561-6789b7823dd0",
+        "usage": {
+          "input_tokens": 1988699,
+          "cached_input_tokens": 1918208,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10697,
+          "reasoning_output_tokens": 3721
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789911489.454549,
+      "pipeline": {
+        "dispatched_at": 1789910972.591561,
+        "gated_at": 1789911489.454436,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789911644.6323788,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789911667.644809,
+      "pipeline": {
+        "dispatched_at": 1789910972.591561,
+        "gated_at": 1789911489.454436,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789911667.644659
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0413 (request_changes)"
+    },
+    {
+      "ts": 1789915459.313677,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "rebase T-0431 df2ae89",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789915618.6624808,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0431 df2ae89",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789910972.591561,
+    "gated_at": 1789911489.454436,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789911667.644659
+  },
+  "claimed_at": 1789910974.051216,
+  "rounds": 0,
+  "executor": "luna",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0431 df2ae89"
+}

@@ -1,0 +1,664 @@
+{
+  "id": "T-1246",
+  "created_at": 1790174367.765384,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S2d1 cache-aware context router in shadow: cacheability, effective cache cost and a cache-adjusted level per evidence item on context_selection rows (P8)",
+  "spec": "orchestrator/context_router.py: for every routed evidence item compute cacheability (stable for repo files at a pinned commit, semi for memory, dynamic for tool outputs, test results and worker_partial) and cache_cost = cache_telemetry.dynamic_cost(chars, provider, cfg), a new small read-only helper in orchestrator/cache_telemetry.py (scope) that applies the [cache] ratios of effective_cost to a char count (chars/4 tokens) and returns None when the [cache] section or telemetry ratios are missing. Shadow algorithm for cache_adjusted_level, defined exactly: start from the presented level; downgrade one step (FULL to LONG, LONG to SHORT) when cacheability is dynamic and cache_cost exceeds [context_router].cache_downgrade_tokens (default 600); upgrade one step (SHORT to LONG) when cacheability is stable and cache_cost is below [context_router].cache_upgrade_tokens (default 200); never change an item whose level came from a hard-constraint FULL reason (in_scope_file, security_path, failing_output, acceptance); HIDE items stay HIDE. Rows: the existing kind context_selection keeps its candidates shape; the deterministic dict gains three parallel maps keyed by evidence id: cacheability, cache_cost, cache_adjusted_level, plus cache_data = ok|missing. Presented levels never change unless [context_router].cache_mode is active (add cache_mode = \"shadow\" with a dated comment and revert instruction to [context_router]; missing key means off; unknown values raise at config load in pool validation; cache_mode is inert whenever the section's mode is off; tests/test_pool.py covers the validation and the gating). Docs: docs/hermes-hardening/10-cache-aware-disclosure.md section 1 with the algorithm and a reproducible command (`orchestrator scorecard --context --cache-shadow`, added to the context scorecard output, scope orchestrator/cli.py) that prints, over the decision_log rows present, the row count, date range and the share of items whose cache_adjusted_level differs from the presented level; when no rows exist the doc says so.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1240"
+  ],
+  "acceptance": [
+    "tests/test_context_router.py::test_cache_fields_on_rows_and_presented_level_unchanged_in_shadow (route() levels identical with cache_mode shadow and with no cache_mode key; deterministic maps present)",
+    "tests/test_context_router.py::test_cache_adjusted_level_algorithm (downgrade, upgrade, hard-constraint FULL untouched, HIDE untouched, missing telemetry gives None and cache_data missing)",
+    "tests/test_context_router.py::test_active_cache_mode_applies_adjusted_levels_only_when_mode_not_off",
+    "tests/test_pool.py::test_cache_mode_validation_and_gating",
+    "tests/test_cli.py::test_scorecard_context_cache_shadow_summary",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/context_router.py",
+    "orchestrator/cache_telemetry.py",
+    "orchestrator/pool.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_context_router.py",
+    "tests/test_pool.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/10-cache-aware-disclosure.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1246",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "Spec assumes a config-load 'pool validation' step where unknown cache_mode raises. pool.py has no section validators (no context_router handling at all). promotion.mode('context_router', cfg) is what reads mode, and it lives outside scope. tests/test_pool.py::test_cache_mode_validation_and_gating has no defined insertion point. The spec must name the function that raises and where it is called, or move validation into context_router (a small cache_mode(cfg) helper that raises on unknown values).",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "'cache_mode is inert whenever the section mode is off' cannot be evaluated inside route(). route() takes cfg but not the effective mode. The effective mode is computed in spawn.py::_context_mode, which downgrades active to shadow when context_eval.json is missing or stale. spawn.py is not in scope. Reading the raw [context_router].mode from cfg would let cache_mode=active apply adjusted levels even when the eval gate has refused active. Spec must state which mode source is authoritative and that active requires the same context_eval gate (or add spawn.py to scope).",
+        "severity": "high",
+        "line": 96
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "Cacheability mapping is undefined against the real evidence model. SOURCE_TYPES are source_chunk, test_result, scout_finding, memory_entry, graph_finding, previous_result, review_finding, architecture_note, decision, external_doc. There is no 'tool output' or 'worker_partial' source_type (worker_partial appears only as a provenance string in worker_control.py). Spec needs an explicit table of source_type and provenance to stable, semi or dynamic, including the unmapped types (scout_finding, graph_finding, review_finding, architecture_note, decision, external_doc, previous_result). 'Pinned commit' also needs a definition: ev.commit == head_sha, and when head_sha is None the item is not stable.",
+        "severity": "high",
+        "line": 33
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "Unspecified inputs to cache_cost. Which chars: full content, or the text at the presented level (_text(ev, level))? Which provider: route() has no provider argument and the deterministic row has no provider. Without a stated choice the downgrade and upgrade thresholds compare different quantities. Also tokens_full and tokens_at_level already exist. Say which one drives the cache_cost, and how the provider is chosen (executor for the role?).",
+        "severity": "med",
+        "line": 104
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "Algorithm has dead or conflicting branches. _choice returns FULL only for hard-constraint reasons, so 'FULL to LONG' downgrade never fires; say so or drop it. The skill_required_context floor (required_types forced to LONG) must be protected from LONG to SHORT downgrade, or active mode will break the skill contract. Upgrade SHORT to LONG for stable items also conflicts with planner read_scope SHORT (intentional) and with the section_items rule that forces read_scope to SHORT. Spec should list reasons exempt from adjustment (add skill_required_context, read_scope) and define whether adjusted levels feed tokens_at_level, routed_tokens and reduction_ratio in active mode.",
+        "severity": "med",
+        "line": 102
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "Routed is a frozen dataclass and RoutedPacket has no cache fields. The spec says 'deterministic dict gains three parallel maps' but does not say how they get from route() to decision_row (new Routed and RoutedPacket fields with defaults?). Existing consumers (context_scorecard.recovery counts ':HIDE' suffixes in candidates; jev_gate.py:441, context_eval.py:108 read context_selection rows) depend on the candidates shape. Tests should assert candidates is unchanged. Active mode must also change candidates level suffixes consistently, or recovery and hidden counts drift.",
+        "severity": "med",
+        "line": 149
+      }
+    ],
+    "suggested_spec_changes": [
+      "Name the config validation function for cache_mode (recommend context_router.cache_mode(cfg) raising ValueError on unknown values, called from route/decision_row and tested in tests/test_pool.py), or identify the existing pool loader hook.",
+      "State that effective active requires the same context_eval gate as spawn._context_mode, and pass the effective mode into route() explicitly (keyword cache_mode) rather than reading raw cfg; add spawn.py to scope if its call site changes.",
+      "Add a source_type/provenance to cacheability table, define pinned commit as ev.commit == head_sha, and define provider selection and which char count feeds dynamic_cost.",
+      "Exempt skill_required_context and read_scope reasons from adjustment; document that FULL to LONG is unreachable today; define effect on tokens_at_level, routed_tokens and reduction_ratio in active mode.",
+      "Specify the plumbing: default-valued fields on Routed/RoutedPacket for cacheability, cache_cost, adjusted_level, cache_data, and add a test that candidates and hard_constraints are byte-identical with and without cache_mode.",
+      "Add orchestrator/context_scorecard.py to scope (or say cli.py computes directly), define handling of cache_data=missing rows, date range field, and add a doc no-rows test.",
+      "Add tests/test_cache_telemetry.py to scope with direct dynamic_cost tests (missing cache section, missing ratio, chars/4 conversion, both providers).",
+      "Add rollback: cache_mode key removal or 'off' restores today's behaviour; pool.toml comment carries the dated revert instruction."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 7974,
+      "trimmed": {
+        "risks": 4
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790174369.711657,
+      "packet_meta": {
+        "chars": 4821,
+        "est_tokens": 1205,
+        "presented_tokens": 1205,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "f869e26f5fb89ee1cd48f3522078a75f59208b63ffe58fe13509cbb8086a14aa"
+          },
+          "spec": {
+            "chars": 2990,
+            "est_tokens": 747,
+            "sha256": "8d22b20b9f8a5da5a783920b9fd7464bdab4df491873fc8f51e550d145aa1520"
+          },
+          "acceptance": {
+            "chars": 673,
+            "est_tokens": 168,
+            "sha256": "ff982c7a300ee63b8874ecb977746a34491a2d31a747dab21bc51f5d1b0f7840"
+          },
+          "scope": {
+            "chars": 272,
+            "est_tokens": 68,
+            "sha256": "2f234fd98770ec5c70b731fa701fd1c8a1697f1f3612ef0aba9ef80b716a6e26"
+          },
+          "depends_on": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+          },
+          "existing tests": {
+            "chars": 625,
+            "est_tokens": 156,
+            "sha256": "0459f1078196d64cbfd6ca11b2676b05cc9895d228708b5d37c891186347c8a0"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "01bc830020e5",
+        "version": "01bc830020e5",
+        "candidate_known": false,
+        "base": "821e2eb2b058",
+        "sources": "task@T-1240 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790174371.53167,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1246",
+      "claimed_at": 1790174371.5312629
+    },
+    {
+      "ts": 1790174371.532777,
+      "account": "A"
+    },
+    {
+      "ts": 1790174372.465919,
+      "pid": 26908,
+      "account": "A"
+    },
+    {
+      "ts": 1790174431.54816,
+      "packet_meta": {
+        "chars": 4821,
+        "est_tokens": 1205,
+        "presented_tokens": 1205,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "f869e26f5fb89ee1cd48f3522078a75f59208b63ffe58fe13509cbb8086a14aa"
+          },
+          "spec": {
+            "chars": 2990,
+            "est_tokens": 747,
+            "sha256": "8d22b20b9f8a5da5a783920b9fd7464bdab4df491873fc8f51e550d145aa1520"
+          },
+          "acceptance": {
+            "chars": 673,
+            "est_tokens": 168,
+            "sha256": "ff982c7a300ee63b8874ecb977746a34491a2d31a747dab21bc51f5d1b0f7840"
+          },
+          "scope": {
+            "chars": 272,
+            "est_tokens": 68,
+            "sha256": "2f234fd98770ec5c70b731fa701fd1c8a1697f1f3612ef0aba9ef80b716a6e26"
+          },
+          "depends_on": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+          },
+          "existing tests": {
+            "chars": 625,
+            "est_tokens": 156,
+            "sha256": "0459f1078196d64cbfd6ca11b2676b05cc9895d228708b5d37c891186347c8a0"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "01bc830020e5",
+        "version": "01bc830020e5",
+        "candidate_known": false,
+        "base": "821e2eb2b058",
+        "sources": "task@T-1240 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3e6adb59-af26-4d70-9e2c-a0077c3f5ca6"
+      }
+    },
+    {
+      "ts": 1790174431.5726569,
+      "packet_meta": {
+        "chars": 4821,
+        "est_tokens": 1205,
+        "presented_tokens": 1205,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "f869e26f5fb89ee1cd48f3522078a75f59208b63ffe58fe13509cbb8086a14aa"
+          },
+          "spec": {
+            "chars": 2990,
+            "est_tokens": 747,
+            "sha256": "8d22b20b9f8a5da5a783920b9fd7464bdab4df491873fc8f51e550d145aa1520"
+          },
+          "acceptance": {
+            "chars": 673,
+            "est_tokens": 168,
+            "sha256": "ff982c7a300ee63b8874ecb977746a34491a2d31a747dab21bc51f5d1b0f7840"
+          },
+          "scope": {
+            "chars": 272,
+            "est_tokens": 68,
+            "sha256": "2f234fd98770ec5c70b731fa701fd1c8a1697f1f3612ef0aba9ef80b716a6e26"
+          },
+          "depends_on": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+          },
+          "existing tests": {
+            "chars": 625,
+            "est_tokens": 156,
+            "sha256": "0459f1078196d64cbfd6ca11b2676b05cc9895d228708b5d37c891186347c8a0"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "01bc830020e5",
+        "version": "01bc830020e5",
+        "candidate_known": false,
+        "base": "821e2eb2b058",
+        "sources": "task@T-1240 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3e6adb59-af26-4d70-9e2c-a0077c3f5ca6",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790174431.579312,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "Spec assumes a config-load 'pool validation' step where unknown cache_mode raises. pool.py has no section validators (no context_router handling at all). promotion.mode('context_router', cfg) is what reads mode, and it lives outside scope. tests/test_pool.py::test_cache_mode_validation_and_gating has no defined insertion point. The spec must name the function that raises and where it is called, or move validation into context_router (a small cache_mode(cfg) helper that raises on unknown values).",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "'cache_mode is inert whenever the section mode is off' cannot be evaluated inside route(). route() takes cfg but not the effective mode. The effective mode is computed in spawn.py::_context_mode, which downgrades active to shadow when context_eval.json is missing or stale. spawn.py is not in scope. Reading the raw [context_router].mode from cfg would let cache_mode=active apply adjusted levels even when the eval gate has refused active. Spec must state which mode source is authoritative and that active requires the same context_eval gate (or add spawn.py to scope).",
+            "severity": "high",
+            "line": 96
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "Cacheability mapping is undefined against the real evidence model. SOURCE_TYPES are source_chunk, test_result, scout_finding, memory_entry, graph_finding, previous_result, review_finding, architecture_note, decision, external_doc. There is no 'tool output' or 'worker_partial' source_type (worker_partial appears only as a provenance string in worker_control.py). Spec needs an explicit table of source_type and provenance to stable, semi or dynamic, including the unmapped types (scout_finding, graph_finding, review_finding, architecture_note, decision, external_doc, previous_result). 'Pinned commit' also needs a definition: ev.commit == head_sha, and when head_sha is None the item is not stable.",
+            "severity": "high",
+            "line": 33
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "Unspecified inputs to cache_cost. Which chars: full content, or the text at the presented level (_text(ev, level))? Which provider: route() has no provider argument and the deterministic row has no provider. Without a stated choice the downgrade and upgrade thresholds compare different quantities. Also tokens_full and tokens_at_level already exist. Say which one drives the cache_cost, and how the provider is chosen (executor for the role?).",
+            "severity": "med",
+            "line": 104
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "Algorithm has dead or conflicting branches. _choice returns FULL only for hard-constraint reasons, so 'FULL to LONG' downgrade never fires; say so or drop it. The skill_required_context floor (required_types forced to LONG) must be protected from LONG to SHORT downgrade, or active mode will break the skill contract. Upgrade SHORT to LONG for stable items also conflicts with planner read_scope SHORT (intentional) and with the section_items rule that forces read_scope to SHORT. Spec should list reasons exempt from adjustment (add skill_required_context, read_scope) and define whether adjusted levels feed tokens_at_level, routed_tokens and reduction_ratio in active mode.",
+            "severity": "med",
+            "line": 102
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "Routed is a frozen dataclass and RoutedPacket has no cache fields. The spec says 'deterministic dict gains three parallel maps' but does not say how they get from route() to decision_row (new Routed and RoutedPacket fields with defaults?). Existing consumers (context_scorecard.recovery counts ':HIDE' suffixes in candidates; jev_gate.py:441, context_eval.py:108 read context_selection rows) depend on the candidates shape. Tests should assert candidates is unchanged. Active mode must also change candidates level suffixes consistently, or recovery and hidden counts drift.",
+            "severity": "med",
+            "line": 149
+          }
+        ],
+        "suggested_spec_changes": [
+          "Name the config validation function for cache_mode (recommend context_router.cache_mode(cfg) raising ValueError on unknown values, called from route/decision_row and tested in tests/test_pool.py), or identify the existing pool loader hook.",
+          "State that effective active requires the same context_eval gate as spawn._context_mode, and pass the effective mode into route() explicitly (keyword cache_mode) rather than reading raw cfg; add spawn.py to scope if its call site changes.",
+          "Add a source_type/provenance to cacheability table, define pinned commit as ev.commit == head_sha, and define provider selection and which char count feeds dynamic_cost.",
+          "Exempt skill_required_context and read_scope reasons from adjustment; document that FULL to LONG is unreachable today; define effect on tokens_at_level, routed_tokens and reduction_ratio in active mode.",
+          "Specify the plumbing: default-valued fields on Routed/RoutedPacket for cacheability, cache_cost, adjusted_level, cache_data, and add a test that candidates and hard_constraints are byte-identical with and without cache_mode.",
+          "Add orchestrator/context_scorecard.py to scope (or say cli.py computes directly), define handling of cache_data=missing rows, date range field, and add a doc no-rows test.",
+          "Add tests/test_cache_telemetry.py to scope with direct dynamic_cost tests (missing cache section, missing ratio, chars/4 conversion, both providers).",
+          "Add rollback: cache_mode key removal or 'off' restores today's behaviour; pool.toml comment carries the dated revert instruction."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 7974,
+          "trimmed": {
+            "risks": 4
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790174431.5803578,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Spec assumes a config-load 'pool validation' step where unknown cache_mode raises. pool.py has no section validators (no context_router handling at all). promotion.mode('context_router', cfg) is what reads mode, and it lives outside scope. tests/test_pool.py::test_cache_mode_validation_and_gating has no defined insertion point. The spec must name the function that raises and where it is called, or move validation into context_router (a small cache_mode(cfg) helper that raises on unknown values).",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "'cache_mode is inert whenever the section mode is off' cannot be evaluated inside route(). route() takes cfg but not the effective mode. The effective mode is computed in spawn.py::_context_mode, which downgrades active to shadow when context_eval.json is missing or stale. spawn.py is not in scope. Reading the raw [context_router].mode from cfg would let cache_mode=active apply adjusted levels even when the eval gate has refused active. Spec must state which mode source is authoritative and that active requires the same context_eval gate (or add spawn.py to scope).",
+          "severity": "high",
+          "line": 96
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "Cacheability mapping is undefined against the real evidence model. SOURCE_TYPES are source_chunk, test_result, scout_finding, memory_entry, graph_finding, previous_result, review_finding, architecture_note, decision, external_doc. There is no 'tool output' or 'worker_partial' source_type (worker_partial appears only as a provenance string in worker_control.py). Spec needs an explicit table of source_type and provenance to stable, semi or dynamic, including the unmapped types (scout_finding, graph_finding, review_finding, architecture_note, decision, external_doc, previous_result). 'Pinned commit' also needs a definition: ev.commit == head_sha, and when head_sha is None the item is not stable.",
+          "severity": "high",
+          "line": 33
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "Unspecified inputs to cache_cost. Which chars: full content, or the text at the presented level (_text(ev, level))? Which provider: route() has no provider argument and the deterministic row has no provider. Without a stated choice the downgrade and upgrade thresholds compare different quantities. Also tokens_full and tokens_at_level already exist. Say which one drives the cache_cost, and how the provider is chosen (executor for the role?).",
+          "severity": "med",
+          "line": 104
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "Algorithm has dead or conflicting branches. _choice returns FULL only for hard-constraint reasons, so 'FULL to LONG' downgrade never fires; say so or drop it. The skill_required_context floor (required_types forced to LONG) must be protected from LONG to SHORT downgrade, or active mode will break the skill contract. Upgrade SHORT to LONG for stable items also conflicts with planner read_scope SHORT (intentional) and with the section_items rule that forces read_scope to SHORT. Spec should list reasons exempt from adjustment (add skill_required_context, read_scope) and define whether adjusted levels feed tokens_at_level, routed_tokens and reduction_ratio in active mode.",
+          "severity": "med",
+          "line": 102
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "Routed is a frozen dataclass and RoutedPacket has no cache fields. The spec says 'deterministic dict gains three parallel maps' but does not say how they get from route() to decision_row (new Routed and RoutedPacket fields with defaults?). Existing consumers (context_scorecard.recovery counts ':HIDE' suffixes in candidates; jev_gate.py:441, context_eval.py:108 read context_selection rows) depend on the candidates shape. Tests should assert candidates is unchanged. Active mode must also change candidates level suffixes consistently, or recovery and hidden counts drift.",
+          "severity": "med",
+          "line": 149
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "'scorecard --context --cache-shadow' output is produced by context_scorecard.build/format_report in orchestrator/context_scorecard.py, which is not in scope. cli.py also has a per-mode flag table (around line 364) and argparse at line 167 that need the new flag registered. Add orchestrator/context_scorecard.py to scope, or specify that cli.py computes the summary from decision_log.read_all directly. Also define 'differs' for rows with cache_data=missing (exclude from denominator and report them separately) and the date range source (row ts field), and require --json output parity.",
+          "severity": "med",
+          "line": 690
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Adding [context_router] cache_mode='shadow' plus cache_downgrade_tokens and cache_upgrade_tokens is fine, but [context_router] mode is currently shadow and the parent sections were flipped to active elsewhere by user decision. State that cache_mode ships as shadow only, with the dated comment and revert instruction ('set to off or delete the key'). Also state that missing thresholds fall back to 600 and 200 in code and reject non-numeric or negative values, and that downgrade threshold must be at least the upgrade threshold or the two rules can conflict.",
+          "severity": "low",
+          "line": 355
+        },
+        {
+          "path": "orchestrator/cache_telemetry.py",
+          "issue": "dynamic_cost 'returns None when the [cache] section or telemetry ratios are missing' conflicts with _cache_cfg, which merges DEFAULT_RATIOS so ratios are never missing. Define the exact missing condition (cfg has no 'cache' table or lacks the needed provider read/write ratio keys) and which ratio applies: read, write, or a blend. A single-chars cost with no hit-rate input is otherwise ambiguous. Also no tests/test_cache_telemetry.py exists (marked missing); the new helper is only covered indirectly and should get direct unit tests, adding that file to scope.",
+          "severity": "med",
+          "line": 35
+        },
+        {
+          "path": "docs/hermes-hardening/10-cache-aware-disclosure.md",
+          "issue": "Doc must state the no-rows case verbatim and be checked by a test; the acceptance list has no check for the doc. Also the file numbered 10 must not collide with existing docs/hermes-hardening numbering, and the repo rule against quoting double-brace placeholders applies to the doc.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4821,
+    "est_tokens": 1205,
+    "presented_tokens": 1205,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "f869e26f5fb89ee1cd48f3522078a75f59208b63ffe58fe13509cbb8086a14aa"
+      },
+      "spec": {
+        "chars": 2990,
+        "est_tokens": 747,
+        "sha256": "8d22b20b9f8a5da5a783920b9fd7464bdab4df491873fc8f51e550d145aa1520"
+      },
+      "acceptance": {
+        "chars": 673,
+        "est_tokens": 168,
+        "sha256": "ff982c7a300ee63b8874ecb977746a34491a2d31a747dab21bc51f5d1b0f7840"
+      },
+      "scope": {
+        "chars": 272,
+        "est_tokens": 68,
+        "sha256": "2f234fd98770ec5c70b731fa701fd1c8a1697f1f3612ef0aba9ef80b716a6e26"
+      },
+      "depends_on": {
+        "chars": 162,
+        "est_tokens": 40,
+        "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+      },
+      "existing tests": {
+        "chars": 625,
+        "est_tokens": 156,
+        "sha256": "0459f1078196d64cbfd6ca11b2676b05cc9895d228708b5d37c891186347c8a0"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "01bc830020e5",
+    "version": "01bc830020e5",
+    "candidate_known": false,
+    "base": "821e2eb2b058",
+    "sources": "task@T-1240 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "3e6adb59-af26-4d70-9e2c-a0077c3f5ca6",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790174371.5312629,
+  "account": "A",
+  "pid": 26908,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Spec assumes a config-load 'pool validation' step where unknown cache_mode raises. pool.py has no section validators (no context_router handling at all). promotion.mode('context_router', cfg) is what reads mode, and it lives outside scope. tests/test_pool.py::test_cache_mode_validation_and_gating has no defined insertion point. The spec must name the function that raises and where it is called, or move validation into context_router (a small cache_mode(cfg) helper that raises on unknown values).",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "'cache_mode is inert whenever the section mode is off' cannot be evaluated inside route(). route() takes cfg but not the effective mode. The effective mode is computed in spawn.py::_context_mode, which downgrades active to shadow when context_eval.json is missing or stale. spawn.py is not in scope. Reading the raw [context_router].mode from cfg would let cache_mode=active apply adjusted levels even when the eval gate has refused active. Spec must state which mode source is authoritative and that active requires the same context_eval gate (or add spawn.py to scope).",
+      "severity": "high",
+      "line": 96
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "Cacheability mapping is undefined against the real evidence model. SOURCE_TYPES are source_chunk, test_result, scout_finding, memory_entry, graph_finding, previous_result, review_finding, architecture_note, decision, external_doc. There is no 'tool output' or 'worker_partial' source_type (worker_partial appears only as a provenance string in worker_control.py). Spec needs an explicit table of source_type and provenance to stable, semi or dynamic, including the unmapped types (scout_finding, graph_finding, review_finding, architecture_note, decision, external_doc, previous_result). 'Pinned commit' also needs a definition: ev.commit == head_sha, and when head_sha is None the item is not stable.",
+      "severity": "high",
+      "line": 33
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "Unspecified inputs to cache_cost. Which chars: full content, or the text at the presented level (_text(ev, level))? Which provider: route() has no provider argument and the deterministic row has no provider. Without a stated choice the downgrade and upgrade thresholds compare different quantities. Also tokens_full and tokens_at_level already exist. Say which one drives the cache_cost, and how the provider is chosen (executor for the role?).",
+      "severity": "med",
+      "line": 104
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "Algorithm has dead or conflicting branches. _choice returns FULL only for hard-constraint reasons, so 'FULL to LONG' downgrade never fires; say so or drop it. The skill_required_context floor (required_types forced to LONG) must be protected from LONG to SHORT downgrade, or active mode will break the skill contract. Upgrade SHORT to LONG for stable items also conflicts with planner read_scope SHORT (intentional) and with the section_items rule that forces read_scope to SHORT. Spec should list reasons exempt from adjustment (add skill_required_context, read_scope) and define whether adjusted levels feed tokens_at_level, routed_tokens and reduction_ratio in active mode.",
+      "severity": "med",
+      "line": 102
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "Routed is a frozen dataclass and RoutedPacket has no cache fields. The spec says 'deterministic dict gains three parallel maps' but does not say how they get from route() to decision_row (new Routed and RoutedPacket fields with defaults?). Existing consumers (context_scorecard.recovery counts ':HIDE' suffixes in candidates; jev_gate.py:441, context_eval.py:108 read context_selection rows) depend on the candidates shape. Tests should assert candidates is unchanged. Active mode must also change candidates level suffixes consistently, or recovery and hidden counts drift.",
+      "severity": "med",
+      "line": 149
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "'scorecard --context --cache-shadow' output is produced by context_scorecard.build/format_report in orchestrator/context_scorecard.py, which is not in scope. cli.py also has a per-mode flag table (around line 364) and argparse at line 167 that need the new flag registered. Add orchestrator/context_scorecard.py to scope, or specify that cli.py computes the summary from decision_log.read_all directly. Also define 'differs' for rows with cache_data=missing (exclude from denominator and report them separately) and the date range source (row ts field), and require --json output parity.",
+      "severity": "med",
+      "line": 690
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Adding [context_router] cache_mode='shadow' plus cache_downgrade_tokens and cache_upgrade_tokens is fine, but [context_router] mode is currently shadow and the parent sections were flipped to active elsewhere by user decision. State that cache_mode ships as shadow only, with the dated comment and revert instruction ('set to off or delete the key'). Also state that missing thresholds fall back to 600 and 200 in code and reject non-numeric or negative values, and that downgrade threshold must be at least the upgrade threshold or the two rules can conflict.",
+      "severity": "low",
+      "line": 355
+    },
+    {
+      "path": "orchestrator/cache_telemetry.py",
+      "issue": "dynamic_cost 'returns None when the [cache] section or telemetry ratios are missing' conflicts with _cache_cfg, which merges DEFAULT_RATIOS so ratios are never missing. Define the exact missing condition (cfg has no 'cache' table or lacks the needed provider read/write ratio keys) and which ratio applies: read, write, or a blend. A single-chars cost with no hit-rate input is otherwise ambiguous. Also no tests/test_cache_telemetry.py exists (marked missing); the new helper is only covered indirectly and should get direct unit tests, adding that file to scope.",
+      "severity": "med",
+      "line": 35
+    },
+    {
+      "path": "docs/hermes-hardening/10-cache-aware-disclosure.md",
+      "issue": "Doc must state the no-rows case verbatim and be checked by a test; the acceptance list has no check for the doc. Also the file numbered 10 must not collide with existing docs/hermes-hardening numbering, and the repo rule against quoting double-brace placeholders applies to the doc.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

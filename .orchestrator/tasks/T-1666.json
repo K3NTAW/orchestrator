@@ -1,0 +1,715 @@
+{
+  "id": "T-1666",
+  "created_at": 1791242757.539073,
+  "parent": "T-1658",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: ship: automatic merge of a finished goal to main after a full gate, PR record, orchestrator rollback",
+  "spec": "Automatic merge of a finished goal to main, with checks and a recorded rollback, replacing the human PR merge.\nRead first: orchestrator/merge.py (serial merge queue into goal/<parent>), orchestrator/daemon.py (gate(), merge_reviewed(),\nhow goals complete), orchestrator/gate.py (run_gate), CLAUDE.md step 8, and how PRs are opened today (gh pr create by the\nPlanner; merges by `gh pr merge --merge`).\n\nBehaviour:\n1. A goal is ready to ship when every execute task with parent <goal> is merged_into goal/<goal> or superseded, none is\n   held/queued/running, and the goal branch has commits beyond the target. Add config [ship] in pool.toml:\n   enabled (default false; this repo sets true), target \"main\", require_full_gate true.\n2. Ship steps, serial, one goal at a time, in a new module orchestrator/ship.py called from the daemon tick:\n   a. In a fresh worktree of goal/<goal>, merge origin/<target> in (no rebase); conflict -> hold the goal with\n      hold_reason \"ship conflict\" and notify; stop.\n   b. Run the full gate (gate.run_gate on that worktree; for luna-inbox set LUNA_GATE_FULL=1 in the env). Red or timeout ->\n      hold \"ship gate red\" / \"ship gate timeout\" with the failure tail; stop.\n   c. Push goal/<goal>, open a PR to <target> if none is open (title \"<goal title> (goal/<goal>)\", body: tasks merged with\n      shas, reviews and verdicts, gate result, rollback command), then `gh pr merge <n> --merge` with subject\n      \"Merge PR <n>: <title> (goal/<goal>, auto-merged after green full gate)\".\n   d. Record on the goal task: pipeline.shipped = {pr, merge_sha, gate_log, at}, and append a decisions.md entry through\n      the existing memory record script with the rollback \"orchestrator rollback <merge_sha>\".\n   e. Notify once: \"<goal> shipped to main as <sha>; rollback: orchestrator rollback <sha>\".\n3. New CLI `orchestrator rollback <merge_sha>`: creates branch rollback/<short sha> from origin/<target>, runs\n   `git revert -m 1 <merge_sha>`, pushes the branch, opens a PR \"Revert <subject>\", merges it with --merge, records a\n   decisions entry and notifies. Refuses if the sha is not a merge commit on origin/<target>.\n4. Never force-push, never push directly to main (guardrails block it; all writes to main go through gh pr merge).\n5. CLAUDE.md: change the first line's \"A human approves every merge to main\" to \"Merges to main are automatic after a green\n   full gate; every merge records its rollback (orchestrator rollback <sha>)\", and step 8 accordingly.\nTests in tests/test_ship.py with a temp origin (bare repo) and a fake gh on PATH (a script that records calls and returns a\nPR number / merge success): test_ship_ready_detection, test_ship_merges_after_green_gate, test_ship_holds_on_conflict,\ntest_ship_holds_on_red_gate, test_ship_records_rollback, test_rollback_reverts_merge_commit, test_rollback_refuses_non_merge,\ntest_ship_disabled_by_default.\n",
+  "inputs": [
+    "T-1660"
+  ],
+  "acceptance": [
+    "tests/test_ship.py: the eight named tests exist and pass",
+    "No force-push and no direct push to main anywhere in ship.py or the rollback command",
+    "[ship].enabled defaults to false; CLAUDE.md states the new merge rule and the rollback command"
+  ],
+  "scope": [
+    "orchestrator/ship.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_ship.py",
+    "CLAUDE.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1666",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Out of scope but coupled. routine_close() and _open_pr() already open the goal/<id> to main PR and handle goal close. ship.py would duplicate PR creation with a different title format and `gh pr list --state all` semantics. Two code paths could race to open or merge the same PR, or close the goal before ship runs. The spec doesn't say how ship interacts with routine_close, or which one owns goal completion and status.",
+        "severity": "high",
+        "line": 1477
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "No insertion point is given. The spec says 'called from the daemon tick' but not where in tick() (line ~1889), relative to gate()/merge_reviewed(), or how it is serialized across ticks. The full gate can run for a long time (timeouts, a retry on timeout in run_gate), so a blocking call in tick() stalls dispatch, review and merge for every other goal. It needs to be run async or bounded, and guarded by a lock or a pipeline.ship_state marker so a second tick or a crashed daemon cannot double-ship.",
+        "severity": "high",
+        "line": 1889
+      },
+      {
+        "path": "orchestrator/ship.py",
+        "issue": "Not idempotent or resumable across steps. Steps a-d are non-atomic. A crash after `gh pr merge` but before pipeline.shipped is recorded means the next tick re-ships. It would find a merged PR (or none open), try to open a new PR with no new commits, or fail. A crash after the push but before the PR is created is also unhandled. The spec needs a persisted ship phase and a check of the PR state (`gh pr list --head --state all`) so it resumes rather than repeats. It also doesn't say what 'ready' means once pipeline.shipped is set. Without that, the 'ahead of target' check turns false only after the merge, and a hold followed by a human fix has no defined re-entry path.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/ship.py",
+        "issue": "Merging origin/<target> into the goal branch and then merging the PR means the gate runs on a tree that can go stale. If main moves between the gate and `gh pr merge`, the merged result was never tested. The spec doesn't require fetching origin again, comparing the target sha before the merge, or re-running the gate. It also doesn't say whether the merge-commit push uses a lease or fails on non-fast-forward. Since force-push is forbidden, a non-fast-forward push to goal/<goal> must be a defined hold, not a silent retry. Also unspecified: `gh pr merge` failing on required checks, branch protection or a stale head, and a timeout on the gh calls themselves (unguarded external calls).",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/ship.py",
+        "issue": "The hold and notify state can repeat. A held goal is 'ready' again on the next tick unless held is excluded from readiness. A held conflict or red gate would otherwise re-run the full gate and re-notify every 30s. Use notify_once (orchestrator/notify.py:32) and exclude held goals, with an explicit way to release the hold.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add orchestrator/planner_runs.py (and tests/test_planner_runs.py if it changes) to scope, or state that ship.py reuses planner_runs._open_pr and routine_close and describe who owns goal completion. Remove the duplicate PR-creation path.",
+      "Name the tick() insertion point and the lock or persisted marker (e.g. pipeline.ship = {phase, pr, head_sha}) that makes shipping single-flight, resumable and idempotent. Specify that the gate runs bounded or off the tick thread so it does not block dispatch.",
+      "Define each phase's recovery: look up the PR state with gh before creating or merging; re-fetch origin and re-verify target sha == the sha that was gated, otherwise re-run merge and gate before `gh pr merge`; define a hold for non-fast-forward push and for gh merge failure (branch protection, required checks); set timeouts on every gh and git call.",
+      "Make held goals ineligible for ship, use notify_once for every hold and ship notification, and say how a hold is released.",
+      "Exclude auto-ship for goals whose diff touches [review] security_paths or auth/billing/data-deletion (hold for a human instead). Update every conflicting line in CLAUDE.md (first line, step 7 'The human reviews every merged PR', step 8, Escalate) and note that the user-level approval gate on commits/pushes is being deliberately relaxed for this repo.",
+      "Specify the rollback command's checkout (fresh worktree from origin/<target>), behavior on revert conflict, existing rollback branch/PR, already-reverted merges, and whether it is gated. Warn that it reverts only that merge and may conflict with later merges.",
+      "Specify where [ship] is read (state-root pool.toml, parsed with a missing/malformed section defaulting to enabled=false), who sets enabled=true for this repo, and what require_full_gate=false does. Replace the luna-inbox special case with a config key.",
+      "Add tests: gate timeout hold, non-fast-forward push hold, resume after merged-but-unrecorded PR, held goal not re-shipped, assertion that no recorded git/gh call is a force or main push, LUNA_GATE_FULL=1 in env, and decisions.md written to the harness root only."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 8660,
+      "trimmed": {
+        "risks": 5
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791242762.094655,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4506,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791242762.10954,
+      "packet_meta": {
+        "chars": 3767,
+        "est_tokens": 941,
+        "presented_tokens": 941,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "2be34cda2d36093b2c00cb019c89c078260451e55eaea7227386fd7f2d0d12bf"
+          },
+          "spec": {
+            "chars": 2898,
+            "est_tokens": 724,
+            "sha256": "c3054da94d80f81d1b34a3ef664b62e9da94bfaab28c76a9f3e266b431793865"
+          },
+          "acceptance": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "b6450ce4d5b4fd5f0032af670d64db6a150ea97efc6ca732332e357d88879641"
+          },
+          "scope": {
+            "chars": 112,
+            "est_tokens": 28,
+            "sha256": "58213425237bc658e76f858527bf596c9c35188b6cce484b71dc19d5d29100bc"
+          },
+          "depends_on": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "b158552a60977606710a5d55e9c7e3a7b9c7b0fbe76ac93dad5ec980b1d4e04c"
+          },
+          "existing tests": {
+            "chars": 284,
+            "est_tokens": 71,
+            "sha256": "077e3b711d8e3339eab8a2cdf7a9d9f7e3ba5f7750c7367026f086baba81ce81"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "5922412c6a9a",
+        "version": "5922412c6a9a",
+        "candidate_known": false,
+        "base": "1accb371c18a",
+        "sources": "task@T-1660 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4506,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791242763.387139,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1666",
+      "claimed_at": 1791242763.386752
+    },
+    {
+      "ts": 1791242763.388644,
+      "account": "A"
+    },
+    {
+      "ts": 1791242766.792286,
+      "pid": 90861,
+      "account": "A"
+    },
+    {
+      "ts": 1791242802.546794,
+      "packet_meta": {
+        "chars": 3767,
+        "est_tokens": 941,
+        "presented_tokens": 941,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "2be34cda2d36093b2c00cb019c89c078260451e55eaea7227386fd7f2d0d12bf"
+          },
+          "spec": {
+            "chars": 2898,
+            "est_tokens": 724,
+            "sha256": "c3054da94d80f81d1b34a3ef664b62e9da94bfaab28c76a9f3e266b431793865"
+          },
+          "acceptance": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "b6450ce4d5b4fd5f0032af670d64db6a150ea97efc6ca732332e357d88879641"
+          },
+          "scope": {
+            "chars": 112,
+            "est_tokens": 28,
+            "sha256": "58213425237bc658e76f858527bf596c9c35188b6cce484b71dc19d5d29100bc"
+          },
+          "depends_on": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "b158552a60977606710a5d55e9c7e3a7b9c7b0fbe76ac93dad5ec980b1d4e04c"
+          },
+          "existing tests": {
+            "chars": 284,
+            "est_tokens": 71,
+            "sha256": "077e3b711d8e3339eab8a2cdf7a9d9f7e3ba5f7750c7367026f086baba81ce81"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "5922412c6a9a",
+        "version": "5922412c6a9a",
+        "candidate_known": false,
+        "base": "1accb371c18a",
+        "sources": "task@T-1660 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4506,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "919f8d7c-baa6-44ae-ac7f-9daad7b11aa9"
+      }
+    },
+    {
+      "ts": 1791242802.5742269,
+      "packet_meta": {
+        "chars": 3767,
+        "est_tokens": 941,
+        "presented_tokens": 941,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "2be34cda2d36093b2c00cb019c89c078260451e55eaea7227386fd7f2d0d12bf"
+          },
+          "spec": {
+            "chars": 2898,
+            "est_tokens": 724,
+            "sha256": "c3054da94d80f81d1b34a3ef664b62e9da94bfaab28c76a9f3e266b431793865"
+          },
+          "acceptance": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "b6450ce4d5b4fd5f0032af670d64db6a150ea97efc6ca732332e357d88879641"
+          },
+          "scope": {
+            "chars": 112,
+            "est_tokens": 28,
+            "sha256": "58213425237bc658e76f858527bf596c9c35188b6cce484b71dc19d5d29100bc"
+          },
+          "depends_on": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "b158552a60977606710a5d55e9c7e3a7b9c7b0fbe76ac93dad5ec980b1d4e04c"
+          },
+          "existing tests": {
+            "chars": 284,
+            "est_tokens": 71,
+            "sha256": "077e3b711d8e3339eab8a2cdf7a9d9f7e3ba5f7750c7367026f086baba81ce81"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "5922412c6a9a",
+        "version": "5922412c6a9a",
+        "candidate_known": false,
+        "base": "1accb371c18a",
+        "sources": "task@T-1660 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 4506,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "919f8d7c-baa6-44ae-ac7f-9daad7b11aa9",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791242803.6804008,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Out of scope but coupled. routine_close() and _open_pr() already open the goal/<id> to main PR and handle goal close. ship.py would duplicate PR creation with a different title format and `gh pr list --state all` semantics. Two code paths could race to open or merge the same PR, or close the goal before ship runs. The spec doesn't say how ship interacts with routine_close, or which one owns goal completion and status.",
+            "severity": "high",
+            "line": 1477
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "No insertion point is given. The spec says 'called from the daemon tick' but not where in tick() (line ~1889), relative to gate()/merge_reviewed(), or how it is serialized across ticks. The full gate can run for a long time (timeouts, a retry on timeout in run_gate), so a blocking call in tick() stalls dispatch, review and merge for every other goal. It needs to be run async or bounded, and guarded by a lock or a pipeline.ship_state marker so a second tick or a crashed daemon cannot double-ship.",
+            "severity": "high",
+            "line": 1889
+          },
+          {
+            "path": "orchestrator/ship.py",
+            "issue": "Not idempotent or resumable across steps. Steps a-d are non-atomic. A crash after `gh pr merge` but before pipeline.shipped is recorded means the next tick re-ships. It would find a merged PR (or none open), try to open a new PR with no new commits, or fail. A crash after the push but before the PR is created is also unhandled. The spec needs a persisted ship phase and a check of the PR state (`gh pr list --head --state all`) so it resumes rather than repeats. It also doesn't say what 'ready' means once pipeline.shipped is set. Without that, the 'ahead of target' check turns false only after the merge, and a hold followed by a human fix has no defined re-entry path.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/ship.py",
+            "issue": "Merging origin/<target> into the goal branch and then merging the PR means the gate runs on a tree that can go stale. If main moves between the gate and `gh pr merge`, the merged result was never tested. The spec doesn't require fetching origin again, comparing the target sha before the merge, or re-running the gate. It also doesn't say whether the merge-commit push uses a lease or fails on non-fast-forward. Since force-push is forbidden, a non-fast-forward push to goal/<goal> must be a defined hold, not a silent retry. Also unspecified: `gh pr merge` failing on required checks, branch protection or a stale head, and a timeout on the gh calls themselves (unguarded external calls).",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/ship.py",
+            "issue": "The hold and notify state can repeat. A held goal is 'ready' again on the next tick unless held is excluded from readiness. A held conflict or red gate would otherwise re-run the full gate and re-notify every 30s. Use notify_once (orchestrator/notify.py:32) and exclude held goals, with an explicit way to release the hold.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add orchestrator/planner_runs.py (and tests/test_planner_runs.py if it changes) to scope, or state that ship.py reuses planner_runs._open_pr and routine_close and describe who owns goal completion. Remove the duplicate PR-creation path.",
+          "Name the tick() insertion point and the lock or persisted marker (e.g. pipeline.ship = {phase, pr, head_sha}) that makes shipping single-flight, resumable and idempotent. Specify that the gate runs bounded or off the tick thread so it does not block dispatch.",
+          "Define each phase's recovery: look up the PR state with gh before creating or merging; re-fetch origin and re-verify target sha == the sha that was gated, otherwise re-run merge and gate before `gh pr merge`; define a hold for non-fast-forward push and for gh merge failure (branch protection, required checks); set timeouts on every gh and git call.",
+          "Make held goals ineligible for ship, use notify_once for every hold and ship notification, and say how a hold is released.",
+          "Exclude auto-ship for goals whose diff touches [review] security_paths or auth/billing/data-deletion (hold for a human instead). Update every conflicting line in CLAUDE.md (first line, step 7 'The human reviews every merged PR', step 8, Escalate) and note that the user-level approval gate on commits/pushes is being deliberately relaxed for this repo.",
+          "Specify the rollback command's checkout (fresh worktree from origin/<target>), behavior on revert conflict, existing rollback branch/PR, already-reverted merges, and whether it is gated. Warn that it reverts only that merge and may conflict with later merges.",
+          "Specify where [ship] is read (state-root pool.toml, parsed with a missing/malformed section defaulting to enabled=false), who sets enabled=true for this repo, and what require_full_gate=false does. Replace the luna-inbox special case with a config key.",
+          "Add tests: gate timeout hold, non-fast-forward push hold, resume after merged-but-unrecorded PR, held goal not re-shipped, assertion that no recorded git/gh call is a force or main push, LUNA_GATE_FULL=1 in env, and decisions.md written to the harness root only."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 8660,
+          "trimmed": {
+            "risks": 5
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791242803.6816142,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Out of scope but coupled. routine_close() and _open_pr() already open the goal/<id> to main PR and handle goal close. ship.py would duplicate PR creation with a different title format and `gh pr list --state all` semantics. Two code paths could race to open or merge the same PR, or close the goal before ship runs. The spec doesn't say how ship interacts with routine_close, or which one owns goal completion and status.",
+          "severity": "high",
+          "line": 1477
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "No insertion point is given. The spec says 'called from the daemon tick' but not where in tick() (line ~1889), relative to gate()/merge_reviewed(), or how it is serialized across ticks. The full gate can run for a long time (timeouts, a retry on timeout in run_gate), so a blocking call in tick() stalls dispatch, review and merge for every other goal. It needs to be run async or bounded, and guarded by a lock or a pipeline.ship_state marker so a second tick or a crashed daemon cannot double-ship.",
+          "severity": "high",
+          "line": 1889
+        },
+        {
+          "path": "orchestrator/ship.py",
+          "issue": "Not idempotent or resumable across steps. Steps a-d are non-atomic. A crash after `gh pr merge` but before pipeline.shipped is recorded means the next tick re-ships. It would find a merged PR (or none open), try to open a new PR with no new commits, or fail. A crash after the push but before the PR is created is also unhandled. The spec needs a persisted ship phase and a check of the PR state (`gh pr list --head --state all`) so it resumes rather than repeats. It also doesn't say what 'ready' means once pipeline.shipped is set. Without that, the 'ahead of target' check turns false only after the merge, and a hold followed by a human fix has no defined re-entry path.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/ship.py",
+          "issue": "Merging origin/<target> into the goal branch and then merging the PR means the gate runs on a tree that can go stale. If main moves between the gate and `gh pr merge`, the merged result was never tested. The spec doesn't require fetching origin again, comparing the target sha before the merge, or re-running the gate. It also doesn't say whether the merge-commit push uses a lease or fails on non-fast-forward. Since force-push is forbidden, a non-fast-forward push to goal/<goal> must be a defined hold, not a silent retry. Also unspecified: `gh pr merge` failing on required checks, branch protection or a stale head, and a timeout on the gh calls themselves (unguarded external calls).",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/ship.py",
+          "issue": "The hold and notify state can repeat. A held goal is 'ready' again on the next tick unless held is excluded from readiness. A held conflict or red gate would otherwise re-run the full gate and re-notify every 30s. Use notify_once (orchestrator/notify.py:32) and exclude held goals, with an explicit way to release the hold.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "`orchestrator rollback` runs `git revert -m 1` and pushes a branch from somewhere. The spec doesn't say which checkout or worktree to use (ROOT may have a dirty tree or a different HEAD), so it needs a fresh worktree. It also doesn't say what happens on a revert conflict, if the rollback branch or PR already exists, or if the merge is already reverted. Reverting an old merge can also silently undo later work, since main has moved on. The command should print the result clearly and not auto-merge without the same green-gate check as ship, or the spec should explicitly accept that risk. The notify text 'shipped ... rollback' implies a one-step undo that may not be safe.",
+          "severity": "med",
+          "line": 194
+        },
+        {
+          "path": "CLAUDE.md",
+          "issue": "Changing the first-line rule to 'automatic' removes the human merge gate. The user-level house rules require approval for git commits and pushes and treat external content as untrusted. The spec doesn't say whether the autonomous merge is covered by that approval gate, and security_paths-touching or auth/billing/data-deletion goals are not excluded from auto-ship. CLAUDE.md also has step 7 ('The human reviews every merged PR') and the Escalate section, which would contradict the new rule if only the first line and step 8 change. It also needs a non-Planner-writable-path check, since guardrails.sh protects some paths. The spec should require auto-ship to skip, or still hold for, goals whose diff matches [review] security_paths.",
+          "severity": "high",
+          "line": 1
+        },
+        {
+          "path": "pool.toml",
+          "issue": "pool.toml is not in the scope list, but the spec says '[ship].enabled ... this repo sets true' and the acceptance says enabled defaults to false. The file lives under the state root (STATE/pool.toml), not the repo, so the 'this repo sets true' change has no owner. The config reader for [ship] isn't specified either (a new helper vs an existing settings() pattern like gate.settings(cfg)), and the default must be false when the section or key is missing or the file is malformed.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "tests/test_ship.py",
+          "issue": "The acceptance criteria 'no force-push and no direct push to main anywhere in ship.py or the rollback command' is stated but has no named test. test_ship_merges_after_green_gate with a fake gh should assert the recorded git/gh calls contain no `--force`, `-f`, `+ref` or `push origin main`. Also missing: tests for gate timeout (the spec names a 'ship gate timeout' hold but only test_ship_holds_on_red_gate exists), non-fast-forward push, crash-resume after a merged PR, and the `LUNA_GATE_FULL=1` env being set. The `decisions.md` write goes through the shared record script and must be redirected to the harness temp root, or the test will pollute the shared state.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/ship.py",
+          "issue": "The spec says to 'run the full gate' via gate.run_gate(worktree, script=...) but gives no script path or how to select a full run for non-luna repos. 'luna-inbox' is a hardcoded special case with no mapping. It should be a config key (e.g. [ship].gate_env or a per-repo table) rather than a repo-name check, and the full-gate result must be required via `require_full_gate`, which the spec lists but never says what happens when it is false (skipped gate? quick gate?). A silent fallback to a lighter gate is a risk.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 3767,
+    "est_tokens": 941,
+    "presented_tokens": 941,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "2be34cda2d36093b2c00cb019c89c078260451e55eaea7227386fd7f2d0d12bf"
+      },
+      "spec": {
+        "chars": 2898,
+        "est_tokens": 724,
+        "sha256": "c3054da94d80f81d1b34a3ef664b62e9da94bfaab28c76a9f3e266b431793865"
+      },
+      "acceptance": {
+        "chars": 257,
+        "est_tokens": 64,
+        "sha256": "b6450ce4d5b4fd5f0032af670d64db6a150ea97efc6ca732332e357d88879641"
+      },
+      "scope": {
+        "chars": 112,
+        "est_tokens": 28,
+        "sha256": "58213425237bc658e76f858527bf596c9c35188b6cce484b71dc19d5d29100bc"
+      },
+      "depends_on": {
+        "chars": 119,
+        "est_tokens": 29,
+        "sha256": "b158552a60977606710a5d55e9c7e3a7b9c7b0fbe76ac93dad5ec980b1d4e04c"
+      },
+      "existing tests": {
+        "chars": 284,
+        "est_tokens": 71,
+        "sha256": "077e3b711d8e3339eab8a2cdf7a9d9f7e3ba5f7750c7367026f086baba81ce81"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "5922412c6a9a",
+    "version": "5922412c6a9a",
+    "candidate_known": false,
+    "base": "1accb371c18a",
+    "sources": "task@T-1660 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 4506,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 357,
+    "instruction_tokens_modular": 357,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "919f8d7c-baa6-44ae-ac7f-9daad7b11aa9",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791242763.386752,
+  "account": "A",
+  "pid": 90861,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Out of scope but coupled. routine_close() and _open_pr() already open the goal/<id> to main PR and handle goal close. ship.py would duplicate PR creation with a different title format and `gh pr list --state all` semantics. Two code paths could race to open or merge the same PR, or close the goal before ship runs. The spec doesn't say how ship interacts with routine_close, or which one owns goal completion and status.",
+      "severity": "high",
+      "line": 1477
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "No insertion point is given. The spec says 'called from the daemon tick' but not where in tick() (line ~1889), relative to gate()/merge_reviewed(), or how it is serialized across ticks. The full gate can run for a long time (timeouts, a retry on timeout in run_gate), so a blocking call in tick() stalls dispatch, review and merge for every other goal. It needs to be run async or bounded, and guarded by a lock or a pipeline.ship_state marker so a second tick or a crashed daemon cannot double-ship.",
+      "severity": "high",
+      "line": 1889
+    },
+    {
+      "path": "orchestrator/ship.py",
+      "issue": "Not idempotent or resumable across steps. Steps a-d are non-atomic. A crash after `gh pr merge` but before pipeline.shipped is recorded means the next tick re-ships. It would find a merged PR (or none open), try to open a new PR with no new commits, or fail. A crash after the push but before the PR is created is also unhandled. The spec needs a persisted ship phase and a check of the PR state (`gh pr list --head --state all`) so it resumes rather than repeats. It also doesn't say what 'ready' means once pipeline.shipped is set. Without that, the 'ahead of target' check turns false only after the merge, and a hold followed by a human fix has no defined re-entry path.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/ship.py",
+      "issue": "Merging origin/<target> into the goal branch and then merging the PR means the gate runs on a tree that can go stale. If main moves between the gate and `gh pr merge`, the merged result was never tested. The spec doesn't require fetching origin again, comparing the target sha before the merge, or re-running the gate. It also doesn't say whether the merge-commit push uses a lease or fails on non-fast-forward. Since force-push is forbidden, a non-fast-forward push to goal/<goal> must be a defined hold, not a silent retry. Also unspecified: `gh pr merge` failing on required checks, branch protection or a stale head, and a timeout on the gh calls themselves (unguarded external calls).",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/ship.py",
+      "issue": "The hold and notify state can repeat. A held goal is 'ready' again on the next tick unless held is excluded from readiness. A held conflict or red gate would otherwise re-run the full gate and re-notify every 30s. Use notify_once (orchestrator/notify.py:32) and exclude held goals, with an explicit way to release the hold.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "`orchestrator rollback` runs `git revert -m 1` and pushes a branch from somewhere. The spec doesn't say which checkout or worktree to use (ROOT may have a dirty tree or a different HEAD), so it needs a fresh worktree. It also doesn't say what happens on a revert conflict, if the rollback branch or PR already exists, or if the merge is already reverted. Reverting an old merge can also silently undo later work, since main has moved on. The command should print the result clearly and not auto-merge without the same green-gate check as ship, or the spec should explicitly accept that risk. The notify text 'shipped ... rollback' implies a one-step undo that may not be safe.",
+      "severity": "med",
+      "line": 194
+    },
+    {
+      "path": "CLAUDE.md",
+      "issue": "Changing the first-line rule to 'automatic' removes the human merge gate. The user-level house rules require approval for git commits and pushes and treat external content as untrusted. The spec doesn't say whether the autonomous merge is covered by that approval gate, and security_paths-touching or auth/billing/data-deletion goals are not excluded from auto-ship. CLAUDE.md also has step 7 ('The human reviews every merged PR') and the Escalate section, which would contradict the new rule if only the first line and step 8 change. It also needs a non-Planner-writable-path check, since guardrails.sh protects some paths. The spec should require auto-ship to skip, or still hold for, goals whose diff matches [review] security_paths.",
+      "severity": "high",
+      "line": 1
+    },
+    {
+      "path": "pool.toml",
+      "issue": "pool.toml is not in the scope list, but the spec says '[ship].enabled ... this repo sets true' and the acceptance says enabled defaults to false. The file lives under the state root (STATE/pool.toml), not the repo, so the 'this repo sets true' change has no owner. The config reader for [ship] isn't specified either (a new helper vs an existing settings() pattern like gate.settings(cfg)), and the default must be false when the section or key is missing or the file is malformed.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "tests/test_ship.py",
+      "issue": "The acceptance criteria 'no force-push and no direct push to main anywhere in ship.py or the rollback command' is stated but has no named test. test_ship_merges_after_green_gate with a fake gh should assert the recorded git/gh calls contain no `--force`, `-f`, `+ref` or `push origin main`. Also missing: tests for gate timeout (the spec names a 'ship gate timeout' hold but only test_ship_holds_on_red_gate exists), non-fast-forward push, crash-resume after a merged PR, and the `LUNA_GATE_FULL=1` env being set. The `decisions.md` write goes through the shared record script and must be redirected to the harness temp root, or the test will pollute the shared state.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/ship.py",
+      "issue": "The spec says to 'run the full gate' via gate.run_gate(worktree, script=...) but gives no script path or how to select a full run for non-luna repos. 'luna-inbox' is a hardcoded special case with no mapping. It should be a config key (e.g. [ship].gate_env or a per-repo table) rather than a repo-name check, and the full-gate result must be required via `require_full_gate`, which the spec lists but never says what happens when it is false (skipped gate? quick gate?). A silent fallback to a lighter gate is a risk.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

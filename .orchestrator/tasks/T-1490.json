@@ -1,0 +1,1413 @@
+{
+  "id": "T-1490",
+  "created_at": 1790892462.660557,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 4,
+  "title": "B4a: gitutil.execute_outcome, head_sha, _git_in timeout and a pure porcelain parser shared by test with daemon._dirty_scope_paths",
+  "spec": "Goal T-1403, wave 2, SPLIT after three spec-review rounds (T-1435, T-1453, T-1468). The commit-now resume of T-1435 stays DROPPED (no non_json case has a session).\n\nContract (plan.md): gitutil.execute_outcome(worktree, parent, scope, *, since=None) -> {ahead, head,\ndirty_in_scope, dirty_out_of_scope} | None; hold prefix 'execute_incomplete' (B5 maps it to failure kind\n'incomplete').\n\nEvidence (U2, 2026-10-01): status_reason non_json is set in spawn.run_worker when json.loads of the\n`claude -p --output-format json` stdout fails; every recorded case is 'non-JSON output (rc=143): ' with empty\noutput (SIGTERM). luna T-0526: the worker posted done itself through bus_post_result with a prose summary and\nreconcile marked the process dead. So the signal is the git state of the worktree, and a result the worker\nalready posted must win.\n\nFacts (goal/T-1403; spawn.py/gitutil.py/worker_control.py unchanged since main 355583c):\n- spawn.run_worker sets t['executor'] = 'claude:<tier>' for execute before run_claude; the done path posts\n  {'summary', 'executed_by': f\"claude:{tier}\", 'review'} with no commit; the failed path posts status failed,\n  reason, resume_hint.partial_output. Every write goes through worker_control.write_if_current (bus lock +\n  is_current(epoch)). run_claude returns only after the child process has exited (waits on the Popen); the\n  reaper path (worker_control) can mark the epoch stale while the child is still alive.\n- gitutil._git_in(worktree, *args) has no timeout; _resolve_base(worktree, parent); callers reconcile_dead and\n  changed_paths must keep their behaviour.\n- daemon._dirty_scope_paths parses `git status --porcelain -z --untracked-files=all` (rename pairs, ignores\n  .orchestrator/ and .venv); scopes.matches(path, entries) implements the same matching. Do not import daemon\n  from gitutil.\n\nChange (pure, read-only git evidence; nothing in spawn.py changes here):\n1. gitutil._git_in(worktree, *args, timeout=None): keyword-only timeout, default None keeps every existing caller unchanged;\n   subprocess.TimeoutExpired is caught explicitly wherever a timeout is passed.\n2. gitutil.parse_porcelain_z(output: str) -> list[str]: pure parser of `git status --porcelain -z --untracked-files=all`\n   output: rename pairs yield the new path, deletions are included, .orchestrator/ and .venv prefixes are ignored. No I/O.\n3. gitutil.head_sha(worktree, timeout=60) -> sha | None.\n4. gitutil.execute_outcome(worktree, parent, scope, *, since=None) -> {'ahead', 'head', 'dirty_in_scope', 'dirty_out_of_scope'}\n   | None: None when worktree is not a directory, not a git work tree, no base resolves, or any git call fails (non-zero rc,\n   OSError, TimeoutExpired); every git call uses timeout=60. ahead = rev-list --count <since or base>..HEAD; dirty paths from\n   parse_porcelain_z; in/out by scopes.matches(path, scope). Read-only.\nParity: tests/test_gitutil.py feeds one identical porcelain -z sample (rename pair, deletion, untracked file, .orchestrator/\nand .venv entries) to gitutil.parse_porcelain_z and to daemon._dirty_scope_paths (test-only import of daemon; gitutil never\nimports daemon) and asserts the same path set.\nRollback: `git revert` of the merge; no caller depends on the new functions until B4b lands.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gitutil.py::test_execute_outcome_reports_ahead_head_and_dirty_split_by_scope: passes: in a scratch repo with a goal branch and a task worktree, gitutil.execute_outcome(worktree, parent, scope) returns ahead (commits since merge-base with goal/<parent>), head sha, and uncommitted paths split into dirty_in_scope / dirty_out_of_scope (untracked and deleted paths included, .orchestrator/ and .venv ignored, scopes.matches rules); with since=<sha of an older commit> ahead counts only commits after it; returns None for a directory that is not a git work tree, when a git call fails, and when a git call raises subprocess.TimeoutExpired (patched); existing _git_in callers pass no timeout and behave as before",
+    "tests/test_gitutil.py::test_parse_porcelain_z_matches_daemon_dirty_scope_paths: passes: the same porcelain -z sample (rename pair, deletion, untracked, .orchestrator/ and .venv entries) gives the same path set from gitutil.parse_porcelain_z and daemon._dirty_scope_paths, and gitutil does not import daemon",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/gitutil.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B4a",
+    "respec_for": "T-1468"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1490",
+  "codex_thread": "01a0f985-e617-7083-ad51-b9dd20f61768",
+  "result": {
+    "summary": "Implemented and committed as `4753edf` (`T-1490 implement git execution outcomes`).\n\nSummary: Added timeout-aware git evidence, porcelain parser, `head_sha`, and `execute_outcome`; added acceptance tests.\n\nFiles changed:\n\n- `orchestrator/gitutil.py`\n- `tests/test_gitutil.py`\n\nTests: focused acceptance tests passed; `tests-green: OK 1565`.\n\nFailures-only output: empty.",
+    "executed_by": "codex:luna",
+    "thread": "01a0f985-e617-7083-ad51-b9dd20f61768",
+    "usage": {
+      "input_tokens": 857226,
+      "cached_input_tokens": 791040,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 8516,
+      "reasoning_output_tokens": 3044,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790892469.864583,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399
+      }
+    },
+    {
+      "ts": 1790892469.8663151,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589
+      }
+    },
+    {
+      "ts": 1790892469.86725,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589
+      }
+    },
+    {
+      "ts": 1790892473.4471009,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 6499,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790892473.448947,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012
+      }
+    },
+    {
+      "ts": 1790892693.223664,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        }
+      }
+    },
+    {
+      "ts": 1790892694.901719,
+      "packet_meta": {
+        "chars": 5620,
+        "est_tokens": 1405,
+        "presented_tokens": 1405,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "30869fcce43b238357cce54dce88a0be1657ecd6c4c5b6ce9e74917f405b514c"
+          },
+          "objective": {
+            "chars": 3731,
+            "est_tokens": 932,
+            "sha256": "62c1c8f44b406ea1fe8a7988e533f9a4904a6d43f7c62e16a1b9fe71517f4457"
+          },
+          "acceptance": {
+            "chars": 1096,
+            "est_tokens": 274,
+            "sha256": "3619c8813fb001a8e044c4892e84241bee0f70d8beee72053b004b39cfa1b724"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 65,
+            "est_tokens": 16,
+            "sha256": "a54fdffc6c50216f325e48698c1fde2b6ded359b07df0744a896ce13f6c3df02"
+          },
+          "read_scope": {
+            "chars": 92,
+            "est_tokens": 23,
+            "sha256": "1d3d24cd6106b369f97dcac867573ff82c985bbd75377a62af6869b92bd1481a"
+          },
+          "constraints": {
+            "chars": 197,
+            "est_tokens": 49,
+            "sha256": "75400a80997ca913c4236ac10d17402f418170dd3f7b15ae979c9aa730f183e1"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "0137f6e10776",
+        "version": "0137f6e10776",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@a8842da1d3ee gotchas@72a7d9ee413c memory@notes over cap by 820 chars: acceptance kept whole routed=shadow",
+        "policy_version": "a8842da1d3ee",
+        "gotchas": "72a7d9ee413c",
+        "candidate_tokens": 3074,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 4462,
+        "routed_reduction_ratio": 0.9437394247038917,
+        "routed_hidden": 4,
+        "routed_ambiguous": 17,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "7010254c79f4",
+          "096831fca6bd",
+          "49e2be8325e2",
+          "2e7e4f63c28b",
+          "fe4881500f2e",
+          "58d46b7fb9c9",
+          "00456a120e42",
+          "504365aa02ad",
+          "03b95d50b0cc",
+          "3b2b7dad4253",
+          "e935cb55e822",
+          "c1e9237cada8",
+          "7967f3419362",
+          "6199988f2d6f",
+          "9fb118328d28",
+          "fc0c12e9d029",
+          "62d205c3957a",
+          "df8db058797e",
+          "c3ee22564a99",
+          "98caa5edd389",
+          "4862864fd1d5",
+          "c5cdab769cd2",
+          "a4970df17aec",
+          "310c19bec66f",
+          "6a1065a75bfe",
+          "cd27ddffa804",
+          "10a21c904de0",
+          "e94fb892d4e6",
+          "43951458bcbf",
+          "aa0e8ffd5080",
+          "7f9eaadafb62",
+          "eac8102a32a7",
+          "99d4e17b27ff",
+          "6094b8f5ec38",
+          "ce39aa531adb",
+          "2ae5a356da7e",
+          "ba4da59d8cf0",
+          "19079049cf15",
+          "d74cca9ec371",
+          "e71f806bdd72",
+          "190c21bc50ec",
+          "65b99dde01d8",
+          "8bef670768a3",
+          "4233ba892720",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "69ac414323d9",
+          "bd9a7d2b5594",
+          "4d1519822479",
+          "14934bf984ae",
+          "7f4f9ea1c321",
+          "c6151520d6ca",
+          "d84cca8d91ca"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 6499,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 410,
+        "instruction_tokens_modular": 410,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790892694.902959,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1490",
+      "claimed_at": 1790892694.90272
+    },
+    {
+      "ts": 1790892694.9039218,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1790893333.528049,
+      "codex_thread": "01a0f985-e617-7083-ad51-b9dd20f61768",
+      "codex_thread_head": "4753edf63d3780e3d313970621571b485a99039a"
+    },
+    {
+      "ts": 1790893333.530015,
+      "packet_meta": {
+        "chars": 5620,
+        "est_tokens": 1405,
+        "presented_tokens": 1405,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "30869fcce43b238357cce54dce88a0be1657ecd6c4c5b6ce9e74917f405b514c"
+          },
+          "objective": {
+            "chars": 3731,
+            "est_tokens": 932,
+            "sha256": "62c1c8f44b406ea1fe8a7988e533f9a4904a6d43f7c62e16a1b9fe71517f4457"
+          },
+          "acceptance": {
+            "chars": 1096,
+            "est_tokens": 274,
+            "sha256": "3619c8813fb001a8e044c4892e84241bee0f70d8beee72053b004b39cfa1b724"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 65,
+            "est_tokens": 16,
+            "sha256": "a54fdffc6c50216f325e48698c1fde2b6ded359b07df0744a896ce13f6c3df02"
+          },
+          "read_scope": {
+            "chars": 92,
+            "est_tokens": 23,
+            "sha256": "1d3d24cd6106b369f97dcac867573ff82c985bbd75377a62af6869b92bd1481a"
+          },
+          "constraints": {
+            "chars": 197,
+            "est_tokens": 49,
+            "sha256": "75400a80997ca913c4236ac10d17402f418170dd3f7b15ae979c9aa730f183e1"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "0137f6e10776",
+        "version": "0137f6e10776",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@a8842da1d3ee gotchas@72a7d9ee413c memory@notes over cap by 820 chars: acceptance kept whole routed=shadow",
+        "policy_version": "a8842da1d3ee",
+        "gotchas": "72a7d9ee413c",
+        "candidate_tokens": 3074,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 4462,
+        "routed_reduction_ratio": 0.9437394247038917,
+        "routed_hidden": 4,
+        "routed_ambiguous": 17,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "7010254c79f4",
+          "096831fca6bd",
+          "49e2be8325e2",
+          "2e7e4f63c28b",
+          "fe4881500f2e",
+          "58d46b7fb9c9",
+          "00456a120e42",
+          "504365aa02ad",
+          "03b95d50b0cc",
+          "3b2b7dad4253",
+          "e935cb55e822",
+          "c1e9237cada8",
+          "7967f3419362",
+          "6199988f2d6f",
+          "9fb118328d28",
+          "fc0c12e9d029",
+          "62d205c3957a",
+          "df8db058797e",
+          "c3ee22564a99",
+          "98caa5edd389",
+          "4862864fd1d5",
+          "c5cdab769cd2",
+          "a4970df17aec",
+          "310c19bec66f",
+          "6a1065a75bfe",
+          "cd27ddffa804",
+          "10a21c904de0",
+          "e94fb892d4e6",
+          "43951458bcbf",
+          "aa0e8ffd5080",
+          "7f9eaadafb62",
+          "eac8102a32a7",
+          "99d4e17b27ff",
+          "6094b8f5ec38",
+          "ce39aa531adb",
+          "2ae5a356da7e",
+          "ba4da59d8cf0",
+          "19079049cf15",
+          "d74cca9ec371",
+          "e71f806bdd72",
+          "190c21bc50ec",
+          "65b99dde01d8",
+          "8bef670768a3",
+          "4233ba892720",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "69ac414323d9",
+          "bd9a7d2b5594",
+          "4d1519822479",
+          "14934bf984ae",
+          "7f4f9ea1c321",
+          "c6151520d6ca",
+          "d84cca8d91ca"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 6499,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 410,
+        "instruction_tokens_modular": 410,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790893333.9924512,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790893333.99597,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed as `4753edf` (`T-1490 implement git execution outcomes`).\n\nSummary: Added timeout-aware git evidence, porcelain parser, `head_sha`, and `execute_outcome`; added acceptance tests.\n\nFiles changed:\n\n- `orchestrator/gitutil.py`\n- `tests/test_gitutil.py`\n\nTests: focused acceptance tests passed; `tests-green: OK 1565`.\n\nFailures-only output: empty.",
+        "executed_by": "codex:luna",
+        "thread": "01a0f985-e617-7083-ad51-b9dd20f61768",
+        "usage": {
+          "input_tokens": 857226,
+          "cached_input_tokens": 791040,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8516,
+          "reasoning_output_tokens": 3044,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790893376.331745,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790893553.654668,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790893554.247115,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        }
+      }
+    },
+    {
+      "ts": 1790893554.4792829,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a"
+      }
+    },
+    {
+      "ts": 1790893554.489624,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+        "gated_at_done": 1790893554.4893289
+      }
+    },
+    {
+      "ts": 1790893586.636996,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790893634.8398988,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+        "gated_at_done": 1790893554.4893289,
+        "review_held_at": 1790893634.8397
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-1502 (request_changes)"
+    },
+    {
+      "ts": 1790893639.113085,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+        "gated_at_done": 1790893554.4893289,
+        "review_held_at": 1790893634.8397,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790893640.4842398,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+        "gated_at_done": 1790893554.4893289,
+        "review_held_at": 1790893634.8397,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790893634.8398988": true
+        }
+      }
+    },
+    {
+      "ts": 1790894091.9816802,
+      "codex_thread": "01a0f985-e617-7083-ad51-b9dd20f61768",
+      "codex_thread_head": "205a5e79b194d33b5138f6eb36e8f8092d1d8cbe"
+    },
+    {
+      "ts": 1790894092.43085,
+      "rounds": 1
+    },
+    {
+      "ts": 1790894275.490558,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+        "gated_at_done": 1790893554.4893289,
+        "review_held_at": 1790893634.8397,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790893634.8398988": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790894558.725614,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1503 205a5e79b194d33b5138f6eb36e8f8092d1d8cbe",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790892469.8645399,
+        "dispatched_at": 1790892469.8662589,
+        "dispatched_at_lease": 1790893369.8662589,
+        "dispatched_at_done": 1790892473.4489012,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790892693.22323
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790893553.654485,
+        "gated_at_lease": 1790894453.654485,
+        "first_green_at": 1790893553.653593,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1490",
+          "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "none",
+          "severity_reasons": [],
+          "checked_at": 1790893554.246683,
+          "head": "4753edf63d3780e3d313970621571b485a99039a"
+        },
+        "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+        "gated_at_done": 1790893554.4893289,
+        "review_held_at": 1790893634.8397,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790893634.8398988": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790894558.7233799
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790892469.8645399,
+    "dispatched_at": 1790892469.8662589,
+    "dispatched_at_lease": 1790893369.8662589,
+    "dispatched_at_done": 1790892473.4489012,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790892693.22323
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "c46147602484b67dfa7f06a91c07b1691681e654",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790893553.654485,
+    "gated_at_lease": 1790894453.654485,
+    "first_green_at": 1790893553.653593,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1490",
+      "goal_head": "2a98e8bc83c19d2e69ae9e9789c64e7845c0b471",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "severity": "none",
+      "severity_reasons": [],
+      "checked_at": 1790893554.246683,
+      "head": "4753edf63d3780e3d313970621571b485a99039a"
+    },
+    "reviewed_sha": "4753edf63d3780e3d313970621571b485a99039a",
+    "gated_at_done": 1790893554.4893289,
+    "review_held_at": 1790893634.8397,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790893634.8398988": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790894558.7233799
+  },
+  "packet_meta": {
+    "chars": 5620,
+    "est_tokens": 1405,
+    "presented_tokens": 1405,
+    "sections": {
+      "_preamble": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "30869fcce43b238357cce54dce88a0be1657ecd6c4c5b6ce9e74917f405b514c"
+      },
+      "objective": {
+        "chars": 3731,
+        "est_tokens": 932,
+        "sha256": "62c1c8f44b406ea1fe8a7988e533f9a4904a6d43f7c62e16a1b9fe71517f4457"
+      },
+      "acceptance": {
+        "chars": 1096,
+        "est_tokens": 274,
+        "sha256": "3619c8813fb001a8e044c4892e84241bee0f70d8beee72053b004b39cfa1b724"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+      },
+      "write_scope": {
+        "chars": 65,
+        "est_tokens": 16,
+        "sha256": "a54fdffc6c50216f325e48698c1fde2b6ded359b07df0744a896ce13f6c3df02"
+      },
+      "read_scope": {
+        "chars": 92,
+        "est_tokens": 23,
+        "sha256": "1d3d24cd6106b369f97dcac867573ff82c985bbd75377a62af6869b92bd1481a"
+      },
+      "constraints": {
+        "chars": 197,
+        "est_tokens": 49,
+        "sha256": "75400a80997ca913c4236ac10d17402f418170dd3f7b15ae979c9aa730f183e1"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "0137f6e10776",
+    "version": "0137f6e10776",
+    "candidate_known": true,
+    "base": "355583cf1c12",
+    "sources": "pool.toml@a8842da1d3ee gotchas@72a7d9ee413c memory@notes over cap by 820 chars: acceptance kept whole routed=shadow",
+    "policy_version": "a8842da1d3ee",
+    "gotchas": "72a7d9ee413c",
+    "candidate_tokens": 3074,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 4462,
+    "routed_reduction_ratio": 0.9437394247038917,
+    "routed_hidden": 4,
+    "routed_ambiguous": 17,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "7010254c79f4",
+      "096831fca6bd",
+      "49e2be8325e2",
+      "2e7e4f63c28b",
+      "fe4881500f2e",
+      "58d46b7fb9c9",
+      "00456a120e42",
+      "504365aa02ad",
+      "03b95d50b0cc",
+      "3b2b7dad4253",
+      "e935cb55e822",
+      "c1e9237cada8",
+      "7967f3419362",
+      "6199988f2d6f",
+      "9fb118328d28",
+      "fc0c12e9d029",
+      "62d205c3957a",
+      "df8db058797e",
+      "c3ee22564a99",
+      "98caa5edd389",
+      "4862864fd1d5",
+      "c5cdab769cd2",
+      "a4970df17aec",
+      "310c19bec66f",
+      "6a1065a75bfe",
+      "cd27ddffa804",
+      "10a21c904de0",
+      "e94fb892d4e6",
+      "43951458bcbf",
+      "aa0e8ffd5080",
+      "7f9eaadafb62",
+      "eac8102a32a7",
+      "99d4e17b27ff",
+      "6094b8f5ec38",
+      "ce39aa531adb",
+      "2ae5a356da7e",
+      "ba4da59d8cf0",
+      "19079049cf15",
+      "d74cca9ec371",
+      "e71f806bdd72",
+      "190c21bc50ec",
+      "65b99dde01d8",
+      "8bef670768a3",
+      "4233ba892720",
+      "ae61acc3156e",
+      "a48883e9da6e",
+      "a98276b73bf8",
+      "985ffb7f01b9",
+      "69ac414323d9",
+      "bd9a7d2b5594",
+      "4d1519822479",
+      "14934bf984ae",
+      "7f4f9ea1c321",
+      "c6151520d6ca",
+      "d84cca8d91ca"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 6499,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 410,
+    "instruction_tokens_modular": 410,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790892694.90272,
+  "rounds": 1,
+  "executor": "luna",
+  "codex_thread_head": "205a5e79b194d33b5138f6eb36e8f8092d1d8cbe",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1503 205a5e79b194d33b5138f6eb36e8f8092d1d8cbe"
+}

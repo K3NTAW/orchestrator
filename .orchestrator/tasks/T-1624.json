@@ -1,0 +1,738 @@
+{
+  "id": "T-1624",
+  "created_at": 1791026304.352215,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: B5 v4 (fix round of T-1554): fix rounds for incomplete and failed execute tasks, recorded leftovers only, defined keys and later passes, quiet deferral",
+  "spec": "Goal T-1403, wave 2, plan label B5-v4. Respec of B5 v3 T-1617 (spec review T-1619 request_changes 2026-10-03; human go 'continue with your recommendations': option 2, no embedded leftover diff), filed as a FIX ROUND of T-1554 so its merge stamps T-1554 and E7 T-1555 stays valid; the worktree is cut from goal/T-1403. Evidence: plan-log.md backlog 2026-09-27 (a failed luna task sat ~2 h with 16 uncommitted files; nothing files a fix round for a failed execute task). B4b (merged) turns a dead Claude run into a hold 'execute_incomplete: ...' with resume_hint {dirty_in_scope, dirty_out_of_scope, head, partial_output}; this task makes the daemon act on it.\n\nFacts (goal/T-1403; locate by symbol): failures.failure_kind(task, worktree, ...) reads task.hold_reason only; returns conflict, environment, permissions, quota, invalid_spec, code_defect (also review request_changes with rejecting comments), unknown, flaky. daemon.auto_fix_round(pool) iterates held execute tasks only; routine for code_defect+gate_red with parsed test ids or code_defect+review request_changes with in-scope comments; files 'fix round n' via bus.create_task with _fix_round_spec rendering .orchestrator/prompts/fix-round.md (fields {branch} {failed_acceptance} {failure_kind} {failure_text} {head_sha} {held_id} {n} {original_acceptance} {review_comments} {root_id} {root_title}); failure_text goes through fence_data; the round key is planner_runs._held_at (latest status=held event ts) compared with the singular pipeline.auto_fix_hold_key; the chain check skips when a non-failed task has fix_round_for == id; failure_signature hashes kind, test ids and review comments; the autonomous block ([planner].autonomous and decision.routes_enabled) overwrites routine from decision.route; auto_fix_skipped triggers the 'automatic fix round escalated' notify. Failed execute tasks today: merge 'tests_red' (resume_hint.failures = stderr tail), rebase_conflict, spawn 'non-JSON output (rc=...)', daemon 'dispatch error: ...', spawn 'post_result failed: ...'; supersede notes use failed/superseded with 'superseded by ...', 'not run: ...', 'parent_merged', 'cancelled'. Before relying on a reason prefix, grep spawn.py, daemon.py, merge.py and worker_control.py for the exact strings written and use those.\n\nChange:\n1. failures.failure_kind: reason = hold_reason or task['reason']; the incomplete check uses the lowercased reason: starting 'execute_incomplete' -> 'incomplete' (before the conflict check). 'tests_red' is an explicit alias of 'gate_red' at all three gate_red comparisons (quota-marker exemption via _strip_test_ids, the flaky_runs short-circuit, the rerun guard): test ids come from resume_hint.failures, the flaky rerun runs only when the worktree directory exists, otherwise 'code_defect'. gate_red holds unchanged.\n2. daemon.auto_fix_round candidates = held execute tasks (as today) + failed execute tasks. Failed-task filters run cheapest first: has a parent; reason does not start with 'superseded', 'not run', 'parent_merged', 'cancelled' or 'rebase_conflict'; latest status=failed event ts newer than now - [daemon].failed_round_max_age_s (default 21600); merged_into unset; exclusion scan (only role == 'execute' tasks not superseded/failed that name the candidate in constraints.fix_round_for, constraints.respec_for or inputs; review, spec_review and gate rows never exclude); lineage/stale; already_merged(t); failure_kind last. Failed candidates are processed oldest daemon._failed_at first (latest failed event ts, fallback created_at); at most [daemon].failed_rounds_per_pass (default 2) FILED rounds per pass; candidates beyond the limit are deferred silently: no auto_fix_skipped, no notify, no pipeline write. routine additionally when kind == 'incomplete'; when a failed task's reason is 'tests_red' and _test_ids(resume_hint.failures) parses at least one id (treated like gate_red); and when a failed task's reason starts with 'non-JSON', 'dispatch error' or 'post_result failed' and failure_kind returned 'unknown' (routine as kind 'incomplete'; a quota, permissions or environment kind is never routine). The existing [daemon].auto_fix_rounds cap per root applies to all of these. pipeline.failure_kind is written for failed tasks exactly as for held ones.\n3. Conversion: a failed candidate is converted ONLY in the locked block that files its round: status 'held', hold_reason = original reason VERBATIM, pipeline.prior_status = 'failed', pipeline.failure_kind, pipeline.converted_at. A failed candidate that gets no round for a non-routine kind, the cap or a repeated signature keeps status 'failed' and records only pipeline.auto_fix_skipped (as holds do). On later passes a converted task is classified with pipeline.prior_status == 'failed' meaning its original failed-reason rules apply (the same routine rules as in item 2), so round 2 follows the same path as round 1. Other held-task consumers (planner_runs, worker_control, dependents) see an ordinary hold; no change there.\n4. Keys and race: keep the singular pipeline.auto_fix_hold_key for held candidates exactly as today. Inside ONE bus.locked() block: re-read the task; file only if its status is still 'failed' (or still 'held' with the same _held_at for hold candidates), the chain check and the exclusion scan still pass, and the key is unchanged; then convert (failed only), bus.create_task the round, re-read the task after the status update and set pipeline.auto_fix_hold_key = _held_at(re-read task). A second pass right after the first files nothing. No list of keys.\n5. failure_signature: for kind 'incomplete' and failed-task reruns include the reason class (text before the first ':'), sorted dirty_in_scope + dirty_out_of_scope and resume_hint.head (missing values count as empty); tests_red reruns keep their test ids as the input, like gate_red. Identical state -> 'repeated' (escalate); a different head or dirty set gets a round up to the cap.\n6. Autonomous block: skipped when the candidate is a converted failed task or kind == 'incomplete'; pipeline.auto_fix_route = 'routine_incomplete'; decision.py and planner_runs.py untouched.\n7. _fix_round_spec / fix-round.md: new field {incomplete_note}: empty unless kind is incomplete, else: the previous run ended '<reason>'; commits so far are on <branch> (head <sha>); the uncommitted leftovers recorded at the hold (dirty_in_scope / dirty_out_of_scope, as a list) remain in <held worktree path>, inspect them there with git status and git diff; finish the acceptance, commit, do not run the full gate. No diff is captured or embedded. failure_text for incomplete rounds is partial_output when present, passed through fence_data like other failure_text.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_failures.py failure_kind tests pass unchanged; tests/test_daemon.py auto_fix_round tests (held tasks only) pass unchanged, including any that read pipeline.auto_fix_hold_key; the fix-round prompt tests (grep 'fix-round' / '_fix_round_spec') pin the rendered text: update them for the new field. Run tests/test_failures.py and tests/test_daemon.py in the foreground after committing; never background a command and never run the full gate.\n\nOut of scope: spawn.py, merge.py, planner_runs.py, decision.py, worker_control.py. Rollback: git revert of the merge commit; converted tasks return to failed via bus.update(status=pipeline.prior_status).\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests; never module-level test functions. Simulate the in-lock race by patching bus.get so the re-read inside the lock returns the task as superseded. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [
+    "T-1622"
+  ],
+  "acceptance": [
+    "tests/test_failures.py::test_failure_kind_incomplete_for_execute_incomplete_hold_and_failed_reason: passes: failure_kind returns 'incomplete' for hold_reason 'execute_incomplete: no commits' and for a failed task (hold_reason None, reason 'Execute_incomplete: uncommitted changes outside scope'); a failed task with reason 'tests_red' whose resume_hint.failures names one Python test id classifies as 'code_defect', or 'flaky' when a rerun of the parsed ids passes, and as 'code_defect' when the worktree directory is missing; failure_signature differs for two incomplete failures with different heads or dirty sets, is equal for identical ones, and treats a missing head as empty",
+    "tests/test_daemon.py::test_auto_fix_round_files_rounds_for_incomplete_and_failed_execute_tasks: passes: auto_fix_round files 'fix round 1' for a held task 'execute_incomplete: no commits' (failure_kind incomplete), for a failed task with reason 'non-JSON output (rc=143): ' (converted to held with hold_reason equal to that reason verbatim and pipeline.prior_status 'failed' in the same pass), and for a failed task with reason tests_red whose resume_hint.failures parse to test ids; files nothing for failed tasks whose reason starts with 'superseded', 'not run', 'parent_merged' or 'cancelled', for rebase_conflict, for one older than [daemon].failed_round_max_age_s, for one named by another execute task's respec_for or fix_round_for, or for one already merged; a second pass right after the first files nothing; the auto_fix_rounds cap and the repeated-signature guard hold; with [planner].autonomous True and routes enabled the incomplete round is still filed and pipeline.auto_fix_route is 'routine_incomplete'",
+    "tests/test_daemon.py::test_auto_fix_round_note_lists_leftovers_and_converts_only_when_filed: passes: the round for an incomplete held task has an incomplete note naming the held worktree path and each recorded dirty path and no diff hunk; partial_output appears fenced; a failed candidate that gets no round for a non-routine kind keeps status 'failed' and its pipeline differs only by auto_fix_skipped; a converted task that fails again later gets round 2 through the same routine rule",
+    "tests/test_daemon.py::test_auto_fix_round_rechecks_in_lock_and_limits_failed_per_pass: passes: a failed task whose in-lock re-read returns it superseded is left untouched and no round is filed; with three eligible failed tasks of different failed times and failed_rounds_per_pass 2, pass one files rounds for the two oldest and writes nothing on the third (no auto_fix_skipped, no notify), and pass two files the third; a failed task with a done review row naming it in inputs is still a candidate"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/failures.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_failures.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1624",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Item 3 and the acceptance test say a skipped failed candidate's pipeline 'differs only by auto_fix_skipped'. Item 2 says pipeline.failure_kind is written for failed tasks as for held ones. The first locked block in auto_fix_round writes pipeline.failure_kind for every candidate. The two statements contradict each other, and the test cannot pass as written.",
+        "severity": "high",
+        "line": 179
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Existing code uses `held.get(\"hold_reason\", \"\").startswith(...)` and `reason = held.get(\"hold_reason\", \"\")`. A failed task carries hold_reason=None, so these raise AttributeError or give reason None. The spec does not say to normalise with `or \"\"`. It also does not say the existing guards (gate_timeout, cancelled, render_error, unlanded_after_fix_round, infra_failure) apply to failed candidates. They key on hold_reason, so for a failed task they read reason instead.",
+        "severity": "high",
+        "line": 159
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The skip and escalation path keys on `key = str(_held_at(...))`, and the loop does `continue` when it is None. A failed candidate has no held event, so it has no key. A non-routine, capped or repeated failed candidate then either silently never records auto_fix_skipped or re-notifies every pass. Item 4 only defines the key for held candidates. Define an explicit key for failed candidates, such as _failed_at, for auto_fix_skipped.",
+        "severity": "high",
+        "line": 169
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The round-2 path for a 'converted task' is ambiguous. After conversion the held task has the same _held_at and auto_fix_hold_key, so it is skipped for good. The round-1 child fails, and that child is a fresh failed task with no prior_status. So 'classified with pipeline.prior_status == failed' never applies to it. State which task round 2 hangs off and how the cap and chain apply. Say whether the child's reason is classified by the failed-reason rules. Say whether the converted parent stays held or is reverted to failed.",
+        "severity": "med",
+        "line": 195
+      },
+      {
+        "path": "orchestrator/failures.py",
+        "issue": "failure_signature reads pipeline.failure_kind and resume_hint, but item 5 keys on 'failed-task reruns'. When the signature is computed for a failed candidate's first round, prior_status is not set yet because conversion happens later, in the lock. Specify the discriminator, such as task status or reason class. For non-JSON, dispatch error and post_result failed, failure_kind returns 'unknown' while the local kind is treated as 'incomplete'. Say which kind goes into pipeline.failure_kind, the signature and {failure_kind}.",
+        "severity": "med",
+        "line": 79
+      },
+      {
+        "path": ".orchestrator/prompts/fix-round.md",
+        "issue": "incomplete_note embeds the reason text and dirty_in_scope / dirty_out_of_scope paths. These are untrusted content: filenames, partial_output and a hold reason that can carry non-JSON tail text. The spec only fences failure_text. Run the note's untrusted parts through fence_data and place them inside the data fence. The prompt tells the executor to follow the note, so unfenced paths are an injection vector.",
+        "severity": "med",
+        "line": 14
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The note sends the new executor to inspect leftovers in the held worktree, with no check that the directory exists. Failed or reaped worktrees may be gone or outside the new executor's sandbox. Add a guard: if the path is missing, say so, and do not claim leftovers are recoverable. Say how the new round gets the held branch's commits, since the round is cut from goal/T-1403.",
+        "severity": "med",
+        "line": 114
+      }
+    ],
+    "suggested_spec_changes": [
+      "Resolve the pipeline contradiction. Either drop 'differs only by auto_fix_skipped' (the test then asserts status stays failed and auto_fix_skipped is present), or say failure_kind is not written for unconverted failed candidates.",
+      "Define the idempotency and skip key for failed candidates (latest failed event ts via _failed_at) and use it for auto_fix_skipped and notify dedupe. Keep auto_fix_hold_key for held candidates and for converted ones.",
+      "Require `reason = (task.get('hold_reason') or task.get('reason') or '')` throughout auto_fix_round and apply the existing hold_reason guards to failed candidates. Add a test where hold_reason is None.",
+      "Specify exactly how round 2 is reached for a failed round-1 child versus a converted parent. State whether a converted parent reverts to failed when the round fails. Specify what discriminator failure_signature uses before conversion.",
+      "Fence all untrusted pieces of incomplete_note (reason, dirty paths) and guard the case where the held worktree path no longer exists. Say how the round obtains the held branch's commits.",
+      "Add an acceptance check that planner_runs does not double-route a converted hold. Alternatively, justify conversion over filing the round while the task stays failed, and document the rollback including hold_reason cleanup.",
+      "Add a README paragraph for the two new [daemon] keys, or state that they are undocumented by choice."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6775,
+      "trimmed": {
+        "risks": 3
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791026314.298818,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11953,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791030963.117381,
+      "packet_meta": {
+        "chars": 11214,
+        "est_tokens": 2803,
+        "presented_tokens": 2803,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b0647b9ac5cd8ecd75e444d9974c35addf5d289f7161618fd4d10c5a0f280a24"
+          },
+          "spec": {
+            "chars": 7905,
+            "est_tokens": 1976,
+            "sha256": "245a4e181afaa8af54118c3419e79ab333b96a46227c1041d011e2cd3bbde557"
+          },
+          "acceptance": {
+            "chars": 2706,
+            "est_tokens": 676,
+            "sha256": "ba2d71cc994d3edf1c01c1b53241d3c50b45b919ab6a62cb70145eb25873e9d4"
+          },
+          "scope": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "8fdd6dee53c41345eb522a6bbcd33ce1b47923cfcae95f90ae8a70fe8af7bbe6"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 337,
+            "est_tokens": 84,
+            "sha256": "35d2343497cbcaec02d516fff290448b94d6f5d9fa99ee999263151946984203"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "c43c7dd5ceeb",
+        "version": "c43c7dd5ceeb",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1622 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11953,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791030965.84387,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1624",
+      "claimed_at": 1791030965.8431911
+    },
+    {
+      "ts": 1791030965.846911,
+      "account": "A"
+    },
+    {
+      "ts": 1791030975.266935,
+      "pid": 50853,
+      "account": "A"
+    },
+    {
+      "ts": 1791031066.94924,
+      "packet_meta": {
+        "chars": 11214,
+        "est_tokens": 2803,
+        "presented_tokens": 2803,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b0647b9ac5cd8ecd75e444d9974c35addf5d289f7161618fd4d10c5a0f280a24"
+          },
+          "spec": {
+            "chars": 7905,
+            "est_tokens": 1976,
+            "sha256": "245a4e181afaa8af54118c3419e79ab333b96a46227c1041d011e2cd3bbde557"
+          },
+          "acceptance": {
+            "chars": 2706,
+            "est_tokens": 676,
+            "sha256": "ba2d71cc994d3edf1c01c1b53241d3c50b45b919ab6a62cb70145eb25873e9d4"
+          },
+          "scope": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "8fdd6dee53c41345eb522a6bbcd33ce1b47923cfcae95f90ae8a70fe8af7bbe6"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 337,
+            "est_tokens": 84,
+            "sha256": "35d2343497cbcaec02d516fff290448b94d6f5d9fa99ee999263151946984203"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "c43c7dd5ceeb",
+        "version": "c43c7dd5ceeb",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1622 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11953,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "0ff51fb3-9c7e-42ce-8d47-8e2a9c607f87"
+      }
+    },
+    {
+      "ts": 1791031066.973269,
+      "packet_meta": {
+        "chars": 11214,
+        "est_tokens": 2803,
+        "presented_tokens": 2803,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b0647b9ac5cd8ecd75e444d9974c35addf5d289f7161618fd4d10c5a0f280a24"
+          },
+          "spec": {
+            "chars": 7905,
+            "est_tokens": 1976,
+            "sha256": "245a4e181afaa8af54118c3419e79ab333b96a46227c1041d011e2cd3bbde557"
+          },
+          "acceptance": {
+            "chars": 2706,
+            "est_tokens": 676,
+            "sha256": "ba2d71cc994d3edf1c01c1b53241d3c50b45b919ab6a62cb70145eb25873e9d4"
+          },
+          "scope": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "8fdd6dee53c41345eb522a6bbcd33ce1b47923cfcae95f90ae8a70fe8af7bbe6"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 337,
+            "est_tokens": 84,
+            "sha256": "35d2343497cbcaec02d516fff290448b94d6f5d9fa99ee999263151946984203"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "c43c7dd5ceeb",
+        "version": "c43c7dd5ceeb",
+        "candidate_known": false,
+        "base": "884f2d03c34e",
+        "sources": "task@T-1622 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11953,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "0ff51fb3-9c7e-42ce-8d47-8e2a9c607f87",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791031067.790854,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Item 3 and the acceptance test say a skipped failed candidate's pipeline 'differs only by auto_fix_skipped'. Item 2 says pipeline.failure_kind is written for failed tasks as for held ones. The first locked block in auto_fix_round writes pipeline.failure_kind for every candidate. The two statements contradict each other, and the test cannot pass as written.",
+            "severity": "high",
+            "line": 179
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Existing code uses `held.get(\"hold_reason\", \"\").startswith(...)` and `reason = held.get(\"hold_reason\", \"\")`. A failed task carries hold_reason=None, so these raise AttributeError or give reason None. The spec does not say to normalise with `or \"\"`. It also does not say the existing guards (gate_timeout, cancelled, render_error, unlanded_after_fix_round, infra_failure) apply to failed candidates. They key on hold_reason, so for a failed task they read reason instead.",
+            "severity": "high",
+            "line": 159
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The skip and escalation path keys on `key = str(_held_at(...))`, and the loop does `continue` when it is None. A failed candidate has no held event, so it has no key. A non-routine, capped or repeated failed candidate then either silently never records auto_fix_skipped or re-notifies every pass. Item 4 only defines the key for held candidates. Define an explicit key for failed candidates, such as _failed_at, for auto_fix_skipped.",
+            "severity": "high",
+            "line": 169
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The round-2 path for a 'converted task' is ambiguous. After conversion the held task has the same _held_at and auto_fix_hold_key, so it is skipped for good. The round-1 child fails, and that child is a fresh failed task with no prior_status. So 'classified with pipeline.prior_status == failed' never applies to it. State which task round 2 hangs off and how the cap and chain apply. Say whether the child's reason is classified by the failed-reason rules. Say whether the converted parent stays held or is reverted to failed.",
+            "severity": "med",
+            "line": 195
+          },
+          {
+            "path": "orchestrator/failures.py",
+            "issue": "failure_signature reads pipeline.failure_kind and resume_hint, but item 5 keys on 'failed-task reruns'. When the signature is computed for a failed candidate's first round, prior_status is not set yet because conversion happens later, in the lock. Specify the discriminator, such as task status or reason class. For non-JSON, dispatch error and post_result failed, failure_kind returns 'unknown' while the local kind is treated as 'incomplete'. Say which kind goes into pipeline.failure_kind, the signature and {failure_kind}.",
+            "severity": "med",
+            "line": 79
+          },
+          {
+            "path": ".orchestrator/prompts/fix-round.md",
+            "issue": "incomplete_note embeds the reason text and dirty_in_scope / dirty_out_of_scope paths. These are untrusted content: filenames, partial_output and a hold reason that can carry non-JSON tail text. The spec only fences failure_text. Run the note's untrusted parts through fence_data and place them inside the data fence. The prompt tells the executor to follow the note, so unfenced paths are an injection vector.",
+            "severity": "med",
+            "line": 14
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The note sends the new executor to inspect leftovers in the held worktree, with no check that the directory exists. Failed or reaped worktrees may be gone or outside the new executor's sandbox. Add a guard: if the path is missing, say so, and do not claim leftovers are recoverable. Say how the new round gets the held branch's commits, since the round is cut from goal/T-1403.",
+            "severity": "med",
+            "line": 114
+          }
+        ],
+        "suggested_spec_changes": [
+          "Resolve the pipeline contradiction. Either drop 'differs only by auto_fix_skipped' (the test then asserts status stays failed and auto_fix_skipped is present), or say failure_kind is not written for unconverted failed candidates.",
+          "Define the idempotency and skip key for failed candidates (latest failed event ts via _failed_at) and use it for auto_fix_skipped and notify dedupe. Keep auto_fix_hold_key for held candidates and for converted ones.",
+          "Require `reason = (task.get('hold_reason') or task.get('reason') or '')` throughout auto_fix_round and apply the existing hold_reason guards to failed candidates. Add a test where hold_reason is None.",
+          "Specify exactly how round 2 is reached for a failed round-1 child versus a converted parent. State whether a converted parent reverts to failed when the round fails. Specify what discriminator failure_signature uses before conversion.",
+          "Fence all untrusted pieces of incomplete_note (reason, dirty paths) and guard the case where the held worktree path no longer exists. Say how the round obtains the held branch's commits.",
+          "Add an acceptance check that planner_runs does not double-route a converted hold. Alternatively, justify conversion over filing the round while the task stays failed, and document the rollback including hold_reason cleanup.",
+          "Add a README paragraph for the two new [daemon] keys, or state that they are undocumented by choice."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6775,
+          "trimmed": {
+            "risks": 3
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791031067.7933419,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Item 3 and the acceptance test say a skipped failed candidate's pipeline 'differs only by auto_fix_skipped'. Item 2 says pipeline.failure_kind is written for failed tasks as for held ones. The first locked block in auto_fix_round writes pipeline.failure_kind for every candidate. The two statements contradict each other, and the test cannot pass as written.",
+          "severity": "high",
+          "line": 179
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Existing code uses `held.get(\"hold_reason\", \"\").startswith(...)` and `reason = held.get(\"hold_reason\", \"\")`. A failed task carries hold_reason=None, so these raise AttributeError or give reason None. The spec does not say to normalise with `or \"\"`. It also does not say the existing guards (gate_timeout, cancelled, render_error, unlanded_after_fix_round, infra_failure) apply to failed candidates. They key on hold_reason, so for a failed task they read reason instead.",
+          "severity": "high",
+          "line": 159
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The skip and escalation path keys on `key = str(_held_at(...))`, and the loop does `continue` when it is None. A failed candidate has no held event, so it has no key. A non-routine, capped or repeated failed candidate then either silently never records auto_fix_skipped or re-notifies every pass. Item 4 only defines the key for held candidates. Define an explicit key for failed candidates, such as _failed_at, for auto_fix_skipped.",
+          "severity": "high",
+          "line": 169
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The round-2 path for a 'converted task' is ambiguous. After conversion the held task has the same _held_at and auto_fix_hold_key, so it is skipped for good. The round-1 child fails, and that child is a fresh failed task with no prior_status. So 'classified with pipeline.prior_status == failed' never applies to it. State which task round 2 hangs off and how the cap and chain apply. Say whether the child's reason is classified by the failed-reason rules. Say whether the converted parent stays held or is reverted to failed.",
+          "severity": "med",
+          "line": 195
+        },
+        {
+          "path": "orchestrator/failures.py",
+          "issue": "failure_signature reads pipeline.failure_kind and resume_hint, but item 5 keys on 'failed-task reruns'. When the signature is computed for a failed candidate's first round, prior_status is not set yet because conversion happens later, in the lock. Specify the discriminator, such as task status or reason class. For non-JSON, dispatch error and post_result failed, failure_kind returns 'unknown' while the local kind is treated as 'incomplete'. Say which kind goes into pipeline.failure_kind, the signature and {failure_kind}.",
+          "severity": "med",
+          "line": 79
+        },
+        {
+          "path": ".orchestrator/prompts/fix-round.md",
+          "issue": "incomplete_note embeds the reason text and dirty_in_scope / dirty_out_of_scope paths. These are untrusted content: filenames, partial_output and a hold reason that can carry non-JSON tail text. The spec only fences failure_text. Run the note's untrusted parts through fence_data and place them inside the data fence. The prompt tells the executor to follow the note, so unfenced paths are an injection vector.",
+          "severity": "med",
+          "line": 14
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The note sends the new executor to inspect leftovers in the held worktree, with no check that the directory exists. Failed or reaped worktrees may be gone or outside the new executor's sandbox. Add a guard: if the path is missing, say so, and do not claim leftovers are recoverable. Say how the new round gets the held branch's commits, since the round is cut from goal/T-1403.",
+          "severity": "med",
+          "line": 114
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Converting failed to held makes the task a planner decision point. planner_runs._held_key / build_ctx treat holds as escalations, and worker_control and dependents treat held differently from failed. The autonomous block is skipped for converted tasks, but planner_runs can still route the same hold concurrently with the daemon's fix round. The spec only asserts 'no change there' without checking it. Add a check that planner_runs, dependents and cancel-on-failed-parent logic behave for converted holds. Alternatively, file the round without converting and keep status failed.",
+          "severity": "med",
+          "line": 232
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Failed candidates are re-read and classified every pass until failed_round_max_age_s expires. The 6 h default scans every failed execute task, and the age check needs per-task event reads. failure_kind can also run a flaky rerun subprocess for tests_red. State that the rerun is bounded by flaky_runs persisted on the failed task. Add a cheap created_at or updated pre-filter before event reads.",
+          "severity": "low",
+          "line": 151
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The exclusion scan counts any non-failed, non-superseded execute task that lists the candidate in `inputs`, including unrelated dependents that cite it as context. That can suppress a legitimate round. The failed_rounds_per_pass and failed_round_max_age_s config keys have in-code defaults only. README.md documents the fix loop but is out of scope and is not updated.",
+          "severity": "low",
+          "line": 171
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 11214,
+    "est_tokens": 2803,
+    "presented_tokens": 2803,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "b0647b9ac5cd8ecd75e444d9974c35addf5d289f7161618fd4d10c5a0f280a24"
+      },
+      "spec": {
+        "chars": 7905,
+        "est_tokens": 1976,
+        "sha256": "245a4e181afaa8af54118c3419e79ab333b96a46227c1041d011e2cd3bbde557"
+      },
+      "acceptance": {
+        "chars": 2706,
+        "est_tokens": 676,
+        "sha256": "ba2d71cc994d3edf1c01c1b53241d3c50b45b919ab6a62cb70145eb25873e9d4"
+      },
+      "scope": {
+        "chars": 146,
+        "est_tokens": 36,
+        "sha256": "8fdd6dee53c41345eb522a6bbcd33ce1b47923cfcae95f90ae8a70fe8af7bbe6"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 337,
+        "est_tokens": 84,
+        "sha256": "35d2343497cbcaec02d516fff290448b94d6f5d9fa99ee999263151946984203"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "c43c7dd5ceeb",
+    "version": "c43c7dd5ceeb",
+    "candidate_known": false,
+    "base": "884f2d03c34e",
+    "sources": "task@T-1622 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 11953,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "0ff51fb3-9c7e-42ce-8d47-8e2a9c607f87",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791030965.8431911,
+  "account": "A",
+  "pid": 50853,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Item 3 and the acceptance test say a skipped failed candidate's pipeline 'differs only by auto_fix_skipped'. Item 2 says pipeline.failure_kind is written for failed tasks as for held ones. The first locked block in auto_fix_round writes pipeline.failure_kind for every candidate. The two statements contradict each other, and the test cannot pass as written.",
+      "severity": "high",
+      "line": 179
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Existing code uses `held.get(\"hold_reason\", \"\").startswith(...)` and `reason = held.get(\"hold_reason\", \"\")`. A failed task carries hold_reason=None, so these raise AttributeError or give reason None. The spec does not say to normalise with `or \"\"`. It also does not say the existing guards (gate_timeout, cancelled, render_error, unlanded_after_fix_round, infra_failure) apply to failed candidates. They key on hold_reason, so for a failed task they read reason instead.",
+      "severity": "high",
+      "line": 159
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The skip and escalation path keys on `key = str(_held_at(...))`, and the loop does `continue` when it is None. A failed candidate has no held event, so it has no key. A non-routine, capped or repeated failed candidate then either silently never records auto_fix_skipped or re-notifies every pass. Item 4 only defines the key for held candidates. Define an explicit key for failed candidates, such as _failed_at, for auto_fix_skipped.",
+      "severity": "high",
+      "line": 169
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The round-2 path for a 'converted task' is ambiguous. After conversion the held task has the same _held_at and auto_fix_hold_key, so it is skipped for good. The round-1 child fails, and that child is a fresh failed task with no prior_status. So 'classified with pipeline.prior_status == failed' never applies to it. State which task round 2 hangs off and how the cap and chain apply. Say whether the child's reason is classified by the failed-reason rules. Say whether the converted parent stays held or is reverted to failed.",
+      "severity": "med",
+      "line": 195
+    },
+    {
+      "path": "orchestrator/failures.py",
+      "issue": "failure_signature reads pipeline.failure_kind and resume_hint, but item 5 keys on 'failed-task reruns'. When the signature is computed for a failed candidate's first round, prior_status is not set yet because conversion happens later, in the lock. Specify the discriminator, such as task status or reason class. For non-JSON, dispatch error and post_result failed, failure_kind returns 'unknown' while the local kind is treated as 'incomplete'. Say which kind goes into pipeline.failure_kind, the signature and {failure_kind}.",
+      "severity": "med",
+      "line": 79
+    },
+    {
+      "path": ".orchestrator/prompts/fix-round.md",
+      "issue": "incomplete_note embeds the reason text and dirty_in_scope / dirty_out_of_scope paths. These are untrusted content: filenames, partial_output and a hold reason that can carry non-JSON tail text. The spec only fences failure_text. Run the note's untrusted parts through fence_data and place them inside the data fence. The prompt tells the executor to follow the note, so unfenced paths are an injection vector.",
+      "severity": "med",
+      "line": 14
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The note sends the new executor to inspect leftovers in the held worktree, with no check that the directory exists. Failed or reaped worktrees may be gone or outside the new executor's sandbox. Add a guard: if the path is missing, say so, and do not claim leftovers are recoverable. Say how the new round gets the held branch's commits, since the round is cut from goal/T-1403.",
+      "severity": "med",
+      "line": 114
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Converting failed to held makes the task a planner decision point. planner_runs._held_key / build_ctx treat holds as escalations, and worker_control and dependents treat held differently from failed. The autonomous block is skipped for converted tasks, but planner_runs can still route the same hold concurrently with the daemon's fix round. The spec only asserts 'no change there' without checking it. Add a check that planner_runs, dependents and cancel-on-failed-parent logic behave for converted holds. Alternatively, file the round without converting and keep status failed.",
+      "severity": "med",
+      "line": 232
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Failed candidates are re-read and classified every pass until failed_round_max_age_s expires. The 6 h default scans every failed execute task, and the age check needs per-task event reads. failure_kind can also run a flaky rerun subprocess for tests_red. State that the rerun is bounded by flaky_runs persisted on the failed task. Add a cheap created_at or updated pre-filter before event reads.",
+      "severity": "low",
+      "line": 151
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The exclusion scan counts any non-failed, non-superseded execute task that lists the candidate in `inputs`, including unrelated dependents that cite it as context. That can suppress a legitimate round. The failed_rounds_per_pass and failed_round_max_age_s config keys have in-code defaults only. README.md documents the fix loop but is out of scope and is not updated.",
+      "severity": "low",
+      "line": 171
+    }
+  ]
+}

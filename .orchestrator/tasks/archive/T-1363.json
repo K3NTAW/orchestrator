@@ -1,0 +1,212 @@
+{
+  "id": "T-1363",
+  "created_at": 1790194600.740683,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S2b v3: capacity treats claude:<tier> rows as Claude capacity (account cooling folded into row cooling, shared worker cap); README plug-and-play",
+  "spec": "Goal T-1334 (S1 T-1352 merged). Replaces T-1361 after spec review T-1362. Claude executor rows have id \"claude:<tier>\" (S2a T-1360 contract); running claude-row tasks carry executor \"claude:<tier>\", so daemon.running_claude_workers (daemon.py:470) already counts them. Semantics kept from today: fallback means every enabled execute row is cooling, never merely saturated (daemon.free_slots docstring daemon.py:481). The dispatch-time check (executor.start -> pool.pick) stays authoritative.\n\nRule R (one definition): a claude row is cooling when its own cooldown is active OR every Claude account is cooling; a codex row is cooling as today.\n1. capacity.snapshot (capacity.py:9): rows carry \"provider\"; for a claude row, cooling_s = max(row cooldown, min remaining account cooldown when every account cools, else 0). Every other reader of snapshot rows (eligible_executors_from_snapshot :54, \"fallback\" :45, _reason :75) then applies R unchanged. Readers use row.get(\"provider\", \"codex\").\n2. capacity.admit (:101): free[\"claude_rows\"] = snapshot[\"claude_workers_free\"]. Define eff(executor_id) = min(free[row], free[\"claude_rows\"]) for claude rows, free[row] otherwise, and use eff in the `available` filter (:127), choice_key (:132) and the imminent blocker (:141). Choosing a claude row decrements both counters. The legacy \"claude\" pseudo-executor exists only when fallback is True.\n3. _reason: a claude row that is otherwise eligible with free[\"claude_rows\"] == 0 -> \"account_capacity\".\n4. orchestrator/daemon.py: _codex_available (:454) applies R through the pool (claude row: not ex.cooling() and some pool account not cooling()). free_slots (:481): codex rows as today; claude rows contribute min(sum of their max_parallel - running over non-cooling claude rows, max_parallel_claude_workers - running_claude_workers - inflight_claude_dispatches). capacity_reason (:772) applies R when checking \"every enabled row cooling\".\n5. Out of scope, recorded: concurrency.py / speculation.py read per-row free and may overestimate claude capacity; executor.start holds on no headroom.\n6. README.md \"Executors and routing\" (README.md:278): Claude rows (id \"claude:<tier>\", tier alias in [models], model optional and must match, roles, band, max_parallel, daily_budget_tasks), headroom from [[claude_accounts]] and [limits].max_parallel_claude_workers, reviewer never runs the executing model, plug-and-play: [models] alias + claude:<alias> row for a new Claude model; a codex row for a new Codex model; enabled=false on every codex row to run without Codex.\nTests (unittest.TestCase methods): shared slot (two ready tasks, claude_workers_free 1 -> one admitted, one account_capacity); every account cooling -> claude row cooling, fallback True only if all codex rows also cool, reason cooldown; all codex cooling + healthy claude row -> fallback False; codex rows saturated but healthy -> fallback False (unchanged); codex-only rows without \"provider\" -> admit ids equal hard-coded values; free_slots caps claude rows by the shared counter; _codex_available with a claude row. No pool.toml edit, no new dependencies. Additive; git revert restores the old behaviour.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_capacity.py::test_claude_rows_share_claude_worker_slots",
+    "tests/test_capacity.py::test_claude_row_cools_when_every_account_cools",
+    "tests/test_capacity.py::test_healthy_claude_row_prevents_fallback",
+    "tests/test_capacity.py::test_saturated_codex_rows_do_not_trigger_fallback",
+    "tests/test_capacity.py::test_codex_only_rows_without_provider_unchanged",
+    "tests/test_daemon.py::test_free_slots_caps_claude_rows_by_shared_workers",
+    "tests/test_daemon.py::test_codex_available_counts_claude_row_when_an_account_is_free",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_capacity.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-1352"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1361",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/executor.py",
+      "orchestrator/concurrency.py",
+      "orchestrator/speculation.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Claude executor rows: id 'claude:<tier>', provider 'claude' (S2a T-1360 validates). Snapshot rows gain 'provider' (read with .get(..., 'codex')); a claude row's cooling_s folds in all-accounts-cooling. running_claude_workers counts the 'claude:' executor prefix."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790194603.022232,
+      "pipeline": {
+        "first_ready_at": 1790194603.021114
+      }
+    },
+    {
+      "ts": 1790194603.4067059,
+      "pipeline": {
+        "first_ready_at": 1790194603.021114,
+        "spec_review_at": 1790194603.406645,
+        "spec_review_at_lease": 1790195503.406645
+      }
+    },
+    {
+      "ts": 1790194603.417411,
+      "pipeline": {
+        "first_ready_at": 1790194603.021114,
+        "spec_review_at": 1790194603.406645,
+        "spec_review_at_lease": 1790195503.406645,
+        "spec_review_at_done": 1790194603.41694
+      }
+    },
+    {
+      "ts": 1790194662.816819,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "inflight_claude_dispatches counts every dispatched-but-unclaimed execute task, codex ones included. The spec now subtracts it from the claude-row cap in normal mode, not only in fallback mode. Two unclaimed codex dispatches would shrink the shared counter and defer a healthy claude row as account_capacity. The same counter feeds snapshot.claude_workers_free, so admit inherits the double count.",
+          "severity": "med",
+          "line": 486
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "Rule R does not define the case of zero Claude accounts. min() over an empty set raises ValueError. 'Every account cooling' over an empty set is vacuously true, so every claude row would cool permanently.",
+          "severity": "med",
+          "line": 9
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "free_slots says 'non-cooling claude rows' but does not say whether that includes rule R's account check. If every account cools but the row's own cooldown is 0, slots are still granted, executor.start holds the task, and the daemon retries every tick. daily_budget_tasks is also ignored. The shared cap subtracts running_claude_workers, which counts review workers too. That is intended but should be stated and tested.",
+          "severity": "med",
+          "line": 481
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "capacity_reason returns 'executor_capacity' when a claude row is blocked only by the shared counter and fallback is False. capacity._reason returns 'account_capacity' for the same state, so recorded deferral reasons differ between the two paths.",
+          "severity": "low",
+          "line": 772
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "No listed acceptance test covers the reserve_imminent blocker with eff (a claude row whose own free is 3 but shared free is 1). It also does not cover choice_key sorting by eff, or the explicit account_capacity reason from _reason. A regression there would pass every listed test.",
+          "severity": "low",
+          "line": 141
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "concurrency.py and speculation.py are left out of scope and may over-admit claude work. The spec does not say what happens next. executor.start then holds the tasks, which is a state mutation on every tick. It should say the hold is benign (no attempt burned, retried) or link a follow-up task.",
+          "severity": "low",
+          "line": 470
+        }
+      ]
+    },
+    {
+      "ts": 1790194685.7958982,
+      "pipeline": {
+        "first_ready_at": 1790194603.021114,
+        "spec_review_at": 1790194603.406645,
+        "spec_review_at_lease": 1790195503.406645,
+        "spec_review_at_done": 1790194603.41694,
+        "spec_review_held_at": 1790194685.795847
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790194688.5160902,
+      "pipeline": {
+        "first_ready_at": 1790194603.021114,
+        "spec_review_at": 1790194603.406645,
+        "spec_review_at_lease": 1790195503.406645,
+        "spec_review_at_done": 1790194603.41694,
+        "spec_review_held_at": 1790194685.795847,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790194688.634252,
+      "pipeline": {
+        "first_ready_at": 1790194603.021114,
+        "spec_review_at": 1790194603.406645,
+        "spec_review_at_lease": 1790195503.406645,
+        "spec_review_at_done": 1790194603.41694,
+        "spec_review_held_at": 1790194685.795847,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790194685.7958982": true
+        }
+      }
+    },
+    {
+      "ts": 1790194707.3966742,
+      "status": "superseded",
+      "hold_reason": "respec T-1365 after spec review T-1364 (inflight counts codex dispatches, zero accounts, free_slots rule R + day budget, capacity_reason alignment, blocker test)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790194603.021114,
+    "spec_review_at": 1790194603.406645,
+    "spec_review_at_lease": 1790195503.406645,
+    "spec_review_at_done": 1790194603.41694,
+    "spec_review_held_at": 1790194685.795847,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790194685.7958982": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "inflight_claude_dispatches counts every dispatched-but-unclaimed execute task, codex ones included. The spec now subtracts it from the claude-row cap in normal mode, not only in fallback mode. Two unclaimed codex dispatches would shrink the shared counter and defer a healthy claude row as account_capacity. The same counter feeds snapshot.claude_workers_free, so admit inherits the double count.",
+      "severity": "med",
+      "line": 486
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "Rule R does not define the case of zero Claude accounts. min() over an empty set raises ValueError. 'Every account cooling' over an empty set is vacuously true, so every claude row would cool permanently.",
+      "severity": "med",
+      "line": 9
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "free_slots says 'non-cooling claude rows' but does not say whether that includes rule R's account check. If every account cools but the row's own cooldown is 0, slots are still granted, executor.start holds the task, and the daemon retries every tick. daily_budget_tasks is also ignored. The shared cap subtracts running_claude_workers, which counts review workers too. That is intended but should be stated and tested.",
+      "severity": "med",
+      "line": 481
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "capacity_reason returns 'executor_capacity' when a claude row is blocked only by the shared counter and fallback is False. capacity._reason returns 'account_capacity' for the same state, so recorded deferral reasons differ between the two paths.",
+      "severity": "low",
+      "line": 772
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "No listed acceptance test covers the reserve_imminent blocker with eff (a claude row whose own free is 3 but shared free is 1). It also does not cover choice_key sorting by eff, or the explicit account_capacity reason from _reason. A regression there would pass every listed test.",
+      "severity": "low",
+      "line": 141
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "concurrency.py and speculation.py are left out of scope and may over-admit claude work. The spec does not say what happens next. executor.start then holds the tasks, which is a state mutation on every tick. It should say the hold is benign (no attempt burned, retried) or link a follow-up task.",
+      "severity": "low",
+      "line": 470
+    }
+  ],
+  "hold_reason": "respec T-1365 after spec review T-1364 (inflight counts codex dispatches, zero accounts, free_slots rule R + day budget, capacity_reason alignment, blocker test)"
+}

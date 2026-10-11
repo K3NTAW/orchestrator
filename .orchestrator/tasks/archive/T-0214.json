@@ -1,0 +1,134 @@
+{
+  "id": "T-0214",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "E2: Jev client \u2014 orchestrator/jev.py typed questions against TypeSafe AI System One, fail-open, budgeted",
+  "spec": "Jev (TypeSafe AI) answers typed questions about a state with calibrated probabilities instead of text: POST https://api.typesafe.ai/v1/systemone, header Authorization: Bearer <key>, body {\"state\": str|obj, \"model\": \"jev-latest\", \"questions\": {id: {\"type\": \"noul\"|\"choice\"|\"score\", \"instructions\": str, \"criteria\": ...}}}; response {\"answers\": {id: {\"type\", \"noul\": 0-1, \"choice\": str, \"probabilities\": {opt: p}, \"score\": n, \"confidence\": 0-1}}, \"usage\": {\"input_tokens\", \"output_tokens\"}}. Limits: 64k tokens per request, 32k for state + longest question; 429/529 need backoff; 0.042 USD per M input tokens, output free. New module orchestrator/jev.py, stdlib only (urllib):\n1. ask(state, questions, *, model=None, timeout_s=5.0) -> dict | None. Reads pool.toml [jev] {enabled=false, model=\"jev-latest\", timeout_s=5, daily_budget_tokens=20_000_000, max_state_chars=100_000} and the key from env TYPESAFE_API_KEY (pool.toml [secrets.jev] TYPESAFE_API_KEY = \"source ~/.config/f/f.sh && f tok get typesafe --reveal\" on the laptop, env:TYPESAFE_API_KEY headless; resolved through spawn.resolve_secrets, never logged). Returns None (fail-open) when disabled, no key, timeout, HTTP error, invalid JSON or budget exhausted; one retry with 0.5 s backoff on 429/529.\n2. State hygiene before sending: truncate to max_state_chars, redact anything matching token-like patterns (sk-..., ghp_..., Bearer ..., 32+ char hex/base64 runs, KEY=VALUE where KEY contains TOKEN|SECRET|PASSWORD|KEY). Provide redact(text) as a tested public helper.\n3. Usage accounting: append {ts, caller, input_tokens, model, latency_ms, ok} to .orchestrator/runs/jev-<date>.jsonl and keep the day counter in .orchestrator/jev_state.json; ask() returns None when the day counter exceeds daily_budget_tokens.\n4. Helpers: noul(state, instructions, criteria=None) -> float | None (P(true)); choice(state, instructions, options: dict) -> (choice, probabilities, confidence) | None; score(state, instructions, levels: list) -> (score, confidence) | None.\nTests in tests/test_jev.py with a monkeypatched urlopen: disabled returns None without network; happy path parses answers; 429 retried once then None; redact() strips a fake token; budget exhaustion returns None; oversize state is truncated. README: one paragraph 'Jev' under Pipeline with the egress note (task specs, tool-call metadata and memory titles leave the machine; file contents never do).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev.py::test_disabled_returns_none_without_network, ::test_ask_parses_answers, ::test_retry_then_none_on_429, ::test_redact_strips_tokens, ::test_budget_exhausted_returns_none, ::test_state_truncated pass",
+    "pool.toml has a commented [jev] table with enabled = false and [secrets.jev] with the two documented value forms; no secret value in any file",
+    "grep -c 'typesafe.ai' README.md is at least 1",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev.py",
+    "tests/test_jev.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0210",
+    "T-0211"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0214",
+  "codex_thread": null,
+  "result": {
+    "summary": "Clean working tree, committed on `task/T-0214`.\n\n## Summary\n\nImplemented `orchestrator/jev.py`, a stdlib-only (`urllib`) client for Jev (TypeSafe AI): `ask()`, `redact()`, and the `noul`/`choice`/`score` helpers, with fail-open behavior, one 429/529 retry, state truncation + secret redaction, and usage accounting to `.orchestrator/runs/jev-<date>.jsonl` / `.orchestrator/jev_state.json`.\n\n**Files changed:**\n- `orchestrator/jev.py` \u2014 new module\n- `tests/test_jev.py` \u2014 6 tests, all passing\n- `.orchestrator/pool.toml` \u2014 added commented `[jev]` table and `[secrets.jev]` (both key-resolution forms, no secret values)\n- `README.md` \u2014 one paragraph on Jev under Pipeline, with the egress note and the `typesafe.ai` mention\n\nOne real bug caught along the way: my test file's `jev-<date>.jsonl` log files were leaking into the shared `.orchestrator/runs/` dir used by the whole test process, and their filename sorted after `bus.log_run()`'s date-only files, breaking two unrelated `test_spawn.py` assertions that grab `sorted(runs_dir.glob(\"*.jsonl\"))[-1]`. Fixed by cleaning up jev's jsonl files in `tearDown`, not just `setUp`.\n\n**Test output:** all 333 tests pass, no failures. `tests-green.sh` exits 0.\n\nNothing left outstanding on this task.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789815606.836011,
+      "pipeline": {
+        "dispatched_at": 1789815606.835922
+      }
+    },
+    {
+      "ts": 1789815606.9044118,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789815606.9135501,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789815608.102072,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0214",
+      "claimed_at": 1789815608.101761
+    },
+    {
+      "ts": 1789815608.1072881,
+      "account": "B"
+    },
+    {
+      "ts": 1789815608.116609,
+      "pid": 76257,
+      "account": "B"
+    },
+    {
+      "ts": 1789816174.7620711,
+      "status": "done",
+      "result": {
+        "summary": "Clean working tree, committed on `task/T-0214`.\n\n## Summary\n\nImplemented `orchestrator/jev.py`, a stdlib-only (`urllib`) client for Jev (TypeSafe AI): `ask()`, `redact()`, and the `noul`/`choice`/`score` helpers, with fail-open behavior, one 429/529 retry, state truncation + secret redaction, and usage accounting to `.orchestrator/runs/jev-<date>.jsonl` / `.orchestrator/jev_state.json`.\n\n**Files changed:**\n- `orchestrator/jev.py` \u2014 new module\n- `tests/test_jev.py` \u2014 6 tests, all passing\n- `.orchestrator/pool.toml` \u2014 added commented `[jev]` table and `[secrets.jev]` (both key-resolution forms, no secret values)\n- `README.md` \u2014 one paragraph on Jev under Pipeline, with the egress note and the `typesafe.ai` mention\n\nOne real bug caught along the way: my test file's `jev-<date>.jsonl` log files were leaking into the shared `.orchestrator/runs/` dir used by the whole test process, and their filename sorted after `bus.log_run()`'s date-only files, breaking two unrelated `test_spawn.py` assertions that grab `sorted(runs_dir.glob(\"*.jsonl\"))[-1]`. Fixed by cleaning up jev's jsonl files in `tearDown`, not just `setUp`.\n\n**Test output:** all 333 tests pass, no failures. `tests-green.sh` exits 0.\n\nNothing left outstanding on this task.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789816232.474089,
+      "pipeline": {
+        "dispatched_at": 1789815606.835922,
+        "gated_at": 1789816232.4739158
+      }
+    },
+    {
+      "ts": 1789816401.067241,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789816414.39098,
+      "pipeline": {
+        "dispatched_at": 1789815606.835922,
+        "gated_at": 1789816232.4739158,
+        "review_held_at": 1789816414.3908842
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789816974.8438778,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "landed via fix round T-0227 (1fea195, c6e6d81)"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789815606.835922,
+    "gated_at": 1789816232.4739158,
+    "review_held_at": 1789816414.3908842
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789815608.101761,
+  "account": "B",
+  "pid": 76257,
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0201",
+  "reason": "landed via fix round T-0227 (1fea195, c6e6d81)"
+}

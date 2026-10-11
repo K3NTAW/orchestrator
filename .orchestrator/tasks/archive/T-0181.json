@@ -1,0 +1,190 @@
+{
+  "id": "T-0181",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): C-O5 fix round 2 on task/T-0178 \u2014 delta 94d5e32..156e120 (T-0178, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0178 delta: `git diff 94d5e32 156e120` in worktree wt/T-0178 (Dockerfile, docker-compose.executor.yml, .dockerignore, .gitignore, docs/executor-host.md). Fix round for review T-0176 plus the multi-arch decision; confirm: (1) .dockerignore excludes only /.mcp.json among mcp configs, plus work/ and .env; the executor's build evidence says /opt/orchestrator/.mcp.planner.json is in the image (trust the recorded evidence, do not build); (2) .gitignore ignores work/, config/, .env; (3) Dockerfile: no --platform pin, FROM pinned to a multi-arch manifest-list digest with a bump comment, codex asset chosen by dpkg architecture (x86_64 / aarch64 musl) with a checksum per arch and a build failure on other arches, installer scripts hashed before execution, comment on what is verified; (4) compose build args read ORCH_UID/ORCH_GID with defaults, .env documented; (5) runbook: .env step, healthz via docker compose exec from the host, prerequisites Compose v2.24+ and BuildKit, native build per host, no stale platform advice. Re-check the T-0173 guarantees survive (concrete ~/orch-creds protected path, external ORCH_NET network, config mounts read-only, hardening options, no ports) and re-apply the security checklist to the changed lines; run the objective secret grep over the diff. Third review of the executor image: approve unless a defect would break the container in production or weaken the credential story; smaller points as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0178"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five groups confirmed resolved or named unresolved with evidence",
+    "T-0173 guarantees confirmed; secret grep clean"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    ".dockerignore",
+    ".gitignore",
+    "docs/executor-host.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0165",
+      "T-0173",
+      "T-0178"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0181",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "docs/executor-host.md",
+        "line": 157,
+        "issue": "Nothing gives git an identity in the container, so every goal dies on its first write. goals.py:104 runs `git commit --only` in the clone (bus.py:183 likewise). No `git config` in the Dockerfile, no ~/.gitconfig baked or mounted (compose:15-22), no GIT_AUTHOR_*/GIT_COMMITTER_* in executor.env (docs:79-83), and step 7's `gh auth login` sets credentials, not identity. Git cannot auto-detect: useradd sets no GECOS (Dockerfile:47-48) -> empty ident name; container hostname has no domain -> 'unable to auto-detect email address (got orch@<id>.(none))'. Fails closed as a 422 via goals.py:105-106, but POST /goals never succeeds - exactly what step 9 smoke-tests. Repo grep: user.email/name set only in tests/_harness.py:48-49.",
+        "severity": "high"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 81,
+        "issue": "COPY --chown=orch:orch . /opt/orchestrator makes the orchestrator code and hooks writable by the same orch user every agent runs as, protected by nothing. The image's protected-paths.txt still names host-relative ~/code/orchestrator/.claude/hooks|settings.json|protected-paths.txt (:14-17), nonexistent in the container, and install.py:42-55 rewrites those three lines to the target repo. So /opt/orchestrator/.claude/hooks (the source copy_tree_always at install.py:134 pushes into every future target) and /opt/orchestrator/orchestrator/*.py are in no guardrail list; Codex also runs dangerous_full_access. Group 1 holds for the cred mounts, not for the install itself.",
+        "severity": "med"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 83,
+        "issue": "executor.env template omits GH_WRITE_TOKEN, but the pool.toml copied in step 5 carries [secrets.planner] GH_WRITE_TOKEN = \"env:GH_WRITE_TOKEN\" and step 5's snippet shows only the scout/review GH_READ_TOKEN lines. spawn.py:85-89 skips an unset env: secret with a warning instead of failing, so the Planner launches and then silently cannot open the goal/<parent> -> main PR that closes every goal. The template is presented as complete.",
+        "severity": "med"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 91,
+        "issue": "The uv (:58-61) and Claude Code (:91-95) installer scripts are sha256sum'd into the build log but never compared, so the hash is an artifact, not a control - a swapped install.sh builds green. Weaker than the codex tarball beside it, which does enforce sha256sum -c (:76). Also re-fetched on every rebuild: COPY at :81 sits above the Claude install, so any source edit busts the layer and re-downloads claude.ai/install.sh. Add optional ARG *_INSTALL_SHA256 with sha256sum -c, and/or move COPY below the installer RUNs.",
+        "severity": "low"
+      },
+      {
+        "path": "docker-compose.executor.yml",
+        "line": 22,
+        "issue": "/home/orch/.config does not exist in the image, so Docker auto-creates the bind-mount parent as root:root 0755; orch can then create no sibling under ~/.config, and cap_drop ALL (:31-32) plus no-new-privileges leaves no runtime fix. Latent today (claude uses CLAUDE_CONFIG_DIR, codex ~/.codex, uv ~/.local + ~/.cache) but fails opaquely the first time a tool falls back to XDG. Add RUN install -d -o orch -g orch /home/orch/.config.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789755212.3383,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0181",
+      "claimed_at": 1789755212.3379898
+    },
+    {
+      "ts": 1789755212.369768,
+      "pid": 47174,
+      "account": "A"
+    },
+    {
+      "ts": 1789755610.448951,
+      "status": "done",
+      "result": {
+        "summary": "request_changes. Groups: (1) protected-paths RESOLVED (protected-paths.txt:38-42 concrete root + 4 container paths; install.py:119-121 propagates, _rewrite_protected_paths swaps only the 3 self lines). (2) compose RESOLVED (ORCH_UID/ORCH_GID :9-10, :? guards :19-22/:39, :ro config matching serve.py:43 + goals.py:269, env_file required, no ports, no-new-privileges, cap_drop ALL, mem 6g, pids 512). (3) runbook RESOLVED for all four doc defects (Compose v2.24+ :10, native builds :14-16, .env instead of export GID :18-31, docker compose exec healthz :183-189). (4) Dockerfile RESOLVED (no --platform, manifest-list digest, codex sha256 -c :76, USER orch, entrypoint passthrough). (5) .dockerignore RESOLVED (/.mcp.json anchored :4 so the 4 tracked role configs ship for install.py:156; work/ + config/ :15-16; .gitignore gained work/, config/, .env). T-0173 guarantees present. Secret grep CLEAN: only var names, <paste here>, $ORCH_SERVICE_TOKEN refs. Checklist: serve fails closed without ORCH_SERVICE_TOKEN (serve.py:310), hmac.compare_digest (:99), clone stderr redacted. Blocker is new, not a group regression: no git identity in the container.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "docs/executor-host.md",
+            "line": 157,
+            "issue": "Nothing gives git an identity in the container, so every goal dies on its first write. goals.py:104 runs `git commit --only` in the clone (bus.py:183 likewise). No `git config` in the Dockerfile, no ~/.gitconfig baked or mounted (compose:15-22), no GIT_AUTHOR_*/GIT_COMMITTER_* in executor.env (docs:79-83), and step 7's `gh auth login` sets credentials, not identity. Git cannot auto-detect: useradd sets no GECOS (Dockerfile:47-48) -> empty ident name; container hostname has no domain -> 'unable to auto-detect email address (got orch@<id>.(none))'. Fails closed as a 422 via goals.py:105-106, but POST /goals never succeeds - exactly what step 9 smoke-tests. Repo grep: user.email/name set only in tests/_harness.py:48-49.",
+            "severity": "high"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 81,
+            "issue": "COPY --chown=orch:orch . /opt/orchestrator makes the orchestrator code and hooks writable by the same orch user every agent runs as, protected by nothing. The image's protected-paths.txt still names host-relative ~/code/orchestrator/.claude/hooks|settings.json|protected-paths.txt (:14-17), nonexistent in the container, and install.py:42-55 rewrites those three lines to the target repo. So /opt/orchestrator/.claude/hooks (the source copy_tree_always at install.py:134 pushes into every future target) and /opt/orchestrator/orchestrator/*.py are in no guardrail list; Codex also runs dangerous_full_access. Group 1 holds for the cred mounts, not for the install itself.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 83,
+            "issue": "executor.env template omits GH_WRITE_TOKEN, but the pool.toml copied in step 5 carries [secrets.planner] GH_WRITE_TOKEN = \"env:GH_WRITE_TOKEN\" and step 5's snippet shows only the scout/review GH_READ_TOKEN lines. spawn.py:85-89 skips an unset env: secret with a warning instead of failing, so the Planner launches and then silently cannot open the goal/<parent> -> main PR that closes every goal. The template is presented as complete.",
+            "severity": "med"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 91,
+            "issue": "The uv (:58-61) and Claude Code (:91-95) installer scripts are sha256sum'd into the build log but never compared, so the hash is an artifact, not a control - a swapped install.sh builds green. Weaker than the codex tarball beside it, which does enforce sha256sum -c (:76). Also re-fetched on every rebuild: COPY at :81 sits above the Claude install, so any source edit busts the layer and re-downloads claude.ai/install.sh. Add optional ARG *_INSTALL_SHA256 with sha256sum -c, and/or move COPY below the installer RUNs.",
+            "severity": "low"
+          },
+          {
+            "path": "docker-compose.executor.yml",
+            "line": 22,
+            "issue": "/home/orch/.config does not exist in the image, so Docker auto-creates the bind-mount parent as root:root 0755; orch can then create no sibling under ~/.config, and cap_drop ALL (:31-32) plus no-new-privileges leaves no runtime fix. Latent today (claude uses CLAUDE_CONFIG_DIR, codex ~/.codex, uv ~/.local + ~/.cache) but fails opaquely the first time a tool falls back to XDG. Add RUN install -d -o orch -g orch /home/orch/.config.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755623.864752,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "docs/executor-host.md",
+            "line": 157,
+            "issue": "Nothing gives git an identity in the container, so every goal dies on its first write. goals.py:104 runs `git commit --only` in the clone (bus.py:183 likewise). No `git config` in the Dockerfile, no ~/.gitconfig baked or mounted (compose:15-22), no GIT_AUTHOR_*/GIT_COMMITTER_* in executor.env (docs:79-83), and step 7's `gh auth login` sets credentials, not identity. Git cannot auto-detect: useradd sets no GECOS (Dockerfile:47-48) -> empty ident name; container hostname has no domain -> 'unable to auto-detect email address (got orch@<id>.(none))'. Fails closed as a 422 via goals.py:105-106, but POST /goals never succeeds - exactly what step 9 smoke-tests. Repo grep: user.email/name set only in tests/_harness.py:48-49.",
+            "severity": "high"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 81,
+            "issue": "COPY --chown=orch:orch . /opt/orchestrator makes the orchestrator code and hooks writable by the same orch user every agent runs as, protected by nothing. The image's protected-paths.txt still names host-relative ~/code/orchestrator/.claude/hooks|settings.json|protected-paths.txt (:14-17), nonexistent in the container, and install.py:42-55 rewrites those three lines to the target repo. So /opt/orchestrator/.claude/hooks (the source copy_tree_always at install.py:134 pushes into every future target) and /opt/orchestrator/orchestrator/*.py are in no guardrail list; Codex also runs dangerous_full_access. Group 1 holds for the cred mounts, not for the install itself.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 83,
+            "issue": "executor.env template omits GH_WRITE_TOKEN, but the pool.toml copied in step 5 carries [secrets.planner] GH_WRITE_TOKEN = \"env:GH_WRITE_TOKEN\" and step 5's snippet shows only the scout/review GH_READ_TOKEN lines. spawn.py:85-89 skips an unset env: secret with a warning instead of failing, so the Planner launches and then silently cannot open the goal/<parent> -> main PR that closes every goal. The template is presented as complete.",
+            "severity": "med"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 91,
+            "issue": "The uv (:58-61) and Claude Code (:91-95) installer scripts are sha256sum'd into the build log but never compared, so the hash is an artifact, not a control - a swapped install.sh builds green. Weaker than the codex tarball beside it, which does enforce sha256sum -c (:76). Also re-fetched on every rebuild: COPY at :81 sits above the Claude install, so any source edit busts the layer and re-downloads claude.ai/install.sh. Add optional ARG *_INSTALL_SHA256 with sha256sum -c, and/or move COPY below the installer RUNs.",
+            "severity": "low"
+          },
+          {
+            "path": "docker-compose.executor.yml",
+            "line": 22,
+            "issue": "/home/orch/.config does not exist in the image, so Docker auto-creates the bind-mount parent as root:root 0755; orch can then create no sibling under ~/.config, and cap_drop ALL (:31-32) plus no-new-privileges leaves no runtime fix. Latent today (claude uses CLAUDE_CONFIG_DIR, codex ~/.codex, uv ~/.local + ~/.cache) but fails opaquely the first time a tool falls back to XDG. Add RUN install -d -o orch -g orch /home/orch/.config.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755623.866718,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789755212.3379898,
+  "pid": 47174,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

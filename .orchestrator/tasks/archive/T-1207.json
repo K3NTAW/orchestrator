@@ -1,0 +1,187 @@
+{
+  "id": "T-1207",
+  "created_at": 1790169553.179698,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S3a evidence reuse from cancelled or failed workers: partial results become evidence objects with provenance worker_partial, routed to the replacement worker (P27)",
+  "spec": "orchestrator/evidence.py: add provenance value worker_partial to PROVENANCE (trust_class LOCAL_USER, trust field untrusted stays as for non-repo provenance, scan applied as for any evidence). orchestrator/worker_control.py: after cancel builds the partial result, and in a new hook worker_control.preserve_partial(task) that daemon.reconcile_dead calls for a dead worker with a dirty worktree, create evidence objects in the goal's evidence pool (evidence.make with source_type worker_partial, location the task id plus the worktree head sha, content = the partial facts rendered as compact lines: files changed with diff stat, commits with subjects, tests run and their result lines, error tail, files inspected; commit = worktree head sha; freshness by the existing hash mechanism). Replacement routing: orchestrator/context_router.py treats worker_partial evidence whose location task shares the same goal and overlaps the current task's scope (write or read) as high relevance (never HIDE) with a cap of [context_router].partial_max_tokens (default 800, dated comment); orchestrator/spawn.py renders those items under a packet section prior_worker (after evidence) with the source task id and the head sha, so the new worker can check out or diff it instead of rediscovering; the section is empty when nothing applies. Docs: docs/hermes-hardening/16-evidence-reuse.md.\nSpec review T-1198 folded in: (1) evidence.py: add worker_partial to BOTH SOURCE_TYPES and PROVENANCE (make() validates each separately) and add an explicit entry worker_partial -> LOCAL_USER in the _trust_class dict, documenting in the module docstring that LOCAL_USER covers locally produced artifacts (memory and observed worker outputs), not only user-authored memory. (2) fresh() and context_router's duplicate/staleness check are extended so worker_partial evidence goes stale when its commit differs from the goal head (same commit == head_sha rule as source_chunk and test_result). (3) Shadow-first: the prior_worker section is rendered only when [context_router].mode is active; in shadow the would-be section (ids and chars) is logged on the context_route decision row and the packet is unchanged. (4) preserve_partial is idempotent: it stamps pipeline.partial_preserved_at on the task and returns early when the stamp exists, so reconcile_dead re-runs every tick without growing the pool. (5) Overlap is computed from persisted data only: the dead task's write scope against the current task's write scope plus its packet-time read scope; no read footprint of the dead task is stored. (6) tests/test_worker_control.py exists with class WorkerControl; add the new test as a method there.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Task worktrees carry no .orchestrator runs, tasks or decision_log state: tests use synthetic fixtures; for any measured numbers in docs run read-only against /Users/k3ntaw/code/orchestrator/.orchestrator via an explicit root argument. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Contracts of the earlier modules: .orchestrator/plan.md (section GOAL T-0991) and docs/hermes-hardening/*.md on this branch; read the merged modules before building on them.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_evidence.py::test_worker_partial_provenance_and_trust",
+    "tests/test_worker_control.py::test_cancel_and_preserve_partial_create_evidence_objects (pool contains the facts with commit sha; no prompt or transcript text)",
+    "tests/test_context_router.py::test_worker_partial_evidence_never_hidden_for_overlapping_scope_and_capped",
+    "tests/test_spawn.py::test_packet_prior_worker_section_lists_partial_facts",
+    "tests/test_evidence.py::test_worker_partial_goes_stale_on_new_head",
+    "tests/test_daemon.py::test_preserve_partial_is_idempotent_across_ticks",
+    "tests/test_spawn.py::test_prior_worker_section_inert_in_shadow_mode",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/evidence.py",
+    "orchestrator/worker_control.py",
+    "orchestrator/context_router.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_evidence.py",
+    "tests/test_worker_control.py",
+    "tests/test_context_router.py",
+    "tests/test_spawn.py",
+    "docs/hermes-hardening/16-evidence-reuse.md",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-1157"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790169568.073015,
+      "pipeline": {
+        "first_ready_at": 1790169568.0729222
+      }
+    },
+    {
+      "ts": 1790169568.27331,
+      "pipeline": {
+        "first_ready_at": 1790169568.0729222,
+        "spec_review_at": 1790169568.273228,
+        "spec_review_at_lease": 1790170468.273228
+      }
+    },
+    {
+      "ts": 1790169568.2819672,
+      "pipeline": {
+        "first_ready_at": 1790169568.0729222,
+        "spec_review_at": 1790169568.273228,
+        "spec_review_at_lease": 1790170468.273228,
+        "spec_review_at_done": 1790169568.281885
+      }
+    },
+    {
+      "ts": 1790169730.533497,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "Evidence carries no scope field, and route()/_choice() only receive the current task, not the dead task's task record. relevance_for's scope_match compares `_location_path(location)` (a real file path) against the current task's scope \u2014 for worker_partial the location is `task_id:head_sha`, which will never path-match anything, so the existing relevance machinery cannot express 'dead task's write scope overlaps current task's scope'. The spec never states how context_router obtains the dead task's write scope: bus.py (which owns task records) is not in scope, and no new Evidence field for scope is specified. Without that, test_context_router.py::test_worker_partial_evidence_never_hidden_for_overlapping_scope_and_capped has no defined fixture shape.",
+          "severity": "high",
+          "line": 51
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "The main spec says worker_partial evidence for overlapping scope is 'high relevance (never HIDE)', but folded-in item (2) extends the staleness rule at line 83-85 (`if head_sha is not None and not evidence.fresh(ev, head_sha) and ev.source_type in (...) : return HIDE, stale`) to also cover worker_partial. Since (2) requires adding worker_partial to that source_type tuple for staleness to work, a stale-but-overlapping worker_partial item would be HIDden, directly contradicting the 'never HIDE' clause. Spec doesn't say which rule wins.",
+          "severity": "med",
+          "line": 83
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "'[context_router].partial_max_tokens (default 800)' has no expression in the current HIDE/SHORT/LONG/FULL level model \u2014 there is no per-item token/byte cap anywhere in _choice()/_text()/route(). The spec doesn't say whether the cap is enforced by picking a lower LEVEL, by truncating content at evidence-creation time in worker_control.preserve_partial (mirroring the existing _bounded_result trim loop in worker_control.cancel), or by a new render path in context_router. Left unspecified, acceptance test test_context_router.py::test_worker_partial_evidence_never_hidden_for_overlapping_scope_and_capped has no defined truncation boundary to assert against.",
+          "severity": "med",
+          "line": 10
+        },
+        {
+          "path": "orchestrator/evidence.py",
+          "issue": "PROVENANCE currently drives _trust_class via a 2-entry dict defaulting everything else to EXTERNAL; the folded-in note (1) correctly calls for an explicit worker_partial->LOCAL_USER entry, but SOURCE_TYPES has no worker_partial value at all yet \u2014 make() will raise ValueError('invalid source_type') until both SOURCE_TYPES and PROVENANCE are updated together. Spec covers this but worth pinning as a single-commit requirement so a partial edit (only PROVENANCE, not SOURCE_TYPES, or vice versa) doesn't pass review.",
+          "severity": "low",
+          "line": 16
+        }
+      ]
+    },
+    {
+      "ts": 1790169760.890953,
+      "pipeline": {
+        "first_ready_at": 1790169568.0729222,
+        "spec_review_at": 1790169568.273228,
+        "spec_review_at_lease": 1790170468.273228,
+        "spec_review_at_done": 1790169568.281885,
+        "spec_review_held_at": 1790169760.890903
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790169762.3441548,
+      "pipeline": {
+        "first_ready_at": 1790169568.0729222,
+        "spec_review_at": 1790169568.273228,
+        "spec_review_at_lease": 1790170468.273228,
+        "spec_review_at_done": 1790169568.281885,
+        "spec_review_held_at": 1790169760.890903,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790169762.451458,
+      "pipeline": {
+        "first_ready_at": 1790169568.0729222,
+        "spec_review_at": 1790169568.273228,
+        "spec_review_at_lease": 1790170468.273228,
+        "spec_review_at_done": 1790169568.281885,
+        "spec_review_held_at": 1790169760.890903,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790169760.890953": true
+        }
+      }
+    },
+    {
+      "ts": 1790169831.545377,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner: spec review T-1211 folded into T-1213"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790169568.0729222,
+    "spec_review_at": 1790169568.273228,
+    "spec_review_at_lease": 1790170468.273228,
+    "spec_review_at_done": 1790169568.281885,
+    "spec_review_held_at": 1790169760.890903,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790169760.890953": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "Evidence carries no scope field, and route()/_choice() only receive the current task, not the dead task's task record. relevance_for's scope_match compares `_location_path(location)` (a real file path) against the current task's scope \u2014 for worker_partial the location is `task_id:head_sha`, which will never path-match anything, so the existing relevance machinery cannot express 'dead task's write scope overlaps current task's scope'. The spec never states how context_router obtains the dead task's write scope: bus.py (which owns task records) is not in scope, and no new Evidence field for scope is specified. Without that, test_context_router.py::test_worker_partial_evidence_never_hidden_for_overlapping_scope_and_capped has no defined fixture shape.",
+      "severity": "high",
+      "line": 51
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "The main spec says worker_partial evidence for overlapping scope is 'high relevance (never HIDE)', but folded-in item (2) extends the staleness rule at line 83-85 (`if head_sha is not None and not evidence.fresh(ev, head_sha) and ev.source_type in (...) : return HIDE, stale`) to also cover worker_partial. Since (2) requires adding worker_partial to that source_type tuple for staleness to work, a stale-but-overlapping worker_partial item would be HIDden, directly contradicting the 'never HIDE' clause. Spec doesn't say which rule wins.",
+      "severity": "med",
+      "line": 83
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "'[context_router].partial_max_tokens (default 800)' has no expression in the current HIDE/SHORT/LONG/FULL level model \u2014 there is no per-item token/byte cap anywhere in _choice()/_text()/route(). The spec doesn't say whether the cap is enforced by picking a lower LEVEL, by truncating content at evidence-creation time in worker_control.preserve_partial (mirroring the existing _bounded_result trim loop in worker_control.cancel), or by a new render path in context_router. Left unspecified, acceptance test test_context_router.py::test_worker_partial_evidence_never_hidden_for_overlapping_scope_and_capped has no defined truncation boundary to assert against.",
+      "severity": "med",
+      "line": 10
+    },
+    {
+      "path": "orchestrator/evidence.py",
+      "issue": "PROVENANCE currently drives _trust_class via a 2-entry dict defaulting everything else to EXTERNAL; the folded-in note (1) correctly calls for an explicit worker_partial->LOCAL_USER entry, but SOURCE_TYPES has no worker_partial value at all yet \u2014 make() will raise ValueError('invalid source_type') until both SOURCE_TYPES and PROVENANCE are updated together. Spec covers this but worth pinning as a single-commit requirement so a partial edit (only PROVENANCE, not SOURCE_TYPES, or vice versa) doesn't pass review.",
+      "severity": "low",
+      "line": 16
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner: spec review T-1211 folded into T-1213"
+}

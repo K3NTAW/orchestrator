@@ -1,0 +1,1513 @@
+{
+  "id": "T-0971",
+  "created_at": 1790123080.05213,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "S9: Jev skill routing for the ambiguous bucket only: typed relevance questions, batched, cached by task state + skill version + repo head, declared Jev boundary, shadow decisions; deterministic candidates never touched (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P9, P8 step 6, P29, P38 (P37 stage 9). Depends on T-0939 (skill_router.select returns ambiguous ids and mandatory/selected sets; [skills] mode; skill_selection rows with role) and the Jev boundary from T-0774 (jev.declare_boundary, jev.ask(site=...), data classes). Facts: jev.ask redacts and caps payloads, refuses SENSITIVE/SECRET, and every site declares its fields; jev_route/jev_gate show the question pattern (typed yes/no questions with probabilities, batched into one request, fail-open on None); [jev] has budget and cache settings; skills carry Level 1 renderings (trigger + objective + output).\nDo:\n1. orchestrator/jev_skills.py (new). `classify(task, role, ambiguous_ids, cfg=None, ask=jev.ask) -> {\"decisions\": {id: {\"relevant_p\", \"reduces_rework_p\", \"duplicates_p\", \"worth_cost_p\", \"requires_specialist_p\", \"select\": bool}}, \"source\": \"jev\"|\"cache\"|\"none\", \"latency_ms\", \"usage\"}`. One batched request per task carrying, per ambiguous skill, only its Level 1 rendering (\u2264 400 chars) and, once, a redacted task digest (title, spec[:800], scope paths, task_class, role); at most [skills] jev_max_batch (default 8) skills per request, never more than one request per spawn; obvious trigger matches and mandatory skills are never sent. Selection rule: select when relevant_p \u2265 0.6 and worth_cost_p \u2265 0.5 and duplicates_p < 0.5; when Jev is unavailable (None) the ambiguous bucket stays excluded (fail-closed for extra skills, which is the safe direction).\n2. Boundary: jev.declare_boundary(\"skills\", fields=[...exact fields...], max_chars=6000, raw_source_allowed=False); tests assert an undeclared field is dropped and no packet section or file content ever appears in the payload.\n3. Cache: key = sha256(task id + task content hash (title+spec+scope) + sorted skill versions + repo head sha)[:16]; entries live in STATE/runs/jev/skills_cache.json with [jev.skills] cache_ttl_s (default 86400) and max entries 500; any change in the key invalidates.\n4. Wiring: skill_router.select gains `jev=True` behaviour when [skills] jev_mode (new key: off | shadow | active, default shadow) is shadow or active: shadow records the Jev verdicts in the skill_selection row (jev = {...}) without changing selected; active adds Jev-selected ambiguous skills to selected (still under max_selected and the presentation cap from T-0939). promotion.FEATURES gains \"jev_skill_routing\" (table skills, key jev_mode, default shadow) with an evidence loader counting rows carrying jev verdicts.\n5. Scorecard: skill_scorecard adds jev_agreement_rate (Jev-selected skills that were later used / Jev-selected) and jev_calls_per_spawn per role; `scorecard --skills` prints them.\n6. docs/skill-intelligence/10-jev-routing.md (\u226460 lines): the questions, the batching and cache rules, the boundary, what shadow logs, revert path (jev_mode off).\nTests (unittest, fake ask): tests/test_jev_skills.py::test_only_ambiguous_skills_are_sent_in_one_batch, ::test_selection_rule_thresholds, ::test_unavailable_jev_keeps_bucket_excluded, ::test_cache_key_invalidates_on_skill_version_or_head_change, ::test_boundary_drops_undeclared_fields_and_never_carries_content; tests/test_skill_router.py::test_jev_shadow_records_without_changing_selection, ::test_jev_active_adds_selected_ambiguous_under_caps. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 11:45) after spec review T-0960 (request_changes), binding on top of v1:\n- Wiring of the Jev verdicts into the decision rows: orchestrator/spawn.py, orchestrator/executor.py, tests/test_spawn.py and tests/test_executor.py join the scope. skill_router.select returns the Jev result under a `jev` key (decisions, source, latency_ms, batch size); spawn._skill_routing and executor._route_skills pass it as decision_log.record(..., jev=choice.get(\"jev\")) so it lands in the row's top-level jev field (the existing kwarg), never inside extra.\n- Acceptance tests: tests/test_spawn.py::test_skill_routing_row_carries_top_level_jev_in_shadow and tests/test_executor.py::test_route_skills_row_carries_top_level_jev_in_shadow drive the real call sites with a fake ask under jev_mode shadow and assert the recorded row's top-level jev is populated while selected is unchanged.\n\nSPEC v3 (2026-09-23 12:20) after spec review T-0969 (round 2; four points folded in, further review waived by the Planner, verdict set to approve):\n- classify(task, role, ambiguous_ids, cfg=None, ask=None) resolves `ask = ask or jev.ask` inside the body (attribute lookup at call time, like jev_route.py), never as a default parameter value.\n- skill_router.select imports jev_skills (and jev) lazily inside the function, mirroring executor.py's local `from .spawn import _prepare_skills`, so no import cycle skill_router \u2192 jev_skills \u2192 jev \u2192 spawn \u2192 skill_router exists; a test imports orchestrator.executor and orchestrator.skill_router fresh in a subprocess to prove import order is safe.\n- Batch truncation: when more than jev_max_batch skills are ambiguous, the batch keeps the first jev_max_batch by the same (-strength, id) ordering select() uses for ranked candidates; the rest are recorded as \"not_sent\".\n- Active-mode headroom: Jev-selected ambiguous skills are added only up to the remaining headroom under max_selected (len(mandatory) + len(ranked_kept) + len(jev_added) \u2264 max_selected, mandatory never counted against the cap as in T-0913 v2); extra Jev-selected ids are recorded as \"jev_selected_not_added\". Tests: tests/test_skill_router.py::test_jev_active_respects_max_selected_headroom, tests/test_jev_skills.py::test_batch_truncation_order_and_not_sent, tests/test_jev_skills.py::test_no_import_cycle_between_executor_and_skill_router.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_skills.py::test_only_ambiguous_skills_are_sent_in_one_batch passes",
+    "tests/test_jev_skills.py::test_selection_rule_thresholds passes",
+    "tests/test_jev_skills.py::test_unavailable_jev_keeps_bucket_excluded passes",
+    "tests/test_jev_skills.py::test_cache_key_invalidates_on_skill_version_or_head_change passes",
+    "tests/test_jev_skills.py::test_boundary_drops_undeclared_fields_and_never_carries_content passes",
+    "tests/test_skill_router.py::test_jev_shadow_records_without_changing_selection passes",
+    "tests/test_skill_router.py::test_jev_active_adds_selected_ambiguous_under_caps passes",
+    "pool.toml has [skills] jev_mode = \"shadow\" and promotion.FEATURES has jev_skill_routing; docs/skill-intelligence/10-jev-routing.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_skill_routing_row_carries_top_level_jev_in_shadow passes",
+    "tests/test_executor.py::test_route_skills_row_carries_top_level_jev_in_shadow passes",
+    "tests/test_skill_router.py::test_jev_active_respects_max_selected_headroom passes",
+    "tests/test_jev_skills.py::test_batch_truncation_order_and_not_sent passes",
+    "tests/test_jev_skills.py::test_no_import_cycle_between_executor_and_skill_router passes"
+  ],
+  "scope": [
+    "orchestrator/jev_skills.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/jev.py",
+    "orchestrator/promotion.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_skills.py",
+    "tests/test_skill_router.py",
+    "tests/test_promotion.py",
+    "docs/skill-intelligence/10-jev-routing.md",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_spawn.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [
+    "T-0939",
+    "T-0938"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0971",
+  "codex_thread": "01a0cba8-84ef-79b1-965c-82ca9f1662b5",
+  "result": {
+    "summary": "Summary:\n- Implemented cached, bounded Jev routing for ambiguous skills.\n- Added shadow/active wiring, telemetry, scorecard metrics, docs, and tests.\n- Gate passed: `tests-green: OK 1193 c78ef0a 84s`\n\nCommit: `8081b473bedf667589043fa64bd4e9e56a85d243`\n\nFiles changed: 14 files, 464 insertions, 6 deletions.\n\nFailures-only test output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0cba8-84ef-79b1-965c-82ca9f1662b5",
+    "usage": {
+      "input_tokens": 2200150,
+      "cached_input_tokens": 2139008,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 13686,
+      "reasoning_output_tokens": 2040,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790123080.053515,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 12:20: two spec-review rounds (T-0960, T-0969); round-2 points folded into v3; further review waived"
+    },
+    {
+      "ts": 1790123189.794513,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682
+      }
+    },
+    {
+      "ts": 1790123189.795862,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138
+      }
+    },
+    {
+      "ts": 1790123193.738711,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962
+      }
+    },
+    {
+      "ts": 1790123213.830633,
+      "packet_meta": {
+        "chars": 8324,
+        "est_tokens": 2081,
+        "presented_tokens": 2081,
+        "sections": {
+          "_preamble": {
+            "chars": 150,
+            "est_tokens": 37,
+            "sha256": "75c786fb34d59e77bda0de1260e58b29526075f2f975ea2ca47decea7a1f6a9f"
+          },
+          "objective": {
+            "chars": 6028,
+            "est_tokens": 1507,
+            "sha256": "5ea5d7d3ded7e61e469c66f0d664c1f1ecdb7f20ea9804469f6c9b272745e775"
+          },
+          "acceptance": {
+            "chars": 1211,
+            "est_tokens": 302,
+            "sha256": "06facf2b23653e29a42cd82304bc78a1c6372735dc8eaa8b8a4e7da793bb2b13"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "0e66deee631bb9311c0b8f55d5bed181f423bc91704c19b18c15549dc55e4b36"
+          },
+          "write_scope": {
+            "chars": 431,
+            "est_tokens": 107,
+            "sha256": "d81972262aeb6d0ab6cca86cba3cab0ddf151a18f64472c9066c403b72183335"
+          },
+          "read_scope": {
+            "chars": 110,
+            "est_tokens": 27,
+            "sha256": "395eabe7780736de1eaebc53ca12e97ba7559a012eeb9ccd6fe463658543d8c6"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "3778bbe8f6064a355454dc5c55ddddc1de547a3e9d7557340f1feda2c9b52bec"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "cfe653c20b89",
+        "version": "cfe653c20b89",
+        "candidate_known": true,
+        "base": "7e3eadedfe7d",
+        "sources": "pool.toml@6169e347305f gotchas@2365edc16e3c memory@notes over cap by 3524 chars: acceptance kept whole",
+        "policy_version": "6169e347305f",
+        "gotchas": "2365edc16e3c",
+        "candidate_tokens": 2901,
+        "routed_tokens": 29583,
+        "routed_reduction_ratio": 0.9596768961266463,
+        "routed_hidden": 2,
+        "routed_ambiguous": 29,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "dae40a9c76b9",
+          "5b79a2f48718",
+          "eddc15c4e673",
+          "b0814ebd3d62",
+          "32279ac18d4a",
+          "2e763ca40370",
+          "81ca725f0de5",
+          "d8aa8571c4b3",
+          "62cd3d6e6139",
+          "9b574c382914",
+          "6430fef1184c",
+          "80c1af2cb5e8",
+          "250bcabe6208",
+          "a46f7e9530ee",
+          "c69a61102e0b",
+          "db2aba2ba523",
+          "d765df6393f6",
+          "4a9aa53e5a1d",
+          "bd78c3eee610",
+          "ba3eeada0425",
+          "e9a1bfe52fbd",
+          "6ccbcc08b8e0",
+          "b814840f7357",
+          "6f6b02dad815",
+          "5e477bc24d0f",
+          "fe63d05b7279",
+          "504365aa02ad",
+          "e245a3866586",
+          "f4451402eb9e",
+          "24168adb06d2",
+          "c9965ffac761",
+          "704ef36764e2",
+          "f54e20b71ca6",
+          "b3fa343f6e28",
+          "ff2ba0aeb9b5",
+          "3a51af461b69",
+          "48440d1dddaf",
+          "dfededd19574",
+          "1a9262ef658f",
+          "979bf2308f33",
+          "045352d20eff",
+          "1209cca0f54f",
+          "e451f0334a10",
+          "7d11d11dc7bd",
+          "a49240af2ff4",
+          "1f8be15b78b3",
+          "bef0398321f5",
+          "c81a484d6bb4",
+          "78ebc7f84db5",
+          "cd2ca5b8db6f",
+          "e4c630cc87b3",
+          "82dbf3b7ed1f",
+          "e7e6fa3680b1",
+          "8f938ad31ca7",
+          "f5e9df567728",
+          "66ab1306ccfc",
+          "23e11d66dd12",
+          "f04501ccb224",
+          "461132b06b06",
+          "669cef77d8ef",
+          "cc9eccd61e92",
+          "3be7d28daede",
+          "a5f67d2aabd9",
+          "1c8012fe094f"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401
+      }
+    },
+    {
+      "ts": 1790123213.832169,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0971",
+      "claimed_at": 1790123213.832017
+    },
+    {
+      "ts": 1790123213.8331141,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790123830.606113,
+      "codex_thread": "01a0cba8-84ef-79b1-965c-82ca9f1662b5",
+      "codex_thread_head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+    },
+    {
+      "ts": 1790123830.61686,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790123830.6198888,
+      "status": "done",
+      "result": {
+        "summary": "Summary:\n- Implemented cached, bounded Jev routing for ambiguous skills.\n- Added shadow/active wiring, telemetry, scorecard metrics, docs, and tests.\n- Gate passed: `tests-green: OK 1193 c78ef0a 84s`\n\nCommit: `8081b473bedf667589043fa64bd4e9e56a85d243`\n\nFiles changed: 14 files, 464 insertions, 6 deletions.\n\nFailures-only test output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0cba8-84ef-79b1-965c-82ca9f1662b5",
+        "usage": {
+          "input_tokens": 2200150,
+          "cached_input_tokens": 2139008,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 13686,
+          "reasoning_output_tokens": 2040,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790123843.856043,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790123926.166205,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790123926.704064,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        }
+      }
+    },
+    {
+      "ts": 1790123926.784029,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        },
+        "reviewed_sha": "8081b473bedf667589043fa64bd4e9e56a85d243"
+      }
+    },
+    {
+      "ts": 1790123926.795507,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        },
+        "reviewed_sha": "8081b473bedf667589043fa64bd4e9e56a85d243",
+        "gated_at_done": 1790123926.795372
+      }
+    },
+    {
+      "ts": 1790124152.756078,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790124170.6511948,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        },
+        "reviewed_sha": "8081b473bedf667589043fa64bd4e9e56a85d243",
+        "gated_at_done": 1790123926.795372,
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139
+      }
+    },
+    {
+      "ts": 1790124170.9023309,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        },
+        "reviewed_sha": "8081b473bedf667589043fa64bd4e9e56a85d243",
+        "gated_at_done": 1790123926.795372,
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157
+      }
+    },
+    {
+      "ts": 1790124170.9036732,
+      "status": "held",
+      "hold_reason": "merge rebase_changed_diff"
+    },
+    {
+      "ts": 1790124171.7603211,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        },
+        "reviewed_sha": "8081b473bedf667589043fa64bd4e9e56a85d243",
+        "gated_at_done": 1790123926.795372,
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790124172.2702022,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790123926.16607,
+        "gated_at_lease": 1790124826.16607,
+        "first_green_at": 1790123926.1653,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 9,
+          "stale_paths": [
+            "docs/skill-intelligence/08-specialists.md",
+            "orchestrator/context_router.py",
+            "orchestrator/skill_router.py",
+            "orchestrator/skills_registry.py",
+            "orchestrator/spawn.py",
+            "orchestrator/specialist.py",
+            "tests/test_skills_registry.py",
+            "tests/test_spawn.py",
+            "tests/test_specialist.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/skill_router.py",
+              "orchestrator/spawn.py",
+              "tests/test_spawn.py"
+            ],
+            "tests_changed": [
+              "tests/test_spawn.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-0970"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "checked_at": 1790123926.7036889,
+          "head": "8081b473bedf667589043fa64bd4e9e56a85d243"
+        },
+        "reviewed_sha": "8081b473bedf667589043fa64bd4e9e56a85d243",
+        "gated_at_done": 1790123926.795372,
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        }
+      }
+    },
+    {
+      "ts": 1790124180.755609,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        }
+      },
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1790124180.7571929,
+      "reason": "Planner 13:30: rebase_changed_diff after the specialists merge; stamps cleared so the daemon re-gates and re-reviews the rebased branch"
+    },
+    {
+      "ts": 1790124206.273927,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790124289.112371,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790124289.112167,
+        "gated_at_lease": 1790125189.112167,
+        "first_green_at": 1790124289.111247,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790124289.6302028,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790124289.112167,
+        "gated_at_lease": 1790125189.112167,
+        "first_green_at": 1790124289.111247,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790124289.629819,
+          "head": "2ab9acb2f5d2ddb4a0885392302225e7399326e7"
+        }
+      }
+    },
+    {
+      "ts": 1790124289.709038,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790124289.112167,
+        "gated_at_lease": 1790125189.112167,
+        "first_green_at": 1790124289.111247,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790124289.629819,
+          "head": "2ab9acb2f5d2ddb4a0885392302225e7399326e7"
+        },
+        "reviewed_sha": "2ab9acb2f5d2ddb4a0885392302225e7399326e7"
+      }
+    },
+    {
+      "ts": 1790124289.720308,
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790124289.112167,
+        "gated_at_lease": 1790125189.112167,
+        "first_green_at": 1790124289.111247,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790124289.629819,
+          "head": "2ab9acb2f5d2ddb4a0885392302225e7399326e7"
+        },
+        "reviewed_sha": "2ab9acb2f5d2ddb4a0885392302225e7399326e7",
+        "gated_at_done": 1790124289.720114
+      }
+    },
+    {
+      "ts": 1790124434.4484758,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790126095.523556,
+      "status": "done",
+      "merged_into": "goal/T-0861",
+      "sha": "2ab9acb2f5d2ddb4a0885392302225e7399326e7",
+      "merged_at": 1790126095.522897,
+      "changed_files": [
+        ".orchestrator/pool.toml",
+        "docs/skill-intelligence/10-jev-routing.md",
+        "orchestrator/cli.py",
+        "orchestrator/executor.py",
+        "orchestrator/jev_skills.py",
+        "orchestrator/promotion.py",
+        "orchestrator/skill_router.py",
+        "orchestrator/skill_scorecard.py",
+        "orchestrator/spawn.py",
+        "tests/test_executor.py",
+        "tests/test_jev_skills.py",
+        "tests/test_promotion.py",
+        "tests/test_skill_router.py",
+        "tests/test_spawn.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790123189.7944682,
+        "dispatched_at": 1790123189.7958138,
+        "dispatched_at_lease": 1790124089.7958138,
+        "dispatched_at_done": 1790123193.7385962,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "merged_at": 1790124170.6510139,
+        "merged_at_lease": 1790125070.6510139,
+        "merged_at_done": 1790124170.902157,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790124170.9036732": true
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790124289.112167,
+        "gated_at_lease": 1790125189.112167,
+        "first_green_at": 1790124289.111247,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0971",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790124289.629819,
+          "head": "2ab9acb2f5d2ddb4a0885392302225e7399326e7"
+        },
+        "reviewed_sha": "2ab9acb2f5d2ddb4a0885392302225e7399326e7",
+        "gated_at_done": 1790124289.720114
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 13:30: rebase_changed_diff after the specialists merge; stamps cleared so the daemon re-gates and re-reviews the rebased branch",
+  "pipeline": {
+    "first_ready_at": 1790123189.7944682,
+    "dispatched_at": 1790123189.7958138,
+    "dispatched_at_lease": 1790124089.7958138,
+    "dispatched_at_done": 1790123193.7385962,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "dd122e86aed1e038c4b98964a3bcd79d05ceda49",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0
+      },
+      "mode": "shadow"
+    },
+    "merged_at": 1790124170.6510139,
+    "merged_at_lease": 1790125070.6510139,
+    "merged_at_done": 1790124170.902157,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790124170.9036732": true
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790124289.112167,
+    "gated_at_lease": 1790125189.112167,
+    "first_green_at": 1790124289.111247,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0971",
+      "goal_head": "goal/T-0861",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790124289.629819,
+      "head": "2ab9acb2f5d2ddb4a0885392302225e7399326e7"
+    },
+    "reviewed_sha": "2ab9acb2f5d2ddb4a0885392302225e7399326e7",
+    "gated_at_done": 1790124289.720114
+  },
+  "packet_meta": {
+    "chars": 8324,
+    "est_tokens": 2081,
+    "presented_tokens": 2081,
+    "sections": {
+      "_preamble": {
+        "chars": 150,
+        "est_tokens": 37,
+        "sha256": "75c786fb34d59e77bda0de1260e58b29526075f2f975ea2ca47decea7a1f6a9f"
+      },
+      "objective": {
+        "chars": 6028,
+        "est_tokens": 1507,
+        "sha256": "5ea5d7d3ded7e61e469c66f0d664c1f1ecdb7f20ea9804469f6c9b272745e775"
+      },
+      "acceptance": {
+        "chars": 1211,
+        "est_tokens": 302,
+        "sha256": "06facf2b23653e29a42cd82304bc78a1c6372735dc8eaa8b8a4e7da793bb2b13"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "0e66deee631bb9311c0b8f55d5bed181f423bc91704c19b18c15549dc55e4b36"
+      },
+      "write_scope": {
+        "chars": 431,
+        "est_tokens": 107,
+        "sha256": "d81972262aeb6d0ab6cca86cba3cab0ddf151a18f64472c9066c403b72183335"
+      },
+      "read_scope": {
+        "chars": 110,
+        "est_tokens": 27,
+        "sha256": "395eabe7780736de1eaebc53ca12e97ba7559a012eeb9ccd6fe463658543d8c6"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "3778bbe8f6064a355454dc5c55ddddc1de547a3e9d7557340f1feda2c9b52bec"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "cfe653c20b89",
+    "version": "cfe653c20b89",
+    "candidate_known": true,
+    "base": "7e3eadedfe7d",
+    "sources": "pool.toml@6169e347305f gotchas@2365edc16e3c memory@notes over cap by 3524 chars: acceptance kept whole",
+    "policy_version": "6169e347305f",
+    "gotchas": "2365edc16e3c",
+    "candidate_tokens": 2901,
+    "routed_tokens": 29583,
+    "routed_reduction_ratio": 0.9596768961266463,
+    "routed_hidden": 2,
+    "routed_ambiguous": 29,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "dae40a9c76b9",
+      "5b79a2f48718",
+      "eddc15c4e673",
+      "b0814ebd3d62",
+      "32279ac18d4a",
+      "2e763ca40370",
+      "81ca725f0de5",
+      "d8aa8571c4b3",
+      "62cd3d6e6139",
+      "9b574c382914",
+      "6430fef1184c",
+      "80c1af2cb5e8",
+      "250bcabe6208",
+      "a46f7e9530ee",
+      "c69a61102e0b",
+      "db2aba2ba523",
+      "d765df6393f6",
+      "4a9aa53e5a1d",
+      "bd78c3eee610",
+      "ba3eeada0425",
+      "e9a1bfe52fbd",
+      "6ccbcc08b8e0",
+      "b814840f7357",
+      "6f6b02dad815",
+      "5e477bc24d0f",
+      "fe63d05b7279",
+      "504365aa02ad",
+      "e245a3866586",
+      "f4451402eb9e",
+      "24168adb06d2",
+      "c9965ffac761",
+      "704ef36764e2",
+      "f54e20b71ca6",
+      "b3fa343f6e28",
+      "ff2ba0aeb9b5",
+      "3a51af461b69",
+      "48440d1dddaf",
+      "dfededd19574",
+      "1a9262ef658f",
+      "979bf2308f33",
+      "045352d20eff",
+      "1209cca0f54f",
+      "e451f0334a10",
+      "7d11d11dc7bd",
+      "a49240af2ff4",
+      "1f8be15b78b3",
+      "bef0398321f5",
+      "c81a484d6bb4",
+      "78ebc7f84db5",
+      "cd2ca5b8db6f",
+      "e4c630cc87b3",
+      "82dbf3b7ed1f",
+      "e7e6fa3680b1",
+      "8f938ad31ca7",
+      "f5e9df567728",
+      "66ab1306ccfc",
+      "23e11d66dd12",
+      "f04501ccb224",
+      "461132b06b06",
+      "669cef77d8ef",
+      "cc9eccd61e92",
+      "3be7d28daede",
+      "a5f67d2aabd9",
+      "1c8012fe094f"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401
+  },
+  "claimed_at": 1790123213.832017,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "8081b473bedf667589043fa64bd4e9e56a85d243",
+  "review_verdict": "approve",
+  "hold_reason": null,
+  "merged_into": "goal/T-0861",
+  "sha": "2ab9acb2f5d2ddb4a0885392302225e7399326e7",
+  "merged_at": 1790126095.522897,
+  "changed_files": [
+    ".orchestrator/pool.toml",
+    "docs/skill-intelligence/10-jev-routing.md",
+    "orchestrator/cli.py",
+    "orchestrator/executor.py",
+    "orchestrator/jev_skills.py",
+    "orchestrator/promotion.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/spawn.py",
+    "tests/test_executor.py",
+    "tests/test_jev_skills.py",
+    "tests/test_promotion.py",
+    "tests/test_skill_router.py",
+    "tests/test_spawn.py"
+  ]
+}

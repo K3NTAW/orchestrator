@@ -1,0 +1,95 @@
+{
+  "id": "T-0587",
+  "created_at": 1789971484.813827,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R3: orchestrator/merge_pressure.py \u2014 measure integration contention and defer only coupled work when the merge queue is demonstrably saturated (AP P11)",
+  "spec": "Why: nothing measures the merge queue. merge.merge (orchestrator/merge.py:25-99) fails tasks with reason rebase_conflict, daemon._stale_rebase logs stale rows with action rebase_conflict, and done-but-unmerged execute tasks wait on reviews, but no module aggregates this or informs dispatch (AP P11; brief P6).\nWhat: new pure module orchestrator/merge_pressure.py; no daemon edits.\n- assess(root=STATE, now=None, window_s=86400, cfg=None) -> {\"waiting\": [task ids done, unmerged, gated (pipeline.gated_at or reviews exist)], \"queue_depth\": len, \"median_wait_s\": median(now - first_green_at) over waiting or None, \"recent_conflicts\": count of execute tasks with reason rebase_conflict or hold_reason starting 'merge conflict' or stale rows action rebase_conflict within window_s, \"recent_rebases\": count of stale rows action rebased, \"stale_events\": stale rows with risk high in window, \"invalidated\": tasks whose approval was voided (events with 'approval void' or pipeline.reviews_expected reset) if detectable else 0, \"pressure\": none|elevated|saturated, \"reason\": text}. Thresholds from cfg (pool_config()['scheduler']): merge_pressure_mode = \"observe\"|\"throttle\" (default observe), merge_queue_elevated = 3, merge_queue_saturated = 5, merge_conflicts_saturated = 2. elevated when queue_depth >= elevated; saturated when queue_depth >= saturated OR (queue_depth >= elevated AND recent_conflicts >= merge_conflicts_saturated). One waiting task is never pressure.\n- throttle(candidate_ids, tasks, waiting_ids, assessment, pairwise_rows=None, cfg=None) -> {\"keep\": [...], \"deferred\": {id: \"merge_pressure:<waiting id>\"}, \"applied\": bool}. Applies only when assessment pressure == saturated AND mode == throttle; defers a candidate only if interference.classify(candidate, waiting task) level is hard or soft against any waiting task; independent candidates always kept; in observe mode returns everything kept with applied False but still lists would_defer for telemetry.\n- Read stale rows via schedlog.read('stale'); tasks via the tasks dir under root; tolerate malformed rows.",
+  "inputs": [
+    "T-0567"
+  ],
+  "acceptance": [
+    "tests/test_merge_pressure.py::test_single_waiting_task_is_no_pressure \u2014 one done unmerged task yields pressure none and throttle keeps every candidate",
+    "tests/test_merge_pressure.py::test_saturated_queue_defers_only_coupled_candidates \u2014 six waiting tasks, mode throttle: a candidate sharing a scope file with a waiting task is deferred with reason merge_pressure:<id>, an independent candidate is kept",
+    "tests/test_merge_pressure.py::test_conflicts_plus_elevated_queue_is_saturated \u2014 three waiting tasks and two recent rebase_conflict events yield pressure saturated with a reason naming both facts",
+    "tests/test_merge_pressure.py::test_observe_mode_records_would_defer_without_applying \u2014 saturated queue in observe mode keeps all candidates, applied is False and would_defer lists the coupled one",
+    "tests/test_merge_pressure.py::test_malformed_stale_rows_are_tolerated \u2014 a stale.jsonl with a broken line still produces an assessment"
+  ],
+  "scope": [
+    "orchestrator/merge_pressure.py",
+    "tests/test_merge_pressure.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0587",
+  "codex_thread": null,
+  "result": {
+    "verdict": "approve",
+    "comments": [],
+    "summary": "Planner transcription of the reviewer verdict (the worker wrote prose around fenced JSON, which the parser rejected): All 5 acceptance tests pass. I cross-checked the implementation against the real production semantics it depends on (`bus.update`'s `reason`/`hold_reason`/`events` fields, `merge.py`'s `\"conflict\"` status feeding daemon.py's `hold_reason=f\"merge {status}\"`, `daemon._stale_rebase`'s `stale` schedlog actions) rather than just the tests, and the field names, thresholds, and pressure/throttle logic line up correctly with the spec. No scope creep (only the two listed files touched, no daemon edits).\n\n```json\n{\"verdict\":\"approve\",\"comments\":[]}\n```",
+    "provenance": [
+      "repo"
+    ],
+    "confidence": 0.9
+  },
+  "events": [
+    {
+      "ts": 1789971484.8147671,
+      "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6"
+    },
+    {
+      "ts": 1789971487.433625,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0587",
+      "claimed_at": 1789971487.433276
+    },
+    {
+      "ts": 1789971487.434609,
+      "account": "B"
+    },
+    {
+      "ts": 1789971487.834595,
+      "pid": 70626,
+      "account": "B"
+    },
+    {
+      "ts": 1789971671.969174,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "All 5 acceptance tests pass. I cross-checked the implementation against the real production semantics it depends on (`bus.update`'s `reason`/`hold_reason`/`events` fields, `merge.py`'s `\"conflict\"` status feeding daemon.py's `hold_reason=f\"merge {status}\"`, `daemon._stale_rebase`'s `stale` schedlog actions) rather than just the tests, and the field names, thresholds, and pressure/throttle logic line up correctly with the spec. No scope creep (only the two listed files touched, no daemon edits).\n\n```json\n{\"verdict\":\"approve\",\"comments\":[]}\n```"
+      }
+    },
+    {
+      "ts": 1789972213.488698,
+      "status": "done",
+      "reason": null,
+      "result": {
+        "verdict": "approve",
+        "comments": [],
+        "summary": "Planner transcription of the reviewer verdict (the worker wrote prose around fenced JSON, which the parser rejected): All 5 acceptance tests pass. I cross-checked the implementation against the real production semantics it depends on (`bus.update`'s `reason`/`hold_reason`/`events` fields, `merge.py`'s `\"conflict\"` status feeding daemon.py's `hold_reason=f\"merge {status}\"`, `daemon._stale_rebase`'s `stale` schedlog actions) rather than just the tests, and the field names, thresholds, and pressure/throttle logic line up correctly with the spec. No scope creep (only the two listed files touched, no daemon edits).\n\n```json\n{\"verdict\":\"approve\",\"comments\":[]}\n```",
+        "provenance": [
+          "repo"
+        ],
+        "confidence": 0.9
+      }
+    }
+  ],
+  "reviewed_sha": "333101f0fbd791523ed880a0f0a885cf31f304b6",
+  "claimed_at": 1789971487.433276,
+  "account": "B",
+  "pid": 70626,
+  "reason": null,
+  "resume_hint": {
+    "raw": "All 5 acceptance tests pass. I cross-checked the implementation against the real production semantics it depends on (`bus.update`'s `reason`/`hold_reason`/`events` fields, `merge.py`'s `\"conflict\"` status feeding daemon.py's `hold_reason=f\"merge {status}\"`, `daemon._stale_rebase`'s `stale` schedlog actions) rather than just the tests, and the field names, thresholds, and pressure/throttle logic line up correctly with the spec. No scope creep (only the two listed files touched, no daemon edits).\n\n```json\n{\"verdict\":\"approve\",\"comments\":[]}\n```"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "id": "T-0546",
+  "created_at": 1789951068.444304,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S4b v4: stale-work detection before review \u2014 record when the goal branch moved across a task's surface after its base, optional rebase and re-gate behind [scheduler].stale_rebase, never discarding work (spec review T-0545 folded in)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P12 (cheap deterministic checks; rebase/revalidate before expensive review when stale risk is high; never silently discard work; record stale events) and P14 (record predicted vs actual for scheduler learning). Base goal/T-0503 with S3 v4 (T-0541) merged: daemon has schedlog, _load_scheduler_cfg returning {mode, soft_conflict_policy, max_wave}, waves, critical path; tests/test_daemon.py::test_scheduler_cfg_defaults asserts that exact dict. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: daemon.gate runs tests-green on a done execute task's worktree; on green it stamps gated_at with green_fields (first_green_at, reviews_expected, review_reason) and then either merges directly (n_reviews == 0) or calls _open_reviews; changed_paths(task) (daemon.py:21, gitutil) lists the task's diff paths against its base; gitutil helpers take a worktree/cwd because subprocess needs one, and branch refs are visible from any worktree of the repo; merge.merge (merge.py:25-60) rebases onto the goal branch only at merge time, after reviews, and marks conflicts failed with reason rebase_conflict; _resolve_base/_merged_target give the goal branch goal/<parent>.\n1. gitutil.moved_paths(base_ref, target_ref, cwd, git=...) -> sorted list of paths changed between the merge-base of the two refs and target_ref (git merge-base, then git diff --name-only, both run with cwd=cwd, normally the task worktree or ROOT); on git failure raise gitutil.GitError (or a documented exception) so the caller records risk unknown.\n2. _load_scheduler_cfg gains stale_rebase = False (bool) in its defaults and return dict; update tests/test_daemon.py::test_scheduler_cfg_defaults's expected literal accordingly and add [scheduler].stale_rebase = false to .orchestrator/pool.toml with a comment.\n3. daemon.stale_check(task) -> {\"base\", \"goal_head\", \"moved_count\", \"stale_paths\", \"risk\"}: goal branch = the task's merge target; moved = moved_paths(task branch, goal branch, cwd=task worktree); surface = literal scope paths plus changed_paths(task); stale_paths = moved entries equal to a surface literal or fnmatching a surface glob; risk none when empty, high when any stale path is also in changed_paths(task), else low; unknown when moved_paths raises. Insertion point: in gate(), immediately after the green gated_at stamp with green_fields succeeds and before the n_reviews == 0 merge / _open_reviews branch; idempotent per head (skip when pipeline.stale_check.head equals the current head); stamps pipeline.stale_check = {..., checked_at, head} and appends runs/sched/stale.jsonl {\"ts\",\"task\",\"goal_id\",\"base\",\"goal_head\",\"moved_count\",\"stale_paths\",\"risk\",\"action\"} with action \"recorded\". Never blocks the pipeline: any exception inside stale_check is caught, recorded as risk unknown, and gate proceeds.\n4. When stale_rebase is true and risk is high: run git rebase <goal branch> inside the task worktree; on conflict abort the rebase, hold the task with hold_reason \"stale_rebase_conflict\" and resume_hint {\"conflicts\": [...]} (commits are never discarded), action \"rebase_conflict\", and return before reviews; on success clear the gated_at stamps (clear_stage) so the next tick re-gates the rebased head before reviews, action \"rebased\", pipeline.stale_check.rebased_to = new head, and return. merge.merge's own rebase stays as the final safety.\n5. README Pipeline paragraph: two sentences on stale checks and the stale_rebase switch.\n6. Tests: tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base (new file, reuse the git sandbox helpers of tests/test_merge.py or tests/_harness.py); tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, ::test_stale_check_low_when_scope_overlaps_moved_paths, ::test_stale_check_high_when_changed_file_moved, ::test_stale_check_unknown_on_git_failure (moved_paths raising yields risk unknown and the gate still opens reviews), ::test_stale_check_records_row_and_stamp_before_reviews, ::test_stale_rebase_conflict_holds_never_discards, ::test_stale_rebase_success_regates_before_reviews. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, tests/test_daemon.py::test_stale_check_low_when_scope_overlaps_moved_paths, tests/test_daemon.py::test_stale_check_high_when_changed_file_moved, tests/test_daemon.py::test_stale_check_unknown_on_git_failure and tests/test_daemon.py::test_stale_check_records_row_and_stamp_before_reviews pass: after the green gated_at stamp and before reviews or a direct merge every execute task gets pipeline.stale_check and one stale.jsonl row with risk none, low, high or unknown; a git failure yields unknown and never blocks",
+    "tests/test_daemon.py::test_stale_rebase_conflict_holds_never_discards and tests/test_daemon.py::test_stale_rebase_success_regates_before_reviews pass: with stale_rebase true a high-risk task is rebased and re-gated before reviews, or held with hold_reason stale_rebase_conflict and a conflicts resume_hint; the default false changes nothing but the record; no commit or branch is deleted",
+    "tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base passes and tests/test_daemon.py::test_scheduler_cfg_defaults asserts the defaults including stale_rebase false",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains eight tests"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gitutil.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_daemon.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [
+    "T-0541"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/merge.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/spawn.py",
+      "tests/test_merge.py",
+      "tests/_harness.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "gitutil.moved_paths(base_ref, target_ref, cwd, git=...) -> [paths], raises on git failure; daemon.stale_check(task) -> {base, goal_head, moved_count, stale_paths, risk}; stale.jsonl row {ts, task, goal_id, base, goal_head, moved_count, stale_paths, risk, action recorded|rebased|rebase_conflict}; pipeline.stale_check mirrors it with head; _load_scheduler_cfg gains stale_rebase False; hold_reason stale_rebase_conflict",
+    "spec_review_round": 2,
+    "supersedes": "T-0543"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by S4b v5 after spec review T-0547 request_changes (conflict hold clears gated_at so the task re-enters gate after resolution; gitutil.GitError named explicitly with the reason it differs from the None convention); no code was written",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1789951091.5051908,
+      "pipeline": {
+        "spec_review_at": 1789951091.5051498,
+        "spec_review_at_lease": 1789951991.5051498
+      }
+    },
+    {
+      "ts": 1789951091.510373,
+      "pipeline": {
+        "spec_review_at": 1789951091.5051498,
+        "spec_review_at_lease": 1789951991.5051498,
+        "spec_review_at_done": 1789951091.5102851
+      }
+    },
+    {
+      "ts": 1789951253.523853,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec's stale_rebase-conflict path (step 4) holds the task with hold_reason 'stale_rebase_conflict' but pipeline.gated_at (stamped with a lease, just before stale_check runs) is never cleared on that branch. gate()'s entry filter skips any task where pipeline.gated_at is set, so once resolved (rebase conflict fixed on the same branch/worktree, commits preserved as required) the task can never re-enter gate() to get re-tested and reviewed \u2014 unlike gate_red/worktree-missing holds, which recover via a brand-new fix-round task+worktree, not by resuming the same worktree. The spec never states how a stale_rebase_conflict hold is resumed, and no existing mechanism (auto_fix_round only handles kind=='code_defect' with reason 'gate_red' or 'review request_changes...') will pick it up.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "issue": "moved_paths is specified to raise GitError (or an unspecified 'documented exception') on git failure, but every existing gitutil helper (changed_paths, _added_diff_lines) fails soft by returning None. The spec should either name the exact exception class to add (no GitError exists in the module today) or justify the convention switch, otherwise the executor may reuse an ad hoc exception type that reviewers/tests disagree on.",
+          "severity": "low",
+          "line": 21
+        }
+      ]
+    },
+    {
+      "ts": 1789951277.501496,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by S4b v5 after spec review T-0547 request_changes (conflict hold clears gated_at so the task re-enters gate after resolution; gitutil.GitError named explicitly with the reason it differs from the None convention); no code was written",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789951091.5051498,
+    "spec_review_at_lease": 1789951991.5051498,
+    "spec_review_at_done": 1789951091.5102851
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec's stale_rebase-conflict path (step 4) holds the task with hold_reason 'stale_rebase_conflict' but pipeline.gated_at (stamped with a lease, just before stale_check runs) is never cleared on that branch. gate()'s entry filter skips any task where pipeline.gated_at is set, so once resolved (rebase conflict fixed on the same branch/worktree, commits preserved as required) the task can never re-enter gate() to get re-tested and reviewed \u2014 unlike gate_red/worktree-missing holds, which recover via a brand-new fix-round task+worktree, not by resuming the same worktree. The spec never states how a stale_rebase_conflict hold is resumed, and no existing mechanism (auto_fix_round only handles kind=='code_defect' with reason 'gate_red' or 'review request_changes...') will pick it up.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "issue": "moved_paths is specified to raise GitError (or an unspecified 'documented exception') on git failure, but every existing gitutil helper (changed_paths, _added_diff_lines) fails soft by returning None. The spec should either name the exact exception class to add (no GitError exists in the module today) or justify the convention switch, otherwise the executor may reuse an ad hoc exception type that reviewers/tests disagree on.",
+      "severity": "low",
+      "line": 21
+    }
+  ]
+}
