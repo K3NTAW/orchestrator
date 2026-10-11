@@ -1539,8 +1539,10 @@ def _class_evidence(model, classification, pool):
             classification["task_class"], classification["architectural"], root=STATE, cfg=pool.cfg)
     except Exception:
         pass
+    rate = evidence.get("reescalation_rate")
+    # None means no scorecard rows; the cheap-kind floor treats it as missing evidence.
     return {"n": int(evidence.get("n") or 0), "noninferior": evidence.get("noninferior"),
-            "reescalation_rate": float(evidence.get("reescalation_rate") or 0.0)}
+            "reescalation_rate": None if rate is None else float(rate)}
 
 
 def run_group(sections, pool):

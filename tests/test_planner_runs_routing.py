@@ -230,8 +230,7 @@ class PlannerRouting(PlannerRunsBase):
         self.assertEqual(sections[0][1]["hold_reason"], "gate_red")
         self.assertIn("failure_kind", sections[0][1])
         self.assertEqual(sections[0][2].name, "escalate")
-        with patch.object(planner_scorecard, "class_evidence",
-                          return_value={"n": 0, "noninferior": None, "reescalation_rate": None}):
+        with patch.object(planner_scorecard, "class_evidence", return_value=self.PASSING):
             self.assertTrue(PR.run_group(sections, self.pool)["launched"])
         argv = self.popen.call_args.args[0]
         self.assertEqual(argv[argv.index("--model") + 1], "test-sonnet")
@@ -239,6 +238,58 @@ class PlannerRouting(PlannerRunsBase):
         route = next(r for r in self.rows("decisions") if r["kind"] == "planner_route")
         self.assertEqual(route["candidates"], ["sonnet", "opus", "fable"])
         self.assertEqual(route["selected"], "sonnet")
+
+    PASSING = {"n": 5, "noninferior": True, "reescalation_rate": 0.1}
+
+    def test_run_group_launches_conflict_decision_on_sonnet_model(self):
+        self.pool.cfg["planner"]["routing"]["mode"] = "active"
+        self.pool.cfg["models"]["sonnet"] = "test-sonnet"
+        goal = self.goal()
+        self.execute_child(goal, status="held", hold_reason="merge conflict in orchestrator/bus.py",
+                           complexity=4)
+        sections = self.sections(goal)
+        self.assertEqual(sections[0][2].name, "escalate")
+        with patch.object(planner_scorecard, "class_evidence", return_value=self.PASSING):
+            self.assertTrue(PR.run_group(sections, self.pool)["launched"])
+        argv = self.popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "test-sonnet")
+        self.assertEqual(self.rows()[-1]["tier"], "sonnet")
+        route = next(r for r in self.rows("decisions") if r["kind"] == "planner_route")
+        self.assertEqual(route["selected"], "sonnet")
+        self.assertIn("cheap_kind:conflict:sonnet", route["reason"])
+
+    def test_run_group_shadow_mode_keeps_escalation_tier(self):
+        self.pool.cfg["planner"]["routing"]["mode"] = "shadow"
+        self.pool.cfg["models"]["sonnet"] = "test-sonnet"
+        goal = self.goal()
+        self.execute_child(goal, status="held", hold_reason="gate_red", complexity=4)
+        sections = self.sections(goal)
+        with patch.object(planner_scorecard, "class_evidence", return_value=self.PASSING):
+            self.assertTrue(PR.run_group(sections, self.pool)["launched"])
+        argv = self.popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "test-fable")
+        self.assertEqual(self.rows()[-1]["tier"], "fable")
+        route = next(r for r in self.rows("decisions") if r["kind"] == "planner_route")
+        self.assertEqual(route["selected"], "fable")
+        self.assertNotIn("cheap_kind", route["reason"])
+
+    def test_run_group_floor_failure_uses_default_tier(self):
+        self.pool.cfg["planner"]["routing"]["mode"] = "active"
+        self.pool.cfg["models"]["sonnet"] = "test-sonnet"
+        goal = self.goal()
+        self.execute_child(goal, status="held", hold_reason="gate_red", complexity=4)
+        sections = self.sections(goal)
+        evidence = {"test-sonnet": {"n": 0, "noninferior": None, "reescalation_rate": None},
+                    "test-opus": self.PASSING}
+        with patch.object(planner_scorecard, "class_evidence",
+                          side_effect=lambda model, *a, **kw: evidence.get(model, {})):
+            self.assertTrue(PR.run_group(sections, self.pool)["launched"])
+        argv = self.popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "test-opus")
+        self.assertEqual(self.rows()[-1]["tier"], "opus")
+        route = next(r for r in self.rows("decisions") if r["kind"] == "planner_route")
+        self.assertEqual(route["selected"], "opus")
+        self.assertIn("cheap_kind:gate_red:opus", route["reason"])
 
 if __name__ == "__main__":
     unittest.main()

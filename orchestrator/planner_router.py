@@ -33,7 +33,7 @@ _DEFAULTS = {
     "cheap_tier": "sonnet",
     "cheap_kinds": ["gate_red", "conflict"],
     "cheap_reescalation_max": 0.3,
-    "cheap_min_samples": 0,
+    "cheap_min_samples": 5,
 }
 _WARNED = set()
 
@@ -128,7 +128,7 @@ def soft_score(classification, ctx, evidence, jev_signal=None):
     score = 0.3 if classification.get("architectural") else 0.0
     if effective_complexity(classification, ctx) in (7, 8):
         score += 0.2
-    if evidence.get("reescalation_rate", 0) > 0.2:
+    if (evidence.get("reescalation_rate") or 0) > 0.2:
         score += 0.2
     if evidence.get("noninferior") is False:
         score += 0.2
@@ -145,7 +145,7 @@ def cheap_kind(ctx, cfg):
     failure = str(ctx.get("failure_kind") or "")
     if "gate_red" in kinds and hold == "gate_red":
         return "gate_red"
-    if "conflict" in kinds and ("conflict" in hold or "conflict" in failure):
+    if "conflict" in kinds and (hold.startswith("merge conflict") or failure == "conflict"):
         return "conflict"
     return None
 
@@ -184,14 +184,15 @@ def decide(classification, ctx, route, *, cfg, availability, evidence, jev_signa
                           hold_reason=f"fable_unavailable:{why}")
         return result(escalation, hard, hard_reasons=hard)
     score = soft_score(classification, ctx, evidence, jev_signal)
-    if kind:
+    if kind and mode == "active":
         per_tier = {default: evidence} if tier_evidence is None else tier_evidence
+        floor_n = cfg.get("cheap_min_samples", 5)
         for tier in candidates:
             facts = per_tier.get(tier) or {}
-            if (available(tier) and facts.get("noninferior") is not False
-                    and (facts.get("reescalation_rate") or 0) <= cfg.get("cheap_reescalation_max", 0.3)
-                    and (cfg.get("cheap_min_samples", 0) <= 0
-                         or (facts.get("n") or 0) >= cfg.get("cheap_min_samples", 0))):
+            rate = facts.get("reescalation_rate")
+            if (available(tier) and rate is not None and facts.get("noninferior") is not False
+                    and rate <= cfg.get("cheap_reescalation_max", 0.3)
+                    and (facts.get("n") or 0) >= floor_n):
                 return result(tier, (f"cheap_kind:{kind}:{tier}",), score=score)
     if mode == "shadow":
         reasons = ["shadow_production_fable"]
