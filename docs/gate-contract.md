@@ -74,8 +74,8 @@ Added 2026-10-11 (T-1852, part B1 of T-1792 item 2). A gate queued for the machi
 ```
 
 `owner_*` come from `gate._owner()`; `owner_start` may be null. The entry has no `pid`, `pgid`, `proc_start`,
-`started_at` or `timeout_s`: no gate process exists yet. Nothing writes a waiting entry in production until the
-lease wait loop (part B2) lands.
+`started_at` or `timeout_s`: no gate process exists yet. Since part B2a (2026-10-12) `run_gate` writes it while a
+heavy gate queues; see [Machine-wide heavy gate slot](#machine-wide-heavy-gate-slot).
 
 Every registry write goes through `gate._write_registry`: write `<key>.tmp`, then `os.replace`. `register()` in
 `_run_gate` uses it too, so it can overwrite a waiting entry in place with no moment where the key is in no
@@ -96,3 +96,68 @@ Every reader branches on a waiting entry before it touches `entry["pid"]`:
 | `gate.reap_orphans` | never signals; unlinked when not `_owner_alive` (dead owner, reused pid, or a stale entry with this process's pid but another start); kept when the owner lives | new: such an entry used to be skipped on `KeyError` and leaked |
 | `gate.terminate_own` | unlinked when `owner_pid` is this process | none (already did so) |
 | `watchdog.gate_live` | not live | none, was not live through the missing `pid`; now explicit |
+
+## Machine-wide heavy gate slot
+
+Added 2026-10-12 (part B2a of T-1792 item 2). At most `[gate].machine_max_parallel` heavy gates run at once across
+every repo on the machine. `run_gate` takes the per-repo `[gate].max_parallel` slot first (unchanged), then, before
+the first attempt, a heavy gate queues for a machine lease of kind `heavy_gate` in `~/.orchestrator-machine/`.
+
+- Heavy: `gate._heavy(mode, opts)` is `mode in (None, "full") or [gate].heavy`. Mode `task` with `heavy = false`
+  is light and never touches the lease. Ship and unscoped gates are always heavy.
+- Holder: `{"repo": str(STATE.parent), "task": task_id, "pid": os.getpid(), "proc_start": <owner start>}`
+  (`proc_start` dropped when unreadable); `machine.acquire` adds `since`.
+- FIFO: the gate writes its [waiting registry entry](#waiting-registry-entry), takes a ticket
+  (`machine.wait_ticket`, kept in `waiters-heavy_gate.json`) and polls `machine.acquire(..., ticket=ticket)` every
+  `SLOT_POLL_S`; only the oldest live ticket is granted. On success `register()` overwrites the waiting entry in
+  place with the running entry, so the key is never absent while the lease is held. Every other exit drops the
+  ticket and unlinks the waiting entry when it is this process's waiting entry (a running entry is never deleted).
+- Queue time never counts toward `[gate].timeout_s`. One lease wraps both timeout attempts (no re-wait) and is
+  released in one `finally`; a release error is logged and never masks the result.
+- Head-of-line: a queued gate keeps its per-repo slot while it waits. That wait is bounded by
+  `machine_wait_max_s`, default `2 * (timeout_s + 2 * cleanup_timeout_s) + 60` (4500/300 gives 10260 s): two
+  attempts, each followed by `cleanup_cmd` and `post_cmd` bounded by `cleanup_timeout_s`, plus kill grace, so one
+  queued gate always outlives one worst-case holder.
+- Ticket re-issue: when the gate's ticket disappears from `waiters-heavy_gate.json` (an operator cleared it), the
+  gate takes a new ticket at the tail, at most `machine_ticket_reissue_max` times, logging
+  `machine slot ticket vanished, re-queued at the tail (n/max)`. The wait clock is never reset.
+- Log: `[gate] task_id=... waiting for machine heavy-gate slot (cap=N, holders=[(repo, task, age_s), ...])` at the
+  first miss and every `machine_wait_log_s`.
+- Every result carries `machine_wait_s` (float, 0.0 for light gates and cap 0) and `machine_wait_exceeded` (bool).
+
+Failure shapes (both leave the repo slot released by `run_gate`'s `finally`):
+
+| Case | Result | Current consumers |
+|---|---|---|
+| `acquire` / `wait_ticket` raise (OSError, ValueError, JSON errors) | `returncode: 1`, `stderr` and `error` `machine slot: <exc!r>`, `timed_out: false`, `attempts: 0`, `timeouts: 0`, `machine_wait_exceeded: false` | red in `daemon._apply_gate_result`, `merge.merge`, `ship._gate` |
+| wait exceeded, or the ticket vanished more than `machine_ticket_reissue_max` times | `returncode: null`, `timed_out: true`, `stderr` `machine slot wait exceeded <n>s` or `machine slot ticket vanished <n> times`, `attempts: 0`, `timeouts: 0`, `machine_wait_exceeded: true` | a plain gate timeout with no retry (the daemon holds `gate_timeout`; `timeouts: 0` leaves `pipeline.gate_timeouts` untouched, so `auto_fix_round` does not fire) until T-1797 |
+
+Keys (`[gate]`, read by `gate.settings()`, never written back). An invalid value is logged to stderr as
+`[gate] invalid [gate].<key>=<value!r>, using default <default>` and replaced by the default, never by 0 or
+unlimited. A bool is never a valid int.
+
+| Key | Default | Valid |
+|---|---|---|
+| `machine_max_parallel` | 1 | int >= 0; 0 = off (takes no lease) |
+| `heavy` | false | bool |
+| `machine_wait_max_s` | `2 * (timeout_s + 2 * cleanup_timeout_s) + 60` | int >= 1 |
+| `machine_wait_log_s` | 300 | int >= 1 |
+| `machine_ticket_reissue_max` | 3 | int >= 0 |
+
+To raise the cap, set `machine_max_parallel` in the `pool.toml` of every repo on the machine; each gate passes its
+own repo's cap to `acquire`, so keep them equal.
+
+Queued waiters are not aborted by daemon shutdown until part B2b: `terminate_own` kills running gate process
+groups, but a queued gate keeps polling until it acquires or the wait bound expires. A daemon gate thread is a
+daemon thread, so it dies with the daemon process; its ticket and waiting entry are then swept by pid liveness
+(`machine` drops dead waiters, `reap_orphans` unlinks waiting entries of a dead owner).
+
+### Rollback and stuck leases
+
+Set `machine_max_parallel = 0` to turn the slot off: gates take no lease and never queue (tested). To clear a
+stuck lease, delete the `heavy_gate` entries from `~/.orchestrator-machine/leases.json` and
+`waiters-heavy_gate.json` (queued gates re-issue their tickets, at most `machine_ticket_reissue_max` times), and
+the `.orchestrator/gates/<key>.json` waiting entries whose owner is dead. A live holder is bounded by the wait
+formula above; a hung daemon thread keeps its lease until the daemon exits. Lease liveness is pid-based: when a
+daemon dies while its gate subprocess still runs, the lease is swept and the cap can be exceeded by one until
+`reap_orphans` kills the orphan.

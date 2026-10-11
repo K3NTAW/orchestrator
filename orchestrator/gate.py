@@ -104,9 +104,33 @@ def settings(cfg=None):
     if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
         max_parallel = 1
     scoped = gate_cfg.get("scoped_task_gates", True)
+
+    def machine_int(key, default, minimum):
+        value = gate_cfg.get(key, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            print(f"[gate] invalid [gate].{key}={value!r}, using default {default}", file=sys.stderr)
+            return default
+        return value
+
+    heavy = gate_cfg.get("heavy", False)
+    if not isinstance(heavy, bool):
+        print(f"[gate] invalid [gate].heavy={heavy!r}, using default False", file=sys.stderr)
+        heavy = False
     return {"timeout_s": timeout_s, "cleanup_cmd": cleanup_cmd,
             "cleanup_timeout_s": cleanup_timeout_s, "post_cmd": post_cmd,
-            "max_parallel": max_parallel, "scoped_task_gates": scoped is not False}
+            "max_parallel": max_parallel, "scoped_task_gates": scoped is not False,
+            "machine_max_parallel": machine_int("machine_max_parallel", 1, 0), "heavy": heavy,
+            # One queued gate outlives one worst-case holder: two attempts, each followed by cleanup_cmd and
+            # post_cmd bounded by cleanup_timeout_s, plus kill grace.
+            "machine_wait_max_s": machine_int("machine_wait_max_s", 2 * (timeout_s + 2 * cleanup_timeout_s) + 60, 1),
+            "machine_wait_log_s": machine_int("machine_wait_log_s", 300, 1),
+            "machine_ticket_reissue_max": machine_int("machine_ticket_reissue_max", 3, 0)}
+
+
+def _heavy(mode, opts):
+    """A heavy gate takes the machine-wide heavy-gate lease: full or unscoped gates, or any gate of a repo
+    whose [gate].heavy is true."""
+    return mode in (None, "full") or opts["heavy"]
 
 
 def task_base(worktree, target):
@@ -279,7 +303,13 @@ def run_gate(worktree, *, script, task_id=None, cfg=None, env=None, mode=None, b
     """Run a repository gate, cleaning up and retrying once after a timeout. Takes a [gate].max_parallel slot
     first, waiting until one frees, unless the calling context already holds the slot for this gate.
     mode (task | full) and base reach the gate as ORCH_GATE_MODE / ORCH_GATE_BASE when not None
-    (docs/gate-contract.md); env None inherits os.environ."""
+    (docs/gate-contract.md); env None inherits os.environ.
+
+    A heavy gate (_heavy) then queues FIFO for one of [gate].machine_max_parallel machine-wide heavy-gate leases
+    (0 = off); queue time never counts toward [gate].timeout_s. The wait is bounded by [gate].machine_wait_max_s.
+    terminate_own does not abort a queued waiter yet (part B2b): it polls until it acquires or the bound expires.
+    No re-entrancy guard: nothing calls run_gate from inside a gate (daemon._start_gate's thread, merge.merge and
+    ship._gate are all top level). Every result carries machine_wait_s and machine_wait_exceeded."""
     key = _gate_key(worktree, task_id)
     held = _HELD.get() == key
     if not held:
@@ -292,8 +322,101 @@ def run_gate(worktree, *, script, task_id=None, cfg=None, env=None, mode=None, b
             release_slot(key)
 
 
+def _machine_failure(mode, base, wait_s, *, error=None, stderr=None):
+    """Result of a gate that never ran: returncode 1 when the lease could not be read or written, else the
+    wait-exceeded timeout shape (returncode None, timeouts 0, so no caller files a gate timeout retry)."""
+    if error is not None:
+        return {"returncode": 1, "stdout": "", "stderr": error, "timed_out": False, "error": error,
+                "attempts": 0, "timeouts": 0, "machine_wait_s": wait_s, "machine_wait_exceeded": False,
+                "mode": mode, "base": base}
+    return {"returncode": None, "stdout": "", "stderr": stderr, "timed_out": True, "attempts": 0,
+            "timeouts": 0, "machine_wait_exceeded": True, "machine_wait_s": wait_s, "mode": mode, "base": base}
+
+
+def _unlink_waiting(key):
+    """Remove this process's waiting registry entry for key; a running entry or another owner's is kept."""
+    path = STATE / "gates" / f"{key}.json"
+    try:
+        entry = json.loads(path.read_text())
+        if is_waiting(entry) and entry.get("owner_pid") == os.getpid():
+            path.unlink()
+    except (FileNotFoundError, ValueError):
+        pass
+
+
+def _wait_machine_slot(key, task_id, worktree, mode, base, opts):
+    """Queue FIFO for a machine heavy-gate lease. Returns (lease_id, wait_s) or a result dict for run_gate."""
+    from . import machine
+    owner = _owner()
+    holder = {"repo": str(STATE.parent), "task": task_id, "pid": owner["pid"]}
+    if owner["start"] is not None:
+        holder["proc_start"] = owner["start"]
+    cap = opts["machine_max_parallel"]
+    ticket, ok, start, reissues, logged = None, False, None, 0, None
+    try:
+        try:
+            write_waiting_entry(key, task_id=task_id, worktree=worktree, mode=mode, base=base)
+            ticket = machine.wait_ticket("heavy_gate", holder)
+            start = time.monotonic()
+            while True:
+                lease = machine.acquire("heavy_gate", cap, holder, ticket=ticket)
+                waited = time.monotonic() - start
+                if lease is not None:
+                    ok = True
+                    return lease, waited
+                if waited > opts["machine_wait_max_s"]:
+                    return _machine_failure(mode, base, waited, stderr=f"machine slot wait exceeded {int(waited)}s")
+                if ticket not in {w.get("ticket") for w in machine._read_waiters("heavy_gate")}:
+                    if reissues >= opts["machine_ticket_reissue_max"]:
+                        return _machine_failure(mode, base, waited,
+                                                stderr=f"machine slot ticket vanished {reissues + 1} times")
+                    ticket = machine.wait_ticket("heavy_gate", holder)
+                    reissues += 1
+                    print(f"[gate] task_id={task_id} machine slot ticket vanished, re-queued at the tail "
+                          f"({reissues}/{opts['machine_ticket_reissue_max']})", file=sys.stderr)
+                if logged is None or time.monotonic() - logged >= opts["machine_wait_log_s"]:
+                    logged = time.monotonic()
+                    now = time.time()
+                    held = [(h.get("repo"), h.get("task"), round(now - h.get("since", now)))
+                            for h in machine.holders("heavy_gate")]
+                    print(f"[gate] task_id={task_id} waiting for machine heavy-gate slot (cap={cap}, holders={held})",
+                          file=sys.stderr)
+                time.sleep(SLOT_POLL_S)
+        except (OSError, ValueError) as e:
+            waited = 0.0 if start is None else time.monotonic() - start
+            return _machine_failure(mode, base, waited, error=f"machine slot: {e!r}")
+    finally:
+        if ticket is not None:
+            try:
+                machine.drop_ticket("heavy_gate", ticket)
+            except Exception as e:
+                print(f"[gate] task_id={task_id} machine slot drop_ticket failed: {e!r}", file=sys.stderr)
+        if not ok:
+            _unlink_waiting(key)
+
+
 def _run_gate(worktree, *, script, task_id, cfg, env, key, mode=None, base=None):
     opts = settings(cfg)
+    lease, wait_s = None, 0.0
+    if _heavy(mode, opts) and opts["machine_max_parallel"] > 0:
+        got = _wait_machine_slot(key, task_id, worktree, mode, base, opts)
+        if isinstance(got, dict):
+            return got
+        lease, wait_s = got
+    try:
+        result = _run_attempts(worktree, script=script, task_id=task_id, env=env, key=key, mode=mode, base=base,
+                               opts=opts)
+        return {**result, "machine_wait_s": wait_s, "machine_wait_exceeded": False}
+    finally:
+        if lease is not None:
+            from . import machine
+            try:
+                machine.release(lease)
+            except Exception as e:
+                print(f"[gate] task_id={task_id} machine slot release failed: {e!r}", file=sys.stderr)
+
+
+def _run_attempts(worktree, *, script, task_id, env, key, mode, base, opts):
     if mode is not None or base is not None:
         env = dict(env if env is not None else os.environ)
         if mode is not None:
