@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
+import helpers
 from orchestrator import bus, daemon, executor, failures, merge, pool as P, spawn
 from orchestrator import jev_route
 
@@ -28,6 +29,9 @@ _MODULE_PATCHES = []
 
 
 def setUpModule():
+    # Dispatch, review and fix-round assertions here are written against the pinned pool baseline, not whatever
+    # operator settings the checkout's .orchestrator/pool.toml carries (PR 50 committed every Codex row disabled).
+    _MODULE_PATCHES.append((None, helpers.pin_pool()))
     gates_root = Path(tempfile.mkdtemp(prefix="orch-gates-"))
     patcher = mock.patch.object(daemon.gate_runner, "STATE", gates_root)
     patcher.start()
@@ -43,9 +47,12 @@ def setUpModule():
 def tearDownModule():
     LIVE_ENTRY.unlink(missing_ok=True)
     while _MODULE_PATCHES:
-        patcher, gates_root = _MODULE_PATCHES.pop()
+        patcher, cleanup = _MODULE_PATCHES.pop()
+        if patcher is None:
+            cleanup()
+            continue
         patcher.stop()
-        shutil.rmtree(gates_root, True)
+        shutil.rmtree(cleanup, True)
 
 
 class LiveGateRegistryIsolation(unittest.TestCase):
