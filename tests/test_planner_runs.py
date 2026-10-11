@@ -1171,6 +1171,20 @@ class RoutedDecisions(PlannerRunsBase):
         self.assertEqual(self.launches, [])
         self.assertTrue(any((t.get("constraints") or {}).get("auto_round") == 1 for t in bus.read()))
 
+    def test_tick_skips_fast_lane_first_red(self):
+        skips = []
+        self.swap(PR, "_telemetry_skip", lambda point, event, reason: skips.append((point["task_id"], reason)))
+        self.pool.cfg["daemon"]["fast_lane_max_complexity"] = 3
+        goal = self.goal()
+        held = self.held(goal, "gate_red", resume_hint={"failures": "✗ custom runner test failed"})
+        PR.tick(self.pool)
+        self.assertEqual(self.launches, [])
+        self.assertIn((held, "fast_lane"), skips)
+        bus.update(held, pipeline={"gate_reds": 2})
+        skips.clear()
+        PR.tick(self.pool)
+        self.assertNotIn((held, "fast_lane"), skips)
+
     def test_two_held_siblings_one_launch_only_escalate_section(self):
         goal = self.goal()
         routine = self.held(goal, "gate_red", resume_hint={"failures": "FAILED tests/test_x.py::test_x"})

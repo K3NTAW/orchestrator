@@ -1481,6 +1481,50 @@ def _reconcile_infra(record, records):
     return True
 
 
+FAST_LANE_ESCALATE_KINDS = {"conflict", "environment", "permissions", "quota"}
+
+
+def fast_lane_candidate(task, cfg, chain=None):
+    """Cheap half of the fast lane (2026-10-11, goal T-1792): a held execute task at or below
+    [daemon].fast_lane_max_complexity, held gate_red, on its first red with no fix round anywhere in its lineage.
+    The daemon files that first fix round itself; a second red goes through the normal routing."""
+    if not task or task.get("role") != "execute" or task.get("status") != "held":
+        return False
+    if task.get("hold_reason") != "gate_red":
+        return False
+    limit = (cfg.get("daemon") or {}).get("fast_lane_max_complexity", 3)
+    try:
+        if int(task.get("complexity") or 0) < 1 or int(task["complexity"]) > int(limit):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if ((task.get("pipeline") or {}).get("gate_reds") or 0) >= 2:
+        return False
+    chain = failures.lineage(task) if chain is None else chain
+    return not any((t.get("constraints") or {}).get("auto_round") is not None
+                   or (t.get("constraints") or {}).get("fix_round_for") for t in chain)
+
+
+def fast_lane_exception(task, kind, cfg):
+    """The first-red exceptions that still escalate: a non-mechanical failure kind, or a hold whose diff touches
+    auth or data deletion (unavailable diff evidence marks every area, so it escalates)."""
+    if kind in FAST_LANE_ESCALATE_KINDS:
+        return kind
+    areas = failures.touch_areas(task, cfg)
+    for area in ("auth", "data_deletion"):
+        if areas.get(area):
+            return area
+    return None
+
+
+def fast_lane(task, cfg, chain=None):
+    """True when the daemon, not a headless Planner, files this held task's first fix round."""
+    if not fast_lane_candidate(task, cfg, chain):
+        return False
+    kind = failures.failure_kind(task, task.get("worktree"), rerun_max=0)
+    return fast_lane_exception(task, kind, cfg) is None
+
+
 def _telemetry_skip(point, event, reason):
     planner_telemetry.record_skip(goal_id=point["goal_id"], event=event, reason=reason,
                                   kind=point["kind"], payload_key=point["payload_key"], root=STATE)
@@ -1810,6 +1854,9 @@ def tick(pool=None):
                               for t in bus.read() if t.get("status") != "failed"}
         if point["kind"] == "held" and point["task_id"] in fix_rounds_for:
             _telemetry_skip(point, "tick", "fix_round_in_flight")
+            continue
+        if point["kind"] == "held" and fast_lane(_decision_task(point["goal_id"], "held", point["payload_key"]), pool.cfg):
+            _telemetry_skip(point, "tick", "fast_lane")
             continue
         ctx = build_ctx(point, pool)
         goal = bus.get(point["goal_id"])

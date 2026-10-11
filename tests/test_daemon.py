@@ -3510,6 +3510,83 @@ class Daemon(unittest.TestCase):
         fix, = self.fixes_for(tid)
         self.assertIn(failures[0], fix["spec"])
 
+    def fast_pool(self):
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["fast_lane_max_complexity"] = 3
+        self.swap(daemon.failures, "touch_areas",
+                  lambda task, cfg=None: {area: False for area in daemon.failures.DEFAULT_AREAS})
+        return pool
+
+    def test_fast_lane_first_gate_red_files_fix_round_without_test_ids(self):
+        pool = self.fast_pool()
+        pool.cfg.setdefault("planner", {})["autonomous"] = True
+        tid = self.held_for_fix("✗ custom runner test failed", complexity=2)
+        self.assertTrue(daemon.planner_runs.fast_lane(bus.get(tid), pool.cfg))
+        with mock.patch.object(daemon.decision, "routes_enabled", return_value=True), \
+                mock.patch.object(daemon.planner_runs.decision, "route", side_effect=AssertionError("routed")):
+            daemon.auto_fix_round(pool)
+        fix, = self.fixes_for(tid)
+        self.assertEqual(fix["constraints"]["auto_round"], 1)
+        self.assertTrue(fix["constraints"]["fast_lane"])
+        self.assertIn("## Gate output", fix["spec"])
+        daemon.auto_fix_round(pool)
+        self.assertEqual(len(self.fixes_for(tid)), 1)
+
+    def test_fast_lane_fix_round_spec_carries_failures_and_log_path(self):
+        pool = self.fast_pool()
+        log = "see .orchestrator/runs/tests/T-0001-abc.log"
+        tid = self.held_for_fix(f"✗ custom runner boom\nolder .orchestrator/runs/tests/old.log\n{log}\nsummary",
+                                complexity=1)
+        daemon.auto_fix_round(pool)
+        fix, = self.fixes_for(tid)
+        gate_output = fix["spec"].split("## Gate output\n", 1)[1]
+        self.assertIn("```data\n✗ custom runner boom", gate_output)
+        self.assertIn(f"Tests-green log: {log}\n", gate_output)
+        self.assertIn(".claude/hooks/tests-green.sh . </dev/null", gate_output)
+        held = bus.get(tid)
+        self.assertEqual(daemon._fix_round_spec(held, 1, None, []), daemon._fix_round_spec(held, 1, None, []))
+        bus.update(tid, resume_hint={"failures": "x" * 5000})
+        data = daemon._fix_round_spec(bus.get(tid), 1, None, []).split("## Gate output\n", 1)[1]
+        self.assertIn("x" * 4000 + "\n```", data)
+        self.assertNotIn("x" * 4001, data)
+        self.assertIn("Tests-green log: (none)", data)
+
+    def test_fast_lane_second_red_routes_to_planner(self):
+        pool = self.fast_pool()
+        pool.cfg.setdefault("planner", {})["autonomous"] = True
+        routed = []
+        for fields in ({"pipeline": {"gate_reds": 2}}, {"constraints": {"auto_round": 1}}):
+            with self.subTest(fields=fields):
+                tid = self.held_for_fix("✗ custom runner test failed", complexity=2)
+                bus.update(tid, **fields)
+                self.assertFalse(daemon.planner_runs.fast_lane(bus.get(tid), pool.cfg))
+                with mock.patch.object(daemon.decision, "routes_enabled", return_value=True), \
+                        mock.patch.object(daemon.planner_runs, "build_ctx", return_value={"failing_ids": []}), \
+                        mock.patch.object(daemon.planner_runs.decision, "route",
+                                          side_effect=lambda point, ctx: routed.append(point["task_id"])
+                                          or mock.Mock(name="escalate")), \
+                        mock.patch.object(daemon, "notify", lambda msg: None):
+                    daemon.auto_fix_round(pool)
+                self.assertIn(tid, routed)
+                self.assertEqual(self.fixes_for(tid), [])
+
+    def test_fast_lane_skips_conflict_environment_and_auth_holds(self):
+        pool = self.fast_pool()
+        self.swap(daemon, "notify", lambda msg: None)
+        for label, failures, areas in (("conflict", "rebase_conflict in x.py", {}),
+                                       ("environment", "ModuleNotFoundError: No module named 'x'", {}),
+                                       ("auth", "FAILED tests/test_x.py::test_x - assertion", {"auth": True}),
+                                       ("data_deletion", "✗ custom runner failed", {"data_deletion": True})):
+            with self.subTest(label=label):
+                touched = {area: areas.get(area, False) for area in daemon.failures.DEFAULT_AREAS}
+                self.swap(daemon.failures, "touch_areas", lambda task, cfg=None, touched=touched: touched)
+                tid = self.held_for_fix(failures, complexity=2)
+                self.assertFalse(daemon.planner_runs.fast_lane(bus.get(tid), pool.cfg))
+                daemon.auto_fix_round(pool)
+                self.assertFalse(any(f["constraints"].get("fast_lane") for f in self.fixes_for(tid)))
+                if label != "auth":
+                    self.assertEqual(self.fixes_for(tid), [])
+
     def test_gate_holds_dirty_worktree(self):
         """A done execute task whose worktree still has uncommitted changes under its scope must not be gated
         against a stale HEAD -- gate() must hold it for the Planner to commit or re-spec instead of running
