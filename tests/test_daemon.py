@@ -18,6 +18,50 @@ REAL_GATE = daemon.gate
 REAL_WORKER = spawn.run_worker
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
 
+# The gate slot count reads gate.gates_dir(). When this suite runs AS a gate, a live registry entry may already sit
+# in the shared root's gates dir, so with [gate].max_parallel = 1 every gate and merge path here would find the
+# slot full. Every test in this module reads an isolated gates dir instead, and setUpModule plants a live entry
+# for this process in the shared dir so the suite proves it passes with one present.
+SHARED_GATES = daemon.gate_runner.gates_dir()
+LIVE_ENTRY = SHARED_GATES / "T-live-outside-sandbox.json"
+_MODULE_PATCHES = []
+
+
+def setUpModule():
+    gates_root = Path(tempfile.mkdtemp(prefix="orch-gates-"))
+    patcher = mock.patch.object(daemon.gate_runner, "STATE", gates_root)
+    patcher.start()
+    _MODULE_PATCHES.append((patcher, gates_root))
+    SHARED_GATES.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    LIVE_ENTRY.write_text(json.dumps({
+        "task_id": "T-live-outside-sandbox", "worktree": str(REPO), "pid": pid, "pgid": os.getpgid(pid),
+        "proc_start": daemon.machine.process_start(pid), "owner_pid": pid,
+        "owner_start": daemon.machine.process_start(pid), "started_at": time.time(), "timeout_s": 2700}))
+
+
+def tearDownModule():
+    LIVE_ENTRY.unlink(missing_ok=True)
+    while _MODULE_PATCHES:
+        patcher, gates_root = _MODULE_PATCHES.pop()
+        patcher.stop()
+        shutil.rmtree(gates_root, True)
+
+
+class LiveGateRegistryIsolation(unittest.TestCase):
+    def test_live_shared_gate_entry_does_not_fill_test_slots(self):
+        """Regression for the T-1749 ship gate: a live gate registered in the shared gates dir still counts in
+        production, but the tests here read their own gates dir and so still get a slot."""
+        gate_mod = daemon.gate_runner
+        self.assertTrue(LIVE_ENTRY.exists())
+        self.assertNotEqual(gate_mod.gates_dir(), SHARED_GATES)
+        with mock.patch.object(gate_mod, "STATE", SHARED_GATES.parent):
+            self.assertIn(LIVE_ENTRY.stem, gate_mod._live_registry_keys())
+            self.assertFalse(gate_mod.try_acquire_slot("T-isolation", cfg={"gate": {"max_parallel": 1}}))
+        self.assertTrue(gate_mod.try_acquire_slot("T-isolation", cfg={"gate": {"max_parallel": 1}}))
+        gate_mod.release_slot("T-isolation")
+
+
 
 class ReviewModelRule(unittest.TestCase):
     def setUp(self):

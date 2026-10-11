@@ -153,11 +153,17 @@ def slot_key(worktree, task_id=None):
     return _gate_key(worktree, task_id)
 
 
+def gates_dir():
+    """The repo's gate registry: one <key>.json per running gate, read by every slot count. Resolved at call time
+    from STATE so tests point it at a temporary directory in one place."""
+    return STATE / "gates"
+
+
 def _live_registry_keys():
     """Registry keys whose gate process group still runs (a reused pid with another start time does not)."""
     from . import machine
     keys = set()
-    for path in (STATE / "gates").glob("*.json"):
+    for path in gates_dir().glob("*.json"):
         try:
             entry = json.loads(path.read_text())
             pid = int(entry["pid"])
@@ -233,14 +239,13 @@ def run_gate(worktree, *, script, task_id=None, cfg=None, env=None):
 
 def _run_gate(worktree, *, script, task_id, cfg, env, key):
     opts = settings(cfg)
-    gates_dir = STATE / "gates"
-    registry = gates_dir / f"{key}.json"
+    registry = gates_dir() / f"{key}.json"
     timeouts = 0
     for attempt in (1, 2):
         def register(pid):
             from . import machine
             owner = _owner()
-            gates_dir.mkdir(parents=True, exist_ok=True)
+            registry.parent.mkdir(parents=True, exist_ok=True)
             registry.write_text(json.dumps({"task_id": task_id, "worktree": str(worktree),
                                             "pid": pid, "pgid": pid, "proc_start": machine.process_start(pid),
                                             "owner_pid": owner["pid"], "owner_start": owner["start"],
@@ -274,7 +279,7 @@ def running_gates(now=None, threshold=0.8):
     """Return readable gate registry entries nearing their timeout."""
     now = time.time() if now is None else now
     entries = []
-    for path in (STATE / "gates").glob("*.json"):
+    for path in gates_dir().glob("*.json"):
         try:
             entry = json.loads(path.read_text())
             elapsed = now - entry["started_at"]
@@ -318,7 +323,7 @@ def terminate_own(grace_s=5):
         _ABORTED.update(proc.pid for proc in procs)
     killed = [proc.pid for proc in procs
               if _stop_group(proc.pid, grace_s, lambda proc=proc: proc.poll() is not None)]
-    for path in (STATE / "gates").glob("*.json"):
+    for path in gates_dir().glob("*.json"):
         try:
             if json.loads(path.read_text()).get("owner_pid") == os.getpid():
                 path.unlink()
@@ -344,7 +349,7 @@ def reap_orphans(grace_s=KILL_GRACE_S):
     killed entries."""
     from . import machine
     killed = []
-    for path in (STATE / "gates").glob("*.json"):
+    for path in gates_dir().glob("*.json"):
         try:
             entry = json.loads(path.read_text())
             pid = int(entry["pid"])
