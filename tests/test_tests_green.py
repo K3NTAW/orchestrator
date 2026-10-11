@@ -16,7 +16,7 @@ class TestsGreenHook(unittest.TestCase):
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             subprocess.run(["git", "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-qm", "test"], cwd=root, check=True)
-            result = subprocess.run([str(HOOK), str(root)], text=True, capture_output=True)
+            result = subprocess.run([str(HOOK), str(root)], text=True, capture_output=True, stdin=subprocess.DEVNULL)
             log_path = Path(result.stderr.strip().splitlines()[-1]) if result.returncode else None
             return result, root, bool(log_path and log_path.is_file())
 
