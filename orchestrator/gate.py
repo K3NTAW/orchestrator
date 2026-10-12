@@ -24,6 +24,9 @@ _PROCS = {}
 _ABORTED = set()
 _PROCS_LOCK = threading.Lock()
 _OWNER = {}
+# Gate threads queued for the machine heavy-gate slot: (str(STATE), key) -> Event, guarded by _PROCS_LOCK.
+# terminate_own() sets the Events of its STATE; the waiter raises Aborted at its next check.
+_SLOT_WAITERS = {}
 # One [gate].max_parallel count per repo across every path that starts a gate (daemon background gate, the merge
 # gate, ship): slot key -> repo state dir, reserved by a thread of this process before its gate starts. Gates of
 # other processes count through their live registry entries. _HELD names the slot the calling context already
@@ -307,7 +310,7 @@ def run_gate(worktree, *, script, task_id=None, cfg=None, env=None, mode=None, b
 
     A heavy gate (_heavy) then queues FIFO for one of [gate].machine_max_parallel machine-wide heavy-gate leases
     (0 = off); queue time never counts toward [gate].timeout_s. The wait is bounded by [gate].machine_wait_max_s.
-    terminate_own does not abort a queued waiter yet (part B2b): it polls until it acquires or the bound expires.
+    terminate_own aborts a queued waiter of this STATE: it raises Aborted with its repo slot released.
     No re-entrancy guard: nothing calls run_gate from inside a gate (daemon._start_gate's thread, merge.merge and
     ship._gate are all top level). Every result carries machine_wait_s and machine_wait_exceeded."""
     key = _gate_key(worktree, task_id)
@@ -353,15 +356,30 @@ def _wait_machine_slot(key, task_id, worktree, mode, base, opts):
         holder["proc_start"] = owner["start"]
     cap = opts["machine_max_parallel"]
     ticket, ok, start, reissues, logged = None, False, None, 0, None
+    mark, event = (str(STATE), key), threading.Event()
+    with _PROCS_LOCK:
+        _SLOT_WAITERS[mark] = event
+
+    def check():
+        with _PROCS_LOCK:
+            if event.is_set():
+                raise Aborted(f"gate {key} queued for the machine slot aborted on daemon shutdown")
+
     try:
         try:
             write_waiting_entry(key, task_id=task_id, worktree=worktree, mode=mode, base=base)
             ticket = machine.wait_ticket("heavy_gate", holder)
             start = time.monotonic()
             while True:
+                check()
                 lease = machine.acquire("heavy_gate", cap, holder, ticket=ticket)
                 waited = time.monotonic() - start
                 if lease is not None:
+                    with _PROCS_LOCK:
+                        aborted = event.is_set()
+                    if aborted:
+                        machine.release(lease)
+                        raise Aborted(f"gate {key} aborted on daemon shutdown after taking the machine slot")
                     ok = True
                     return lease, waited
                 if waited > opts["machine_wait_max_s"]:
@@ -382,10 +400,14 @@ def _wait_machine_slot(key, task_id, worktree, mode, base, opts):
                     print(f"[gate] task_id={task_id} waiting for machine heavy-gate slot (cap={cap}, holders={held})",
                           file=sys.stderr)
                 time.sleep(SLOT_POLL_S)
+                check()
         except (OSError, ValueError) as e:
             waited = 0.0 if start is None else time.monotonic() - start
             return _machine_failure(mode, base, waited, error=f"machine slot: {e!r}")
     finally:
+        with _PROCS_LOCK:
+            if _SLOT_WAITERS.get(mark) is event:
+                _SLOT_WAITERS.pop(mark)
         if ticket is not None:
             try:
                 machine.drop_ticket("heavy_gate", ticket)
@@ -504,8 +526,12 @@ def _stop_group(pgid, grace_s, exited):
 def terminate_own(grace_s=5):
     """Daemon shutdown: kill every gate process group this process started and drop the registry entries it
     owns. The killed runs raise Aborted in their threads, so no caller records a red or timed-out gate. Returns
-    the killed process group ids."""
+    the killed process group ids. Gate threads of this STATE queued for the machine slot raise Aborted too."""
     with _PROCS_LOCK:
+        repo = str(STATE)
+        for (state, _), event in _SLOT_WAITERS.items():
+            if state == repo:
+                event.set()
         procs = list(_PROCS.values())
         _ABORTED.update(proc.pid for proc in procs)
     killed = [proc.pid for proc in procs

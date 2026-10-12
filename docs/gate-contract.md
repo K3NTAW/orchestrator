@@ -147,9 +147,12 @@ unlimited. A bool is never a valid int.
 To raise the cap, set `machine_max_parallel` in the `pool.toml` of every repo on the machine; each gate passes its
 own repo's cap to `acquire`, so keep them equal.
 
-Queued waiters are not aborted by daemon shutdown until part B2b: `terminate_own` kills running gate process
-groups, but a queued gate keeps polling until it acquires or the wait bound expires. A daemon gate thread is a
-daemon thread, so it dies with the daemon process; its ticket and waiting entry are then swept by pid liveness
+Daemon shutdown aborts its own queued waiters: `terminate_own` kills running gate process groups and marks every
+gate thread of its STATE queued for the machine slot, which raises `Aborted` at its next check (before each
+acquire, after each sleep, and right after acquire, releasing the lease it just took) with its ticket dropped,
+waiting entry unlinked and repo slot released. Waiters of another STATE or another process keep their place. A
+daemon gate thread is a daemon thread, so if the daemon exits first it dies with the process; its ticket and
+waiting entry are then swept by pid liveness
 (`machine` drops dead waiters, `reap_orphans` unlinks waiting entries of a dead owner).
 
 ### Rollback and stuck leases
@@ -157,7 +160,8 @@ daemon thread, so it dies with the daemon process; its ticket and waiting entry 
 Set `machine_max_parallel = 0` to turn the slot off: gates take no lease and never queue (tested). To clear a
 stuck lease, delete the `heavy_gate` entries from `~/.orchestrator-machine/leases.json` and
 `waiters-heavy_gate.json` (queued gates re-issue their tickets, at most `machine_ticket_reissue_max` times), and
-the `.orchestrator/gates/<key>.json` waiting entries whose owner is dead. A live holder is bounded by the wait
+the `.orchestrator/gates/<key>.json` waiting entries whose owner is dead. The abort marks (`gate._SLOT_WAITERS`) are in memory only and popped on
+every waiter exit, so there is nothing to clean on disk. A live holder is bounded by the wait
 formula above; a hung daemon thread keeps its lease until the daemon exits. Lease liveness is pid-based: when a
 daemon dies while its gate subprocess still runs, the lease is swept and the cap can be exceeded by one until
 `reap_orphans` kills the orphan.

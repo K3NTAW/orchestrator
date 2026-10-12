@@ -895,5 +895,102 @@ class GateTimeoutTest(unittest.TestCase):
         self.assertEqual([r["machine_wait_exceeded"] for r in results], [False] * 4 + [True, False])
         self.assertEqual((results[0]["machine_wait_s"], results[1]["machine_wait_s"]), (0.0, 0.0))
 
+    # terminate_own aborts queued waiters ----------------------------------------------------------------------
+    def abort_queued(self, task_id):
+        """Queue a heavy gate behind a planted holder, abort it with terminate_own; returns the holder lease."""
+        lease = self.plant()
+        thread, out = self.gate_thread(script=self.script("exit 0\n"), task_id=task_id, cfg=self.cfg(), mode="full")
+        self.until(lambda: len(self.waiters()) == 1)
+        self.assertEqual(gate.terminate_own(grace_s=0), [])
+        thread.join(10)
+        self.assertIsInstance(out.get("error"), gate.Aborted)
+        self.assertEqual(self.waiters(), [])
+        self.assertFalse((self.state / "gates" / f"{task_id}.json").exists())
+        return lease
+
+    def test_abort_before_first_poll_never_acquires(self):
+        self._machine_tmp()
+        real = gate_machine.wait_ticket
+
+        def wait_ticket(*args, **kwargs):
+            ticket = real(*args, **kwargs)
+            gate.terminate_own(grace_s=0)
+            return ticket
+
+        marker = self.root / "ran"
+        with mock.patch.object(gate_machine, "wait_ticket", side_effect=wait_ticket), \
+                mock.patch.object(gate_machine, "acquire", wraps=gate_machine.acquire) as acquire:
+            with self.assertRaises(gate.Aborted):
+                gate.run_gate(self.root, script=self.script(f"touch {marker}\n"), task_id="T-ab", cfg=self.cfg(),
+                              mode="full")
+        acquire.assert_not_called()
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.waiters(), [])
+        self.assertFalse((self.state / "gates" / "T-ab.json").exists())
+        self.assertEqual(gate._SLOT_WAITERS, {})
+
+    def test_abort_after_acquire_releases_lease(self):
+        self._machine_tmp()
+        real = gate_machine.acquire
+        taken = []
+
+        def acquire(*args, **kwargs):
+            lease = real(*args, **kwargs)
+            if lease is not None:
+                taken.append(lease)
+                gate.terminate_own(grace_s=0)
+            return lease
+
+        marker = self.root / "ran"
+        with mock.patch.object(gate_machine, "acquire", side_effect=acquire):
+            with self.assertRaises(gate.Aborted):
+                gate.run_gate(self.root, script=self.script(f"touch {marker}\n"), task_id="T-aa", cfg=self.cfg(),
+                              mode="full")
+        self.assertEqual(len(taken), 1)
+        self.assertEqual(gate_machine.holders("heavy_gate"), [])
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.state / "gates" / "T-aa.json").exists())
+        self.assertEqual(gate._SLOT_WAITERS, {})
+
+    def test_terminate_own_aborts_only_own_waiter_and_clears_mark(self):
+        self._machine_tmp()
+        other = self.root / "b" / ".orchestrator"
+        other.mkdir(parents=True)
+        lease = self.plant()
+        first, first_out = self.gate_thread(script=self.script("exit 0\n", "a.sh"), task_id="T-A", cfg=self.cfg(),
+                                            mode="full")
+        self.until(lambda: len(self.waiters()) == 1 and (self.state / "gates" / "T-A.json").exists())
+        with mock.patch.object(gate, "STATE", other):
+            second, second_out = self.gate_thread(script=self.script("exit 0\n", "b.sh"), task_id="T-B",
+                                                  cfg=self.cfg(), mode="full")
+            self.until(lambda: len(self.waiters()) == 2 and (other / "gates" / "T-B.json").exists())
+        self.assertEqual(gate.terminate_own(grace_s=0), [])
+        first.join(10)
+        self.assertIsInstance(first_out.get("error"), gate.Aborted)
+        time.sleep(0.1)
+        self.assertTrue(second.is_alive())
+        self.assertEqual(len(self.waiters()), 1)
+        gate_machine.release(lease)
+        second.join(10)
+        self.assertEqual(second_out["result"]["returncode"], 0)
+        self.assertEqual(gate._SLOT_WAITERS, {})
+
+    def test_aborted_waiter_releases_repo_slot(self):
+        self._machine_tmp()
+        lease = self.abort_queued("T-rs")
+        self.assertTrue(gate.try_acquire_slot("T-rs", self.cfg()))
+        gate.release_slot("T-rs")
+        gate_machine.release(lease)
+
+    def test_reused_key_after_abort_runs_normally(self):
+        self._machine_tmp()
+        gate_machine.release(self.abort_queued("T-rk"))
+        marker = self.root / "ran"
+        result = gate.run_gate(self.root, script=self.script(f"touch {marker}\n", "again.sh"), task_id="T-rk",
+                               cfg=self.cfg(), mode="full")
+        self.assertEqual(result["returncode"], 0)
+        self.assertTrue(marker.exists())
+        self.assertEqual(gate._SLOT_WAITERS, {})
+
 if __name__ == "__main__":
     unittest.main()
