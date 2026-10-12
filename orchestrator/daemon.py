@@ -2375,8 +2375,8 @@ def _tick(pool=None, stop_event=None):
             continue
         name = getattr(stage, "__name__", repr(stage))
         try:
-            if stage is gate:
-                _timed(name, stage, pool, hold_starts=held)
+            if held and stage is gate:
+                _timed(name, stage, pool, hold_starts=True)
             elif stage is steering_tick:
                 _timed(name, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
             else:
