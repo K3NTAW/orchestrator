@@ -1860,6 +1860,80 @@ class Daemon(unittest.TestCase):
             daemon.tick(P.Pool())
         self.assertEqual(messages.count("account A hit its daily budget; tasks held"), 2)
 
+    def disk_free(self, gib):
+        self.swap(daemon, "_free_bytes", lambda path: gib * 2**30)
+
+    def test_dispatch_and_gate_skipped_below_free_space_floor(self):
+        pool = self.scheduler_pool("off", slots=1)
+        pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20}
+        spawned = []
+        self.swap(daemon, "spawn_async", lambda fn, *args, **kwargs: spawned.append(args[0]))
+        self.swap(daemon, "reap_worktrees", lambda *args, **kwargs: None)
+        self.swap(daemon, "notify", lambda message: None)
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.bg_setup()
+        queued = self.scheduler_task("queued", "a.py")
+        done = self.bg_task("done", "wt-done")
+        self.disk_free(1)
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            daemon.tick(pool)
+        self.assertIn("[daemon] disk low: 1.0 GiB free < 20 GiB; dispatch and gates held", err.getvalue())
+        self.assertEqual(spawned, [])
+        self.assertNotIn("dispatched_at", bus.get(queued).get("pipeline") or {})
+        self.assertNotIn("gate_started_at", bus.get(done).get("pipeline") or {})
+        self.disk_free(100)
+        daemon.tick(pool)
+        self.assertEqual(spawned, [queued])
+        self.assertIn("dispatched_at", bus.get(queued)["pipeline"])
+        self.assertIn("gate_started_at", bus.get(done)["pipeline"])
+
+    def test_disk_low_runs_reap_with_zero_grace(self):
+        self.reap_begin()
+        fresh = self.reap_task("T-9711", fresh=True, merged_into="main")
+        pool = P.Pool()
+        pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20, "reap_worktrees": True,
+                              "reap_dry_run": False, "reap_grace_s": 3600, "reap_max_per_tick": 20}
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(daemon, "notify", lambda message: None)
+        for stage in ("dispatch", "steering_tick", "gate", "merge_reviewed", "auto_fix_round"):
+            self.swap(daemon, stage, lambda *args, **kwargs: None)
+        self.disk_free(100)
+        daemon.tick(pool)
+        self.assertTrue(fresh.exists())
+        self.disk_free(1)
+        daemon.tick(pool)
+        self.assertFalse(fresh.exists())
+        self.assertTrue(bus.get("T-9711")["pipeline"]["reaped_at"])
+        self.reap_end()
+
+    def test_disk_low_notifies_once_per_transition(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(P, "PLANNER_USAGE", self.sandbox / "planner_usage.json")
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.swap(daemon, "maybe_handover", lambda *args: None)
+        self.swap(daemon, "reap_worktrees", lambda *args, **kwargs: None)
+        self.swap(P.Pool, "tally_planner", lambda pool: None)
+
+        def tick():
+            pool = P.Pool()  # restart-equivalent: reload the persisted notification state
+            pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20}
+            daemon.tick(pool)
+
+        def disk_messages():
+            return [m for m in messages if m.startswith("disk")]
+
+        self.disk_free(1)
+        tick(); tick()
+        self.assertEqual(disk_messages(), ["disk low: 1.0 GiB free < 20 GiB; dispatch and gates held"])
+        self.assertTrue(P.Pool().notified_state()["disk_low"])
+        self.disk_free(100)
+        tick()
+        self.assertEqual(disk_messages()[1:], ["disk space recovered"])
+        tick()
+        self.assertEqual(len(disk_messages()), 2)
+        self.assertFalse(P.Pool().notified_state()["disk_low"])
+
     def test_auto_fix_round_on_gate_red_pytest_and_unittest_ids(self):
         for output, test_id in (("FAILED tests/test_x.py::test_x - assertion", "tests/test_x.py::test_x"),
                                 ("FAIL: test_x (module.Class.test_x)", "module.Class.test_x"),

@@ -1581,8 +1581,8 @@ def _hold_stale_high(task):
     return True
 
 
-def gate(pool):
-    """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
+def gate(pool, hold_starts=False):
+    """hold_starts (free-space floor): start no new gate; running gates are still reaped. done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
     split). The second of two reviews (only possible under "always") must never run on the model that executed:
     when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on review_tier(t)
@@ -1644,6 +1644,8 @@ def gate(pool):
                      status="held", hold_reason="gate_red",
                      resume_hint={"failures": failures, "missing_tests": missing}):
                 print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
+            continue
+        if hold_starts:
             continue
         run = _start_gate(t, worktree, pool)
         if run is None:
@@ -2365,12 +2367,17 @@ def _tick(pool=None, stop_event=None):
             _timed("memory_hot", memory_hot.build, STATE.parent)
     except Exception:
         print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
+    held = _disk_floor(pool)
     for stage in (dispatch, steering_tick, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
+        if held and stage is dispatch:
+            continue
         name = getattr(stage, "__name__", repr(stage))
         try:
-            if stage is steering_tick:
+            if stage is gate:
+                _timed(name, stage, pool, hold_starts=held)
+            elif stage is steering_tick:
                 _timed(name, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
             else:
                 _timed(name, stage, pool)
@@ -2386,7 +2393,8 @@ def _tick(pool=None, stop_event=None):
             _timed("planner_runs.tick", planner_runs.tick, pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
-    _timed("ship_tick", ship_tick, pool, stop_event)
+    if not held:
+        _timed("ship_tick", ship_tick, pool, stop_event)
     try:
         _timed("reap_worktrees", reap_worktrees, pool)
     except Exception as e:
@@ -2403,6 +2411,44 @@ def _tick(pool=None, stop_event=None):
     if pool.notification_transition("codex_cooling", codex_cooling) and codex_cooling:
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
     maybe_handover("daemon tick")
+
+
+def _free_bytes(path):
+    return shutil.disk_usage(path).free
+
+
+def _min_free_gb(pool):
+    return (getattr(pool, "cfg", None) or {}).get("daemon", {}).get("min_free_gb", 20)
+
+
+def disk_low(pool):
+    """True when free space under ROOT is below [daemon].min_free_gb GiB; 0 disables the floor."""
+    floor = _min_free_gb(pool)
+    return bool(floor) and _free_bytes(ROOT) < floor * 2**30
+
+
+def _disk_floor(pool):
+    """Free-space floor, evaluated once per tick: when low, reap finished worktrees with zero grace and
+    re-check. Returns True when dispatch, gate starts and ship starts must be held this tick."""
+    try:
+        low = disk_low(pool)
+        if low:
+            try:
+                _timed("reap_worktrees", reap_worktrees, pool, grace_s=0)
+            except Exception as e:
+                print(f"[daemon] reap_worktrees failed: {e}", file=sys.stderr)
+            low = disk_low(pool)
+        free_gib = _free_bytes(ROOT) / 2**30 if low else None
+    except Exception as e:
+        print(f"[daemon] disk check failed: {e}", file=sys.stderr)
+        return False
+    message = (f"disk low: {free_gib:.1f} GiB free < {_min_free_gb(pool)} GiB; dispatch and gates held"
+               if low else None)
+    if low:
+        print(f"[daemon] {message}", file=sys.stderr)
+    if pool.notification_transition("disk_low", low):
+        notify(message if low else "disk space recovered")
+    return low
 
 
 def _reconcile_running(pool, stop_event=None):
