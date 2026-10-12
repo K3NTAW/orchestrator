@@ -6,7 +6,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
 import io
-import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, types, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
@@ -1859,6 +1859,117 @@ class Daemon(unittest.TestCase):
         for _ in range(3):
             daemon.tick(P.Pool())
         self.assertEqual(messages.count("account A hit its daily budget; tasks held"), 2)
+
+    def disk_free(self, gib):
+        self.swap(daemon, "_free_bytes", lambda path: gib * 2**30)
+
+    def test_dispatch_and_gate_skipped_below_free_space_floor(self):
+        pool = self.scheduler_pool("off", slots=1)
+        pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20}
+        spawned = []
+        self.swap(daemon, "spawn_async", lambda fn, *args, **kwargs: spawned.append(args[0]))
+        self.swap(daemon, "reap_worktrees", lambda *args, **kwargs: None)
+        self.swap(daemon, "notify", lambda message: None)
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.bg_setup()
+        queued = self.scheduler_task("queued", "a.py")
+        done = self.bg_task("done", "wt-done")
+        self.disk_free(1)
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            daemon.tick(pool)
+        self.assertIn("[daemon] disk low: 1.0 GiB free < 20 GiB; dispatch and gates held", err.getvalue())
+        self.assertEqual(spawned, [])
+        self.assertNotIn("dispatched_at", bus.get(queued).get("pipeline") or {})
+        self.assertNotIn("gate_started_at", bus.get(done).get("pipeline") or {})
+        self.disk_free(100)
+        daemon.tick(pool)
+        self.assertEqual(spawned, [queued])
+        self.assertIn("dispatched_at", bus.get(queued)["pipeline"])
+        self.assertIn("gate_started_at", bus.get(done)["pipeline"])
+
+    def test_disk_low_runs_reap_with_zero_grace(self):
+        self.reap_begin()
+        fresh = self.reap_task("T-9711", fresh=True, merged_into="main")
+        pool = P.Pool()
+        pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20, "reap_worktrees": True,
+                              "reap_dry_run": False, "reap_grace_s": 3600, "reap_max_per_tick": 20}
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(daemon, "notify", lambda message: None)
+        for stage in ("dispatch", "steering_tick", "gate", "merge_reviewed", "auto_fix_round"):
+            self.swap(daemon, stage, lambda *args, **kwargs: None)
+        self.disk_free(100)
+        daemon.tick(pool)
+        self.assertTrue(fresh.exists())
+        self.disk_free(1)
+        daemon.tick(pool)
+        self.assertFalse(fresh.exists())
+        self.assertTrue(bus.get("T-9711")["pipeline"]["reaped_at"])
+        self.reap_end()
+
+    def test_disk_low_notifies_once_per_transition(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(P, "PLANNER_USAGE", self.sandbox / "planner_usage.json")
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.swap(daemon, "maybe_handover", lambda *args: None)
+        self.swap(daemon, "reap_worktrees", lambda *args, **kwargs: None)
+        self.swap(P.Pool, "tally_planner", lambda pool: None)
+
+        def tick():
+            pool = P.Pool()  # restart-equivalent: reload the persisted notification state
+            pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20}
+            daemon.tick(pool)
+
+        def disk_messages():
+            return [m for m in messages if m.startswith("disk")]
+
+        self.disk_free(1)
+        tick(); tick()
+        self.assertEqual(disk_messages(), ["disk low: 1.0 GiB free < 20 GiB; dispatch and gates held"])
+        self.assertTrue(P.Pool().notified_state()["disk_low"])
+        self.disk_free(100)
+        tick()
+        self.assertEqual(disk_messages()[1:], ["disk space recovered"])
+        tick()
+        self.assertEqual(len(disk_messages()), 2)
+        self.assertFalse(P.Pool().notified_state()["disk_low"])
+
+    def test_disk_low_holds_only_new_ship_starts(self):
+        from orchestrator import ship
+        starts, tracked = [], []
+        self.swap(ship, "tick", lambda pool, **kwargs: starts.append(kwargs) or {"status": "started"})
+        self.swap(ship, "_track_enabled", lambda root, enabled: tracked.append(enabled))
+        pool = P.Pool()
+        pool.cfg["ship"] = {**pool.cfg.get("ship", {}), "enabled": True}
+        stop = threading.Event()
+        self.assertIsNone(daemon.ship_tick(pool, stop, hold_starts=True))
+        self.assertEqual((starts, tracked), ([], [True]))
+        self.assertEqual(daemon.ship_tick(pool, stop), {"status": "started"})
+        self.assertEqual(len(starts), 1)
+
+    def test_disk_floor_reuses_one_measurement(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(daemon, "notify", lambda message: None)
+        self.swap(daemon, "reap_worktrees", lambda *args, **kwargs: None)
+        reads = iter([1 * 2**30, 2 * 2**30])
+
+        def free(path):
+            try:
+                return next(reads)
+            except StopIteration:
+                raise OSError("statfs failed")
+
+        self.swap(daemon, "_free_bytes", free)
+        pool = P.Pool()
+        pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20}
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            self.assertTrue(daemon._disk_floor(pool))
+        self.assertIn("disk low: 2.0 GiB free < 20 GiB", err.getvalue())
+        reads = iter([1 * 2**30])
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            self.assertTrue(daemon._disk_floor(pool))
+        self.assertIn("disk re-check failed", err.getvalue())
+        self.assertIn("disk low: 1.0 GiB free < 20 GiB", err.getvalue())
 
     def test_auto_fix_round_on_gate_red_pytest_and_unittest_ids(self):
         for output, test_id in (("FAILED tests/test_x.py::test_x - assertion", "tests/test_x.py::test_x"),
@@ -4440,6 +4551,246 @@ class Daemon(unittest.TestCase):
         pipeline = bus.get(tid).get("pipeline") or {}
         self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(pipeline))
         self.assertEqual(daemon.adopt_orphaned_gates(), [])         # idempotent: nothing left to kill
+
+    # reap_worktrees: real worktrees under the TMP ROOT's wt/, task records written straight to the sandbox bus.
+    def reap_begin(self):
+        scratch_repo(TMP)
+        self.assertTrue(Path(daemon.ROOT).resolve().is_relative_to(TMP.resolve()))
+        self.live_worktrees = self.reap_real_repo_tmp_worktrees()
+        self.reap_pool = types.SimpleNamespace(cfg={"daemon": {}})
+
+    def reap_end(self):
+        self.assertEqual(self.reap_real_repo_tmp_worktrees(), self.live_worktrees)
+
+    def reap_real_repo_tmp_worktrees(self):
+        # Only the real repo's worktrees under TMP: daemon worktrees under the real wt/ may come and go mid-gate.
+        out = g("worktree", "list", "--porcelain", cwd=REPO).stdout
+        paths = (Path(line[len("worktree "):]).resolve() for line in out.splitlines() if line.startswith("worktree "))
+        return sorted(str(p) for p in paths if p.is_relative_to(TMP.resolve()))
+
+    def reap_clean(self, tid):
+        wt = TMP / "wt" / tid
+        g("worktree", "remove", "--force", str(wt))
+        shutil.rmtree(wt, True)
+        g("worktree", "prune")
+        g("branch", "-D", f"task/{tid}")
+
+    def reap_task(self, tid, status="done", role="execute", *, worktree=True, commit=False, fresh=False,
+                  **fields):
+        self.reap_clean(tid)
+        self.addCleanup(self.reap_clean, tid)
+        t = {"id": tid, "created_at": time.time() - (0 if fresh else 7200), "parent": None, "role": role,
+             "tier": "sonnet", "complexity": 2, "title": tid, "spec": "spec", "inputs": [], "acceptance": ["ok"],
+             "scope": ["x.py"], "depends_on": [], "constraints": {}, "status": status, "assigned_to": None,
+             "worktree": None, "codex_thread": None, "result": None, "events": [], **fields}
+        bus._save(t)
+        wt = TMP / "wt" / tid
+        if worktree:
+            (TMP / "wt").mkdir(exist_ok=True)
+            self.assertEqual(g("worktree", "add", "-q", str(wt), "-b", f"task/{tid}", "main").returncode, 0)
+            if commit:
+                (wt / f"{tid}.txt").write_text(tid)
+                g("add", "-A", cwd=wt)
+                self.assertEqual(g("commit", "-qm", tid, cwd=wt).returncode, 0)
+        else:
+            g("branch", f"task/{tid}", "main")
+        return wt
+
+    def reap_has_branch(self, tid):
+        return g("rev-parse", "--verify", f"task/{tid}").returncode == 0
+
+    def reap_events(self, tid):
+        rows = bus.db().execute("select count(*) from events where task_id=?", (tid,)).fetchone()[0]
+        return bus.get(tid)["events"], rows
+
+    def reap_real_clean(self, path, branch):
+        g("worktree", "remove", "--force", str(path), cwd=REPO)
+        g("worktree", "prune", cwd=REPO)
+        g("branch", "-D", branch, cwd=REPO)
+
+    def test_reap_fixture_ignores_foreign_worktrees(self):
+        # A worktree added to the real repo outside TMP (e.g. the daemon's wt/<id>) must not fail reap_end.
+        self.reap_begin()
+        foreign = Path(tempfile.mkdtemp(prefix="reap-foreign-"))
+        self.addCleanup(shutil.rmtree, foreign, True)
+        self.addCleanup(self.reap_real_clean, foreign / "wt", "task/T-9799-foreign")
+        self.reap_real_clean(foreign / "wt", "task/T-9799-foreign")
+        self.assertEqual(g("worktree", "add", "-q", str(foreign / "wt"), "-b", "task/T-9799-foreign", "HEAD",
+                           cwd=REPO).returncode, 0)
+        self.assertTrue((foreign / "wt" / ".git").exists())
+        self.reap_end()
+
+    def test_reap_fixture_detects_worktree_leaked_into_real_repo(self):
+        # A TMP path added to the real repo is a leak and must still fail reap_end.
+        self.reap_begin()
+        leak = TMP / "wt-leak"
+        self.addCleanup(shutil.rmtree, leak, True)
+        self.addCleanup(self.reap_real_clean, leak, "task/T-9798-leak")
+        self.reap_real_clean(leak, "task/T-9798-leak")
+        self.assertEqual(g("worktree", "add", "-q", str(leak), "-b", "task/T-9798-leak", "HEAD",
+                           cwd=REPO).returncode, 0)
+        with self.assertRaises(AssertionError):
+            self.reap_end()
+
+    def test_reap_worktrees_removes_landed_and_superseded_after_grace(self):
+        self.reap_begin()
+        merged = self.reap_task("T-9701", merged_into="main")
+        superseded = self.reap_task("T-9702", "superseded", commit=True)
+        review = self.reap_task("T-9703", role="review")
+        ancestry = self.reap_task("T-9704")
+        fresh = self.reap_task("T-9705", fresh=True, merged_into="main")
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            counts = daemon.reap_worktrees(self.reap_pool)
+        self.assertIn("[daemon] reap: removed 4 worktrees", err.getvalue())
+        self.assertEqual(counts["removed"], 4)
+        for wt in (merged, superseded, review, ancestry):
+            self.assertFalse(wt.exists(), wt)
+        self.assertTrue(fresh.exists())
+        p = bus.get("T-9701")["pipeline"]
+        self.assertTrue(p["reaped_at"] and p["reap_branch_deleted"])
+        self.assertFalse(self.reap_has_branch("T-9701"))
+        self.assertTrue(self.reap_has_branch("T-9702"))
+        self.assertEqual(bus.get("T-9702")["pipeline"]["reap_branch_kept_reason"], "unlanded_tip")
+        self.assertFalse(self.reap_has_branch("T-9704"))
+        self.assertIsNone(bus.get("T-9704").get("merged_into"))
+        self.assertTrue(bus.get("T-9704")["pipeline"]["reap_branch_deleted"])
+        daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(fresh.exists())
+        for tid in ("T-9701", "T-9702", "T-9703", "T-9704", "T-9705"):
+            self.assertEqual(self.reap_events(tid), ([], 0))
+        self.reap_end()
+
+    def test_reap_worktrees_keeps_branch_with_post_merge_commit_and_dirty_superseded(self):
+        self.reap_begin()
+        fixed = self.reap_task("T-9711", merged_into="main", commit=True)
+        dirty = self.reap_task("T-9712", "superseded", commit=True)
+        (dirty / ".gitignore").write_text("changed\n")
+        counts = daemon.reap_worktrees(self.reap_pool)
+        self.assertFalse(fixed.exists())
+        self.assertTrue(self.reap_has_branch("T-9711"))
+        p = bus.get("T-9711")["pipeline"]
+        self.assertEqual((p["reap_branch_deleted"], p["reap_branch_kept_reason"]), (False, "unlanded_tip"))
+        self.assertTrue(dirty.exists())
+        self.assertTrue(self.reap_has_branch("T-9712"))
+        self.assertEqual(counts["dirty"], 1)
+        self.assertNotIn("pipeline", bus.get("T-9712"))
+        self.reap_end()
+
+    def test_reap_worktrees_keeps_live_unlanded_failed_blocked_and_unknown(self):
+        self.reap_begin()
+        kept = [self.reap_task(f"T-972{i}", status, merged_into="main")
+                for i, status in enumerate(("running", "queued", "held", "blocked", "failed"))]
+        kept.append(self.reap_task("T-9725", commit=True))
+        unknown = TMP / "wt" / "T-9726"
+        self.reap_clean("T-9726")
+        self.addCleanup(self.reap_clean, "T-9726")
+        unknown.mkdir(parents=True)
+        archived = self.reap_task("T-9727", merged_into="main")
+        (bus.TASKS / bus.ARCHIVE_DIR).mkdir(parents=True, exist_ok=True)
+        (bus.TASKS / "T-9727.json").rename(bus.TASKS / bus.ARCHIVE_DIR / "T-9727.json")
+        flipped = self.reap_task("T-9728", merged_into="main")
+        real_get = bus.get
+        def flipping_get(tid):
+            t = real_get(tid)
+            if tid == "T-9728":
+                t["status"] = "running"
+            return t
+        with mock.patch.object(bus, "get", flipping_get):
+            counts = daemon.reap_worktrees(self.reap_pool)
+        for wt in (*kept, unknown, flipped):
+            self.assertTrue(wt.exists(), wt)
+        self.assertGreaterEqual(counts["unknown"], 1)
+        self.assertFalse(archived.exists())
+        self.assertTrue(bus.get("T-9727")["pipeline"]["reaped_at"])
+        self.assertNotIn("pipeline", bus.get("T-9728"))
+        self.reap_end()
+
+    def test_reap_worktrees_skips_live_gate_results_merges_and_workers_and_respects_cap(self):
+        self.reap_begin()
+        live = [self.reap_task(f"T-973{i}", merged_into="main") for i in range(4)]
+        (bus.STATE / "gates").mkdir(parents=True, exist_ok=True)
+        (bus.STATE / "gates" / "T-9730.json").write_text("{}")
+        daemon._GATE_RESULTS["T-9731"] = {"run_id": "r"}
+        self.addCleanup(daemon._GATE_RESULTS.pop, "T-9731", None)
+        daemon._LIVE_MERGES["T-9732"] = None
+        self.addCleanup(daemon._LIVE_MERGES.pop, "T-9732", None)
+        real_worker = daemon.worker_registry.get
+        workers = lambda tid: {"status": "running"} if tid == "T-9733" else real_worker(tid)
+        with mock.patch.object(daemon.worker_registry, "get", workers):
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+            for wt in live:
+                self.assertTrue(wt.exists(), wt)
+            a = self.reap_task("T-9734", merged_into="main")
+            b = self.reap_task("T-9735", merged_into="main")
+            self.reap_pool.cfg["daemon"]["reap_max_per_tick"] = 1
+            self.assertEqual(daemon.reap_worktrees(self.reap_pool)["removed"], 1)
+            self.assertEqual((a.exists(), b.exists()), (False, True))
+            self.assertEqual(daemon.reap_worktrees(self.reap_pool)["removed"], 1)
+            self.assertFalse(b.exists())
+            for wt in live:
+                self.assertTrue(wt.exists(), wt)
+        self.reap_end()
+
+    def test_reap_worktrees_rereaps_recreated_dir_and_handles_stray(self):
+        self.reap_begin()
+        wt = self.reap_task("T-9741", merged_into="main")
+        t0 = time.time()
+        with mock.patch.object(daemon.time, "time", return_value=t0):
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(wt.exists())
+        self.assertEqual(bus.get("T-9741")["pipeline"]["reaped_at"], t0)
+        self.assertEqual(g("worktree", "add", "-q", str(wt), "-b", "task/T-9741", "main").returncode, 0)
+        with mock.patch.object(daemon.time, "time", return_value=t0 + 5):
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(wt.exists())
+        self.assertEqual(bus.get("T-9741")["pipeline"]["reaped_at"], t0 + 5)
+        stray = self.reap_task("T-9742", merged_into="main", worktree=False)
+        stray.mkdir(parents=True)
+        (stray / "leftover.txt").write_text("x")
+        counts = daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(stray.exists())
+        self.assertEqual(counts["removed"], 1)
+        self.assertTrue(bus.get("T-9742")["pipeline"]["reaped_at"])
+        self.reap_end()
+
+    def test_reap_worktrees_disabled_dry_run_and_git_failure_backoff(self):
+        self.reap_begin()
+        wts = [self.reap_task(f"T-975{i}", merged_into="main") for i in range(3)]
+        self.reap_pool.cfg["daemon"]["reap_worktrees"] = False
+        self.assertIsNone(daemon.reap_worktrees(self.reap_pool, grace_s=0))
+        self.assertTrue(all(wt.exists() for wt in wts))
+        self.reap_pool.cfg["daemon"].update(reap_worktrees=True, reap_dry_run=True)
+        before = [(bus.TASKS / f"T-975{i}.json").read_bytes() for i in range(3)]
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertIn("[daemon] reap dry-run: would remove T-9750 (branch: delete)", err.getvalue())
+        self.assertTrue(all(wt.exists() for wt in wts))
+        self.assertEqual([(bus.TASKS / f"T-975{i}.json").read_bytes() for i in range(3)], before)
+        self.reap_pool.cfg["daemon"].update(reap_dry_run=False, reap_max_per_tick=2)
+        real_git = spawn.git
+        def failing_git(*a, **k):
+            if a[:2] == ("worktree", "remove") and a[-1] == str(wts[0]):
+                return subprocess.CompletedProcess(["git", *a], 1, "", "fatal: boom")
+            return real_git(*a, **k)
+        self.swap(spawn, "git", failing_git)
+        t0 = time.time()
+        with mock.patch.object(daemon.time, "time", return_value=t0):
+            counts = daemon.reap_worktrees(self.reap_pool, grace_s=100)
+        self.assertEqual((counts["failed"], counts["removed"]), (1, 1))
+        self.assertEqual([wt.exists() for wt in wts], [True, False, True])
+        p = bus.get("T-9750")["pipeline"]
+        self.assertEqual((p["reap_failed_at"], p["reap_error"]), (t0, "fatal: boom"))
+        self.assertEqual(self.reap_events("T-9750"), ([], 0))
+        with mock.patch.object(daemon.time, "time", return_value=t0 + 10):
+            counts = daemon.reap_worktrees(self.reap_pool, grace_s=100)
+        self.assertEqual((counts["failed"], counts["removed"]), (0, 1))
+        self.assertEqual([wt.exists() for wt in wts], [True, False, False])
+        with mock.patch.object(daemon.time, "time", return_value=t0 + 200):
+            counts = daemon.reap_worktrees(self.reap_pool, grace_s=100)
+        self.assertEqual(counts["failed"], 1)
+        self.assertEqual(bus.get("T-9750")["pipeline"]["reap_failed_at"], t0 + 200)
+        self.assertTrue(wts[0].exists())
+        self.reap_end()
 
 class BusLock(unittest.TestCase):
     def test_writes_take_the_flock(self):

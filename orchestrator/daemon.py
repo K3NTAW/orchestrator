@@ -3,11 +3,11 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import contextvars, fcntl, fnmatch, functools, hashlib, inspect, json, os, re, signal, subprocess, sys, threading, time, urllib.request, uuid
+import contextvars, fcntl, fnmatch, functools, hashlib, inspect, json, os, re, shutil, signal, subprocess, sys, threading, time, urllib.request, uuid
 import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
-from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
+from . import (ROOT, STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
                planner_runs, ship, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure
 from . import stale as stale_evidence
@@ -1581,7 +1581,7 @@ def _hold_stale_high(task):
     return True
 
 
-def gate(pool):
+def gate(pool, hold_starts=False):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
     split). The second of two reviews (only possible under "always") must never run on the model that executed:
@@ -1600,7 +1600,9 @@ def gate(pool):
     (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call.
     Only gate.run_gate leaves the calling thread (_start_gate/_gate_worker); its result is applied by
     _reap_gates() on the tick. Called from tick() it waits at most TICK_GATE_WAIT_S for the gates it started;
-    called directly it waits for each gate, so results land before it returns."""
+    called directly it waits for each gate, so results land before it returns.
+    hold_starts (free-space floor): start no new gate; running gates are still reaped.
+    """
     wait_s = _GATE_WAIT_S.get()
     _reap_gates(pool)
     started = []
@@ -1644,6 +1646,8 @@ def gate(pool):
                      status="held", hold_reason="gate_red",
                      resume_hint={"failures": failures, "missing_tests": missing}):
                 print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
+            continue
+        if hold_starts:
             continue
         run = _start_gate(t, worktree, pool)
         if run is None:
@@ -2365,12 +2369,17 @@ def _tick(pool=None, stop_event=None):
             _timed("memory_hot", memory_hot.build, STATE.parent)
     except Exception:
         print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
+    held = _disk_floor(pool)
     for stage in (dispatch, steering_tick, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
+        if held and stage is dispatch:
+            continue
         name = getattr(stage, "__name__", repr(stage))
         try:
-            if stage is steering_tick:
+            if held and stage is gate:
+                _timed(name, stage, pool, hold_starts=True)
+            elif stage is steering_tick:
                 _timed(name, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
             else:
                 _timed(name, stage, pool)
@@ -2386,7 +2395,14 @@ def _tick(pool=None, stop_event=None):
             _timed("planner_runs.tick", planner_runs.tick, pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
-    _timed("ship_tick", ship_tick, pool, stop_event)
+    if held:
+        _timed("ship_tick", ship_tick, pool, stop_event, hold_starts=True)
+    else:
+        _timed("ship_tick", ship_tick, pool, stop_event)
+    try:
+        _timed("reap_worktrees", reap_worktrees, pool)
+    except Exception as e:
+        print(f"[daemon] reap_worktrees failed: {e}", file=sys.stderr)
     m = pool.both_cooling_minutes()
     cooling = m > 30
     if pool.notification_transition("cooling", cooling) and cooling:
@@ -2399,6 +2415,55 @@ def _tick(pool=None, stop_event=None):
     if pool.notification_transition("codex_cooling", codex_cooling) and codex_cooling:
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
     maybe_handover("daemon tick")
+
+
+def _free_bytes(path):
+    return shutil.disk_usage(path).free
+
+
+def _min_free_gb(pool):
+    return (getattr(pool, "cfg", None) or {}).get("daemon", {}).get("min_free_gb", 20)
+
+
+def _measure_disk(pool):
+    """(low, free bytes) from one measurement; free is None when the floor is disabled ([daemon].min_free_gb 0)."""
+    floor = _min_free_gb(pool)
+    if not floor:
+        return False, None
+    free = _free_bytes(ROOT)
+    return free < floor * 2**30, free
+
+
+def disk_low(pool):
+    """True when free space under ROOT is below [daemon].min_free_gb GiB; 0 disables the floor."""
+    return _measure_disk(pool)[0]
+
+
+def _disk_floor(pool):
+    """Free-space floor, evaluated once per tick: when low, reap finished worktrees with zero grace and
+    re-check. Returns True when dispatch, gate starts and ship starts must be held this tick. A failed first
+    measurement lifts the floor; a failed re-check after the reap keeps the first measurement."""
+    try:
+        low, free = _measure_disk(pool)
+    except Exception as e:
+        print(f"[daemon] disk check failed: {e}", file=sys.stderr)
+        return False
+    if low:
+        try:
+            _timed("reap_worktrees", reap_worktrees, pool, grace_s=0)
+        except Exception as e:
+            print(f"[daemon] reap_worktrees failed: {e}", file=sys.stderr)
+        try:
+            low, free = _measure_disk(pool)
+        except Exception as e:
+            print(f"[daemon] disk re-check failed: {e}", file=sys.stderr)
+    message = (f"disk low: {free / 2**30:.1f} GiB free < {_min_free_gb(pool)} GiB; dispatch and gates held"
+               if low else None)
+    if low:
+        print(f"[daemon] {message}", file=sys.stderr)
+    if pool.notification_transition("disk_low", low):
+        notify(message if low else "disk space recovered")
+    return low
 
 
 def _reconcile_running(pool, stop_event=None):
@@ -2437,16 +2502,175 @@ def acquire_lock(kind="cli"):
     return fh
 
 
-def ship_tick(pool, stop_event):
+def ship_tick(pool, stop_event, hold_starts=False):
     """--once (no stop_event) never ships: a full gate can block for hours. The loop runs ship in a non-daemon
-    thread it joins on shutdown."""
+    thread it joins on shutdown.
+    hold_starts (free-space floor): start no new ship run, since any run may start a full gate. A ship thread
+    already running keeps gating and merging to the end, and the ship_enabled_at window is still tracked."""
     if stop_event is None or stop_event.is_set():
         return None
     try:
+        if hold_starts:
+            ship._track_enabled(ship.ROOT, ship.settings(pool.cfg)["enabled"])
+            return None
         return ship.tick(pool, stop_event=stop_event, inline=False)
     except Exception as e:
         print(f"[daemon] ship failed: {e}", file=sys.stderr)
         return None
+
+
+REAP_KEEP_STATUSES = {"running", "queued", "held", "blocked", "failed"}
+REAP_WORKER_LIVE = {"running", "steering", "cancelling"}
+
+
+def _reap_settings(pool, grace_s):
+    """[daemon] reap_* keys; a bad type falls back to its default and logs one line for the tick."""
+    cfg = (getattr(pool, "cfg", None) or {}).get("daemon") or {}
+    out, bad = {}, []
+    for key, default, kind in (("reap_worktrees", True, bool), ("reap_dry_run", False, bool),
+                               ("reap_grace_s", 3600, int), ("reap_max_per_tick", 20, int)):
+        value = cfg.get(key, default)
+        ok = isinstance(value, bool) if kind is bool else (
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+        if not ok:
+            bad.append(key)
+            value = default
+        out[key] = value
+    if bad:
+        print(f"[daemon] reap: bad [daemon] {', '.join(bad)}; using defaults", file=sys.stderr)
+    if grace_s is not None:
+        out["reap_grace_s"] = grace_s
+    return out
+
+
+def _reap_live(tid):
+    if (bus.STATE / "gates" / f"{tid}.json").exists():
+        return True
+    with _LIVE_GATES_LOCK:
+        if tid in _LIVE_GATES or tid in _GATE_RESULTS or tid in _LIVE_MERGES:
+            return True
+    doc = worker_registry.get(tid)
+    return bool(doc and doc.get("status") in REAP_WORKER_LIVE)
+
+
+def _reap_last_activity(t):
+    stamps = [e.get("ts") for e in t.get("events") or [] if isinstance(e, dict)]
+    stamps = [s for s in stamps if isinstance(s, (int, float)) and not isinstance(s, bool)]
+    if stamps:
+        return max(stamps)
+    created = t.get("created_at")
+    return created if isinstance(created, (int, float)) else 0
+
+
+def _reap_record(tid, **fields):
+    """Write reap fields on pipeline without appending an event, so last activity never moves."""
+    with bus.locked():
+        t = bus.get(tid)
+        p = dict(t.get("pipeline") or {})
+        if "reaped_at" in fields:
+            p.pop("reap_failed_at", None)
+            p.pop("reap_error", None)
+            p.pop("reap_branch_kept_reason", None)
+        p.update(fields)
+        t["pipeline"] = p
+        bus._save(t)
+
+
+def reap_worktrees(pool, grace_s=None):
+    """Remove ROOT/wt/<id> of finished tasks after [daemon].reap_grace_s. Read-only ancestry decides whether the
+    task/<id> branch is deleted too (only when its tip is reachable from goal/<parent> or main). Live, failed,
+    unlanded and dirty worktrees stay; records go on pipeline without an event."""
+    cfg = _reap_settings(pool, grace_s)
+    if not cfg["reap_worktrees"]:
+        return None
+    grace, cap, dry = cfg["reap_grace_s"], cfg["reap_max_per_tick"], cfg["reap_dry_run"]
+    wt_root = ROOT / "wt"
+    if not wt_root.is_dir():
+        return None
+    hot = {t["id"]: t for t in bus.read()}
+    counts = dict(removed=0, branches=0, failed=0, unknown=0, dirty=0, locked=0)
+    attempts = 0
+    noted = False
+    for d in sorted(p for p in wt_root.iterdir() if p.is_dir()):
+        if attempts >= cap:
+            break
+        tid = d.name
+        try:
+            if tid.startswith("ship-"):
+                continue
+            t = hot.get(tid)
+            if t is None:
+                try:
+                    t = bus.get(tid)
+                except KeyError:
+                    counts["unknown"] += 1
+                    noted = True
+                    continue
+            if t.get("status") in REAP_KEEP_STATUSES:
+                continue
+            now = time.time()
+            failed_at = (t.get("pipeline") or {}).get("reap_failed_at")
+            if isinstance(failed_at, (int, float)) and now - failed_at < grace:
+                continue
+            if now - _reap_last_activity(t) < grace:
+                continue
+            if _reap_live(tid):
+                continue
+            target = f"goal/{t['parent']}" if t.get("parent") and spawn.branch_exists(f"goal/{t['parent']}") \
+                else "main"
+            has_branch = spawn.branch_exists(f"task/{tid}")
+            landed = has_branch and spawn.git("merge-base", "--is-ancestor", f"task/{tid}", target,
+                                              cwd=ROOT, check=False).returncode == 0
+            status = t.get("status")
+            closed = status in ("superseded", "cancelled")
+            if not (t.get("merged_into") or landed or closed or (status == "done" and t.get("role") != "execute")):
+                continue
+            if closed and not landed and not t.get("merged_into"):
+                st = spawn.git("-C", str(d), "status", "--porcelain", "--untracked-files=no", cwd=ROOT, check=False)
+                if st.returncode or st.stdout.strip():
+                    counts["dirty"] += 1
+                    noted = True
+                    continue
+            delete_branch = landed
+            kept_reason = None if landed else ("unlanded_tip" if has_branch else "no_branch")
+            current = bus.get(tid)
+            if current.get("status") in REAP_KEEP_STATUSES or _reap_live(tid):
+                continue
+            attempts += 1
+            noted = True
+            if dry:
+                print(f"[daemon] reap dry-run: would remove {tid} (branch: {'delete' if delete_branch else 'keep'})",
+                      file=sys.stderr)
+                continue
+            r = spawn.git("worktree", "remove", "--force", str(d), cwd=ROOT, check=False)
+            if r.returncode:
+                err = (r.stderr or "").strip()
+                if "not a working tree" in err:
+                    shutil.rmtree(d, ignore_errors=False)
+                else:
+                    counts["locked" if "locked" in err else "failed"] += 1
+                    _reap_record(tid, reap_failed_at=time.time(), reap_error=err[:200])
+                    continue
+            counts["removed"] += 1
+            deleted = False
+            if delete_branch:
+                deleted = spawn.git("branch", "-d", f"task/{tid}", cwd=ROOT, check=False).returncode == 0
+                if not deleted:
+                    kept_reason = "delete_failed"
+            counts["branches"] += deleted
+            fields = {"reaped_at": time.time(), "reap_branch_deleted": deleted}
+            if kept_reason and not deleted:
+                fields["reap_branch_kept_reason"] = kept_reason
+            _reap_record(tid, **fields)
+        except Exception as e:
+            print(f"[daemon] reap {tid} failed: {e}", file=sys.stderr)
+    if counts["removed"]:
+        spawn.git("worktree", "prune", cwd=ROOT, check=False)
+    if noted:
+        print(f"[daemon] reap: removed {counts['removed']} worktrees ({counts['branches']} branches), "
+              f"{counts['failed']} failed, {counts['unknown']} unknown, {counts['dirty']} dirty, "
+              f"{counts['locked']} locked", file=sys.stderr)
+    return counts
 
 
 def _loop(interval, stop_event):
