@@ -285,6 +285,15 @@ class GateTimeoutTest(unittest.TestCase):
         self.assertTrue(cleaned.exists())                       # cleanup_cmd still runs on the timeout
         notify.assert_called_once()
 
+    def test_gate_retry_log_lives_outside_runs_glob(self):
+        self.enterContext(mock.patch.object(bus, "RUNS", self.state / "runs"))
+        gate.record_requeue("T-1", "flake_rerun", pattern="lock wait", mode="full", attempt=1)
+        self.assertNotIn("gates.jsonl", [p.name for p in bus.RUNS.glob("*.jsonl")])
+        lines = (bus.RUNS / "gates" / "retries.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(set(json.loads(lines[0])),
+                         {"ts", "task_id", "kind", "pattern", "mode", "attempt"})
+
     def test_flake_match_defaults_cover_lock_wait_and_xctest_perf(self):
         patterns = gate.settings({})["flake_patterns"]
         self.assertEqual(patterns, list(gate.DEFAULT_FLAKE_PATTERNS))

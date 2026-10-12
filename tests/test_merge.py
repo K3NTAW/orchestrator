@@ -374,7 +374,7 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(result["status"], "merged", result)
         self.assertEqual(gated.call_count, 2)
         self.assertEqual(bus.get(tid)["pipeline"]["flake_reruns"], 1)
-        lines = [json.loads(line) for line in (bus.RUNS / "gates.jsonl").read_text().splitlines()]
+        lines = [json.loads(line) for line in (bus.RUNS / "gates" / "retries.jsonl").read_text().splitlines()]
         mine = [line for line in lines if line["task_id"] == tid]
         self.assertEqual([(l["kind"], l["mode"], l["attempt"]) for l in mine], [("flake_rerun", "task", 1)])
         self.assertIn("database is locked", mine[0]["pattern"])

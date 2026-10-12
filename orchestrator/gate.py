@@ -167,18 +167,18 @@ def flake_match(text, patterns=None):
 
 
 def record_requeue(task_id, kind, *, pattern=None, mode=None, attempt=1):
-    """Append one gate retry line (kind timeout_requeue | flake_rerun) to .orchestrator/runs/gates.jsonl.
+    """Append one gate retry line (kind timeout_requeue | flake_rerun) to .orchestrator/runs/gates/retries.jsonl.
     A write failure is logged and never changes the gate outcome."""
     line = {"ts": time.time(), "task_id": task_id, "kind": kind, "pattern": pattern, "mode": mode,
             "attempt": attempt}
     from . import bus  # bus.RUNS is .orchestrator/runs; imported late, as machine is
     try:
-        path = bus.RUNS / "gates.jsonl"
+        path = bus.RUNS / "gates" / "retries.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
             f.write(json.dumps(line) + "\n")
     except OSError as e:
-        print(f"[gate] task_id={task_id} gates.jsonl write failed: {e!r}", file=sys.stderr)
+        print(f"[gate] task_id={task_id} runs/gates/retries.jsonl write failed: {e!r}", file=sys.stderr)
 
 
 def _heavy(mode, opts):

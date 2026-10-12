@@ -4282,7 +4282,7 @@ class Daemon(unittest.TestCase):
                           "mode": "full", "stderr": "XCTAssertLessThan failed: measured 2.1s exceeded ceiling"}
         before = time.time()
         daemon.gate(pool)
-        lines = [json.loads(line) for line in (bus.RUNS / "gates.jsonl").read_text().splitlines()]
+        lines = [json.loads(line) for line in (bus.RUNS / "gates" / "retries.jsonl").read_text().splitlines()]
         self.assertEqual([(l["task_id"], l["kind"], l["mode"], l["attempt"]) for l in lines],
                          [(slow, "timeout_requeue", "task", 1), (flaky, "flake_rerun", "full", 1)])
         self.assertIsNone(lines[0]["pattern"])

@@ -1932,7 +1932,7 @@ def _apply_gate_result(pool, tid, done):
 def _requeue_gate(tid, kind, result, pattern=None):
     """Re-queue a timed-out (kind timeout_requeue) or flake-pattern red (kind flake_rerun) gate once, at the back
     of the gate queue: status stays done, gated_at stays unset (the gate markers are already cleared), and
-    pipeline.gate_requeues / flake_reruns, gate_requeued_at plus one runs/gates.jsonl line record it."""
+    pipeline.gate_requeues / flake_reruns, gate_requeued_at plus one runs/gates/retries.jsonl line record it."""
     counter = "gate_requeues" if kind == "timeout_requeue" else "flake_reruns"
     with bus.locked():
         pipeline = dict(bus.get(tid).get("pipeline") or {})

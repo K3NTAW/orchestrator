@@ -194,7 +194,7 @@ Where they are recorded:
 | `pipeline.gate_requeues` | timeout requeues (int, at most 1) |
 | `pipeline.flake_reruns` | flake reruns (int, at most 1 per path) |
 | `pipeline.gate_requeued_at` | epoch of the last daemon requeue; the gate queue sort key |
-| `.orchestrator/runs/gates.jsonl` | one line per retry: `{ts, task_id, kind: "timeout_requeue" or "flake_rerun", pattern, mode, attempt}` (`pattern` null for timeouts) |
+| `.orchestrator/runs/gates/retries.jsonl` | one line per retry: `{ts, task_id, kind: "timeout_requeue" or "flake_rerun", pattern, mode, attempt}` (`pattern` null for timeouts) |
 
 Revert: delete `[gate].flake_patterns` keeps the defaults; set it to `[]` to stop flake reruns. The timeout requeue
 has no toggle; revert the T-1797 commit to restore the in-place second attempt.
