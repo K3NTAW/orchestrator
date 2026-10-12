@@ -288,7 +288,7 @@ class GateTimeoutTest(unittest.TestCase):
     def test_gate_retry_log_lives_outside_runs_glob(self):
         self.enterContext(mock.patch.object(bus, "RUNS", self.state / "runs"))
         gate.record_requeue("T-1", "flake_rerun", pattern="lock wait", mode="full", attempt=1)
-        self.assertNotIn("gates.jsonl", [p.name for p in bus.RUNS.glob("*.jsonl")])
+        self.assertNotIn("gates", [p.stem for p in bus.RUNS.glob("*.jsonl")])
         lines = (bus.RUNS / "gates" / "retries.jsonl").read_text().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertEqual(set(json.loads(lines[0])),
