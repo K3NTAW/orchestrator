@@ -1708,7 +1708,9 @@ def gate(pool):
                 for entry in missing for path, name in [entry]
             ]
             failures.extend(
-                f"FAILED {path} (missing: test file not in task diff)" for path in files
+                f"FAILED {path} (missing: "
+                f"{'test file does not exist' if getattr(path, 'reason', None) == 'absent' else 'test file not in task diff'})"
+                for path in files
             )
             gate_reds = pipeline.get("gate_reds", 0) + 1
             if stamp(t["id"], "gated_at", pipeline_fields={**attempt, "gate_reds": gate_reds},

@@ -49,12 +49,37 @@ def test_file_paths(acceptance):
     return sorted(paths)
 
 
+_ADD_VERB = re.compile(
+    r"\b(?:adds?|added|new|creates?|created|extends?|extended|gains?|writes?|written)\b",
+    re.IGNORECASE,
+)
+
+
+class MissingTestFile(str):
+    """A missing test file path that also says why: absent or not_in_diff."""
+
+    def __new__(cls, path, reason):
+        entry = super().__new__(cls, path)
+        entry.reason = reason
+        return entry
+
+
 def missing_test_files(worktree, acceptance, changed=None):
-    """Return named test files absent from the worktree or task diff."""
+    """Return named test files absent from the worktree, or absent from the task diff
+    when a criterion naming them asks to add or change tests."""
     root = Path(worktree)
     changed_set = set(changed) if isinstance(changed, list) else None
-    return [path for path in test_file_paths(acceptance)
-            if not (root / path).is_file() or (changed_set is not None and path not in changed_set)]
+    needs_diff = set()
+    for criterion in acceptance or []:
+        if isinstance(criterion, str) and _ADD_VERB.search(criterion):
+            needs_diff.update(test_file_paths([criterion]))
+    missing = []
+    for path in test_file_paths(acceptance):
+        if not (root / path).is_file():
+            missing.append(MissingTestFile(path, "absent"))
+        elif changed_set is not None and path in needs_diff and path not in changed_set:
+            missing.append(MissingTestFile(path, "not_in_diff"))
+    return missing
 
 
 class NotCollectedTest(tuple):

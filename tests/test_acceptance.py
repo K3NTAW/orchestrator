@@ -33,13 +33,41 @@ class AcceptanceTests(unittest.TestCase):
                 "android/app/src/test/BarTest.kt",
                 "apple/AppTests/FooTests.swift",
                 "backend/test/oauth.test.ts",
-                "web/src/a.spec.ts",
             ])
             self.assertEqual(missing_test_files(root, acceptance), [
                 "android/app/src/test/BarTest.kt",
                 "apple/AppTests/FooTests.swift",
                 "backend/test/oauth.test.ts",
             ])
+
+    def test_missing_test_files_existing_file_named_to_run_needs_no_diff(self):
+        acceptance = ["apple/AppTests/FooTests.swift still passes"]
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            (root / "apple/AppTests").mkdir(parents=True)
+            (root / "apple/AppTests/FooTests.swift").write_text("test")
+            self.assertEqual(missing_test_files(root, acceptance, []), [])
+
+    def test_missing_test_files_add_verb_requires_diff(self):
+        acceptance = ["new backend/test/oauth.test.ts covers refresh"]
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            (root / "backend/test").mkdir(parents=True)
+            (root / "backend/test/oauth.test.ts").write_text("test")
+            missing = missing_test_files(root, acceptance, [])
+            self.assertEqual(missing, ["backend/test/oauth.test.ts"])
+            self.assertEqual(missing[0].reason, "not_in_diff")
+            self.assertEqual(missing_test_files(root, acceptance, ["backend/test/oauth.test.ts"]), [])
+
+    def test_missing_test_files_absent_file_always_flagged(self):
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            for criterion in ["backend/test/oauth.test.ts passes",
+                              "adds backend/test/oauth.test.ts for refresh"]:
+                for changed in (None, [], ["backend/test/oauth.test.ts"]):
+                    missing = missing_test_files(root, [criterion], changed)
+                    self.assertEqual(missing, ["backend/test/oauth.test.ts"])
+                    self.assertEqual(missing[0].reason, "absent")
 
     def test_named_tests_parses_full_and_shorthand_ids(self):
         criteria = [
