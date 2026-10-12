@@ -862,6 +862,7 @@ class Render(unittest.TestCase):
 
     def packet_fixture(self):
         scratch_repo(TMP)
+        g("branch", "goal/G")  # the prior-worker tests take merge-base HEAD goal/G; a no-op if it already exists
         (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")
         (TMP / "tests").mkdir(exist_ok=True)
         (TMP / "tests" / "test_widget.py").write_text(

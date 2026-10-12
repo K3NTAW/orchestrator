@@ -7,6 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import REPO
+# failures -> spawn -> context_router -> failures is an import cycle in production code: importing failures first
+# (this module run alone) fails. Import spawn first, as every other entry point does.
+from orchestrator import spawn  # noqa: F401
 from orchestrator import failures, gitutil, bus
 
 

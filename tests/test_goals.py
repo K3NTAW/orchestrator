@@ -772,7 +772,7 @@ class DecisionPacket(GoalsTestCase):
             s = bus.create_task(f"scout {i}", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
             bus.post_result(s["id"], {"findings": [{"finding": "s" * 300, "source": "s.py:1", "confidence": 0.9}]}, status="done")
 
-        cfg = tomllib.loads((goals.PACKAGE_REPO / ".orchestrator" / "pool.toml").read_text())
+        cfg = tomllib.loads(_harness.FIXTURE_POOL.read_text())
         cap = cfg["planner"]["decision_packet_chars"]
 
         packet = PR.decision_packet(goal_id, "scouts_done", goal_id)

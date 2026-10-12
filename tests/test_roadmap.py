@@ -3,7 +3,7 @@ import _harness
 import tempfile, tomllib, unittest
 from pathlib import Path
 
-from _harness import REPO
+from _harness import FIXTURE_POOL, REPO
 from orchestrator import roadmap
 
 
@@ -39,7 +39,7 @@ class Roadmap(unittest.TestCase):
             self.assertEqual(roadmap.status(base, root, {}), "implemented_active")
 
     def test_experimental_features_report_their_configured_mode(self):
-        report = roadmap.build(REPO)
+        report = roadmap.build(REPO, tomllib.loads(FIXTURE_POOL.read_text()))
         statuses = {item["id"]: item["status"] for item in report["requirements"]}
         # Modes are operator settings in pool.toml; the report must follow whatever is configured there.
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
@@ -76,7 +76,7 @@ class Roadmap(unittest.TestCase):
             )
 
     def test_build_on_repo_marks_goal_complete(self):
-        report = roadmap.build(REPO)
+        report = roadmap.build(REPO, tomllib.loads(FIXTURE_POOL.read_text()))
         incomplete = [
             item for item in report["requirements"]
             if not item["experimental"] and item["status"] in ("partial", "missing")

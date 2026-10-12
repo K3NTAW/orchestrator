@@ -3,7 +3,7 @@ tests-green, guardrails (destructive/protected command blocking), and planner-mo
 import os, shutil, subprocess, sys, tempfile, time, tomllib, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_hooks.py` doesn't add this dir itself
-from _harness import HOOKS, REPO, TMP, hook
+from _harness import HOOKS, POOL_TOML, REPO, TMP, hook
 from orchestrator import bus
 
 
@@ -180,9 +180,12 @@ class PlannerMode(unittest.TestCase):
         return hook("planner-mode.sh", {"tool_name": tool, "tool_input": inp, "cwd": str(TMP)}, cwd=TMP, env={**self.P, **(env or {})}).returncode
 
     def test_writes(self):
-        src = str(REPO / "orchestrator" / "x.py")  # TMP is under /var/folders, a temp dir to the hook
+        # A fixed source checkout outside every temp dir: REPO itself may be a clone under /tmp (a ship-gate tree),
+        # where the hook rightly allows writes, so REPO paths cannot stand in for "source".
+        source = Path("/opt/orch-planner-mode-checkout")
+        src = str(source / "orchestrator" / "x.py")  # TMP is under /var/folders, a temp dir to the hook
         self.assertEqual(self.pm("Write", {"file_path": src}), 2)
-        self.assertEqual(self.pm("Edit", {"file_path": str(REPO / "skills" / "planner" / "orchestrate" / "SKILL.md")}), 2)
+        self.assertEqual(self.pm("Edit", {"file_path": str(source / "skills" / "planner" / "orchestrate" / "SKILL.md")}), 2)
         self.assertEqual(self.pm("Write", {"file_path": str(TMP / ".orchestrator" / "plan.md")}), 0)
         self.assertEqual(self.pm("Write", {"file_path": "/private/tmp/scratch/pr-body.md"}), 0)
         self.assertEqual(self.pm("Write", {"file_path": src}, {"ORCH_TASK_ID": "T-0007"}), 0)
@@ -216,18 +219,20 @@ class PlannerMode(unittest.TestCase):
         from orchestrator.pool import encode_project_dir
         reminder = "Planner mode: goals go through Skill(orchestrate); never edit source; see CLAUDE.md\n"
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory) / "projects" / encode_project_dir(str(REPO))
+            # A root holding only the pinned pool.toml: the checkout's live pool.toml (handover threshold) and
+            # plan.md (size notice) must not change the hook's output. UV_PROJECT keeps `uv run` on this package.
+            root = Path(directory).resolve() / "root"
+            (root / ".orchestrator").mkdir(parents=True)
+            (root / ".orchestrator" / "pool.toml").write_text(POOL_TOML)
+            project = Path(directory) / "projects" / encode_project_dir(str(root))
             project.mkdir(parents=True)
             transcript = project / "session.jsonl"
-            env = {**self.P, "ORCH_ROOT": str(REPO), "CLAUDE_CONFIG_DIR": directory}
-            # The hook reads the live threshold from ORCH_ROOT's pool.toml, an operator setting.
-            cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
-            threshold = cfg["planner"].get("handover_context_tokens", 150000)
-            for tokens in (threshold - 1, threshold):
+            env = {**self.P, "ORCH_ROOT": str(root), "UV_PROJECT": str(REPO), "CLAUDE_CONFIG_DIR": directory}
+            for tokens in (149999, 150000):
                 transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": tokens}}}) + "\n")
                 result = hook("planner-prompt.sh", {"prompt": "continue"}, cwd=TMP, env=env)
                 self.assertEqual(result.returncode, 0)
-                if tokens < threshold:
+                if tokens < 150000:
                     self.assertEqual(result.stdout, reminder)
                 else:
                     self.assertTrue(result.stdout.startswith(reminder))
