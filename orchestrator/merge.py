@@ -56,9 +56,21 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             return {"status": "rebase_changed_diff"}
         # after the rebase merge-base(target, HEAD) is the target tip: the task gate diffs against it
         base = git("rev-parse", target, cwd=wt, check=False).stdout.strip() or None
-        result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id,
-                               mode="task" if base and gate.settings()["scoped_task_gates"] else "full",
-                               base=base)
+        mode = "task" if base and gate.settings()["scoped_task_gates"] else "full"
+        result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id, mode=mode, base=base)
+        pattern = (gate.flake_match(result["stderr"] or "", gate.settings().get("flake_patterns"))
+                   if result["returncode"] and not result["timed_out"] else None)
+        if pattern:
+            # flake-pattern red: the task is already rebased and reviewed, so re-run the gate once right here
+            # (docs/gate-contract.md "Retries"); a timeout is held below without a second run
+            with bus.locked():
+                pipeline = dict(bus.get(task_id).get("pipeline") or {})
+                pipeline["flake_reruns"] = pipeline.get("flake_reruns", 0) + 1
+                bus.update(task_id, pipeline=pipeline)
+            gate.record_requeue(task_id, "flake_rerun", pattern=pattern, mode=result.get("mode", mode),
+                                attempt=pipeline["flake_reruns"])
+            result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id, mode=mode, base=base)
+            t = bus.get(task_id)
         if result["timed_out"]:
             bus.update(task_id, status="held", hold_reason="gate_timeout",
                        pipeline={**(t.get("pipeline") or {}), "infra_failure": "gate_timeout"},

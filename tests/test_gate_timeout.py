@@ -66,6 +66,9 @@ class GateTimeoutTest(unittest.TestCase):
         count = self.root / "attempts"
         script = self.script(f"echo attempt >> '{count}'\necho waiting\nsleep 60\n")
         self.run_daemon_gate(pool, script)
+        task = bus.get(tid)
+        self.assertEqual((task["status"], task["pipeline"]["gate_requeues"]), ("done", 1))  # re-queued once
+        self.run_daemon_gate(pool, script)
         self.assertEqual(count.read_text().splitlines(), ["attempt", "attempt"])
         return tid, repo, pool
 
@@ -226,7 +229,7 @@ class GateTimeoutTest(unittest.TestCase):
                          "cleanup_timeout_s": 1}}
         with mock.patch.object(gate.notify, "notify"):
             gate.run_gate(self.root, script=script, cfg=cfg)
-        self.assertEqual(marker.read_text().splitlines(), ["x", "x"])
+        self.assertEqual(marker.read_text().splitlines(), ["x"])
         marker.unlink()
         with mock.patch.object(gate.notify, "notify"):
             gate.run_gate(self.root, script=script, cfg={"gate": {"timeout_s": 1}})
@@ -244,7 +247,7 @@ class GateTimeoutTest(unittest.TestCase):
         with mock.patch.object(gate.notify, "notify"):
             result = gate.run_gate(self.root, script=self.script("sleep 60\n", "slow.sh"), cfg=cfg)
         self.assertTrue(result["timed_out"])
-        self.assertEqual(marker.read_text().splitlines(), ["x", "x"])
+        self.assertEqual(marker.read_text().splitlines(), ["x"])
 
     def test_post_cmd_failure_does_not_change_result(self):
         for post_cmd in ("exit 9", "sleep 60"):
@@ -268,22 +271,40 @@ class GateTimeoutTest(unittest.TestCase):
                                    cfg={"gate": {"post_cmd": "true"}})
         self.assertEqual(result["returncode"], 0)
 
-    def test_timeout_retries_once(self):
+    def test_run_gate_timeout_returns_after_one_attempt(self):
         count = self.root / "count"
+        cleaned = self.root / "cleaned"
         always = self.script(f"echo x >> {count}\nsleep 60\n", "always.sh")
-        with mock.patch.object(gate.notify, "notify"):
-            result = gate.run_gate(self.root, script=always, cfg={"gate": {"timeout_s": 1}})
-        self.assertEqual((result["attempts"], result["timeouts"]), (2, 2))
+        with mock.patch.object(gate.notify, "notify") as notify:
+            result = gate.run_gate(self.root, script=always, task_id="T-1",
+                                   cfg={"gate": {"timeout_s": 1, "cleanup_cmd": f"touch {cleaned}"}})
+        self.assertEqual((result["attempts"], result["timeouts"]), (1, 1))
         self.assertTrue(result["timed_out"])
         self.assertIsNone(result["returncode"])
-        self.assertEqual(len(count.read_text().splitlines()), 2)
+        self.assertEqual(len(count.read_text().splitlines()), 1)
+        self.assertTrue(cleaned.exists())                       # cleanup_cmd still runs on the timeout
+        notify.assert_called_once()
 
-        marker = self.root / "once"
-        once = self.script(f"if [ ! -e {marker} ]; then touch {marker}; sleep 60; fi\nexit 0\n", "once.sh")
-        with mock.patch.object(gate.notify, "notify"):
-            result = gate.run_gate(self.root, script=once, cfg={"gate": {"timeout_s": 1}})
-        self.assertEqual((result["returncode"], result["attempts"], result["timeouts"]), (0, 2, 1))
-        self.assertFalse(result["timed_out"])
+    def test_flake_match_defaults_cover_lock_wait_and_xctest_perf(self):
+        patterns = gate.settings({})["flake_patterns"]
+        self.assertEqual(patterns, list(gate.DEFAULT_FLAKE_PATTERNS))
+        for text in ("FAILED test_x - Lock wait timeout exceeded; try restarting transaction",
+                     "sqlite3.OperationalError: database is locked",
+                     "error: could not obtain the lock on /tmp/x",
+                     "OSError: [Errno 24] Too many open files",
+                     "XCTAssertLessThan failed: measured time exceeded the ceiling",
+                     "testScroll: relative standard deviation 23% above max",
+                     "Time limit exceeded"):
+            self.assertIsNotNone(gate.flake_match(text, patterns), text)
+        self.assertEqual(gate.flake_match("DATABASE IS LOCKED", patterns), patterns[0])
+        self.assertEqual(gate.flake_match("XCTAssertEqual failed: ceiling", patterns), patterns[1])
+        self.assertIsNone(gate.flake_match("AssertionError: 1 != 2", patterns))
+        self.assertIsNone(gate.flake_match("", patterns))
+        self.assertIsNone(gate.flake_match("database is locked", []))
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            opts = gate.settings({"gate": {"flake_patterns": ["ok", "(", 3]}})
+        self.assertEqual(opts["flake_patterns"], ["ok"])
+        self.assertEqual(err.getvalue().count("flake_patterns"), 1)
 
     def test_fast_gate_unaffected(self):
         for code in (0, 7):
@@ -340,7 +361,8 @@ class GateTimeoutTest(unittest.TestCase):
 
     def test_settings_defaults_and_override(self):
         machine_defaults = {"machine_max_parallel": 1, "heavy": False, "machine_wait_max_s": 6660,
-                            "machine_wait_log_s": 300, "machine_ticket_reissue_max": 3}
+                            "machine_wait_log_s": 300, "machine_ticket_reissue_max": 3,
+                            "flake_patterns": list(gate.DEFAULT_FLAKE_PATTERNS)}
         self.assertEqual(gate.settings({}), {"timeout_s": 2700, "cleanup_cmd": None,
                                              "cleanup_timeout_s": 300, "post_cmd": None,
                                              "max_parallel": 1, "scoped_task_gates": True, **machine_defaults})
@@ -738,7 +760,7 @@ class GateTimeoutTest(unittest.TestCase):
                 mock.patch.object(gate_machine, "release", wraps=gate_machine.release) as release:
             result = gate.run_gate(self.root, script=self.script("sleep 60\n"), task_id="T-t",
                                    cfg=self.cfg(timeout_s=1), mode="full")
-        self.assertEqual((result["attempts"], result["timeouts"], result["timed_out"]), (2, 2, True))
+        self.assertEqual((result["attempts"], result["timeouts"], result["timed_out"]), (1, 1, True))
         self.assertFalse(result["machine_wait_exceeded"])
         self.assertEqual((acquire.call_count, ticket.call_count, release.call_count), (1, 1, 1))
 

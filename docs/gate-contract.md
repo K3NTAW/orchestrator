@@ -112,12 +112,12 @@ the first attempt, a heavy gate queues for a machine lease of kind `heavy_gate` 
   `SLOT_POLL_S`; only the oldest live ticket is granted. On success `register()` overwrites the waiting entry in
   place with the running entry, so the key is never absent while the lease is held. Every other exit drops the
   ticket and unlinks the waiting entry when it is this process's waiting entry (a running entry is never deleted).
-- Queue time never counts toward `[gate].timeout_s`. One lease wraps both timeout attempts (no re-wait) and is
-  released in one `finally`; a release error is logged and never masks the result.
+- Queue time never counts toward `[gate].timeout_s`. One lease wraps the single gate attempt and is
+  released in one `finally` (a re-queued gate waits again, see [Retries](#retries)); a release error is logged and never masks the result.
 - Head-of-line: a queued gate keeps its per-repo slot while it waits. That wait is bounded by
   `machine_wait_max_s`, default `2 * (timeout_s + 2 * cleanup_timeout_s) + 60` (4500/300 gives 10260 s): two
   attempts, each followed by `cleanup_cmd` and `post_cmd` bounded by `cleanup_timeout_s`, plus kill grace, so one
-  queued gate always outlives one worst-case holder.
+  queued gate always outlives one worst-case holder. Since T-1797 a gate runs one attempt, so the bound is generous.
 - Ticket re-issue: when the gate's ticket disappears from `waiters-heavy_gate.json` (an operator cleared it), the
   gate takes a new ticket at the tail, at most `machine_ticket_reissue_max` times, logging
   `machine slot ticket vanished, re-queued at the tail (n/max)`. The wait clock is never reset.
@@ -130,7 +130,7 @@ Failure shapes (both leave the repo slot released by `run_gate`'s `finally`):
 | Case | Result | Current consumers |
 |---|---|---|
 | `acquire` / `wait_ticket` raise (OSError, ValueError, JSON errors) | `returncode: 1`, `stderr` and `error` `machine slot: <exc!r>`, `timed_out: false`, `attempts: 0`, `timeouts: 0`, `machine_wait_exceeded: false` | red in `daemon._apply_gate_result`, `merge.merge`, `ship._gate` |
-| wait exceeded, or the ticket vanished more than `machine_ticket_reissue_max` times | `returncode: null`, `timed_out: true`, `stderr` `machine slot wait exceeded <n>s` or `machine slot ticket vanished <n> times`, `attempts: 0`, `timeouts: 0`, `machine_wait_exceeded: true` | a plain gate timeout with no retry (the daemon holds `gate_timeout`; `timeouts: 0` leaves `pipeline.gate_timeouts` untouched, so `auto_fix_round` does not fire) until T-1797 |
+| wait exceeded, or the ticket vanished more than `machine_ticket_reissue_max` times | `returncode: null`, `timed_out: true`, `stderr` `machine slot wait exceeded <n>s` or `machine slot ticket vanished <n> times`, `attempts: 0`, `timeouts: 0`, `machine_wait_exceeded: true` | a plain gate timeout with no retry (the daemon holds `gate_timeout` without a requeue: `timeouts: 0` leaves `pipeline.gate_timeouts` untouched, so `auto_fix_round` does not fire) |
 
 Keys (`[gate]`, read by `gate.settings()`, never written back). An invalid value is logged to stderr as
 `[gate] invalid [gate].<key>=<value!r>, using default <default>` and replaced by the default, never by 0 or
@@ -165,3 +165,36 @@ every waiter exit, so there is nothing to clean on disk. A live holder is bounde
 formula above; a hung daemon thread keeps its lease until the daemon exits. Lease liveness is pid-based: when a
 daemon dies while its gate subprocess still runs, the lease is swept and the cap can be exceeded by one until
 `reap_orphans` kills the orphan.
+
+## Retries
+
+Added 2026-10-11 (T-1797, item 3 of goal T-1792). Gate timeouts and flakes are re-tried once and never spawn a fix
+round on their first occurrence.
+
+- **Timeout requeue.** `gate.run_gate` runs the gate once. On a timeout it still runs `cleanup_cmd`, `post_cmd`
+  and the notification, then returns `attempts: 1`, `timeouts: 1`. `daemon._apply_gate_result` re-queues the task
+  once (`_requeue_gate`, kind `timeout_requeue`): status stays `done`, `gated_at` stays unset, and `daemon.gate()`
+  orders candidates by `(pipeline.gate_requeued_at or 0, id)`, so the task gates again behind every never-gated
+  task. A second timeout holds `gate_timeout` as before. A machine-slot wait-exceeded result (`timeouts: 0`) is
+  held without a requeue.
+- **Flake rerun.** A red gate whose failures-only output (`stderr`) matches one of `[gate].flake_patterns`
+  (`gate.flake_match`, case-insensitive) is re-queued the same way once (kind `flake_rerun`). A second red of any
+  kind holds `gate_red`. Default patterns, used when the key is missing: lock-wait timeouts
+  (`lock[ -_]?wait|could not (?:obtain|acquire|get) (?:the )?lock|database is locked|Too many open files`) and
+  XCTest performance ceilings
+  (`XCTAssert.*(?:exceeded|ceiling)|relative standard deviation|measured.*exceeded|Time limit exceeded`). Invalid
+  entries are dropped with one stderr warning; `flake_patterns = []` turns flake reruns off.
+- **Merge gate.** `merge.merge` re-runs the post-rebase gate once immediately on a flake match (the task is
+  already rebased and reviewed); a timeout there is held `gate_timeout` with no second run.
+
+Where they are recorded:
+
+| Field | Meaning |
+|---|---|
+| `pipeline.gate_requeues` | timeout requeues (int, at most 1) |
+| `pipeline.flake_reruns` | flake reruns (int, at most 1 per path) |
+| `pipeline.gate_requeued_at` | epoch of the last daemon requeue; the gate queue sort key |
+| `.orchestrator/runs/gates.jsonl` | one line per retry: `{ts, task_id, kind: "timeout_requeue" or "flake_rerun", pattern, mode, attempt}` (`pattern` null for timeouts) |
+
+Revert: delete `[gate].flake_patterns` keeps the defaults; set it to `[]` to stop flake reruns. The timeout requeue
+has no toggle; revert the T-1797 commit to restore the in-place second attempt.

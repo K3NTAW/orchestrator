@@ -1700,7 +1700,10 @@ def gate(pool):
     wait_s = _GATE_WAIT_S.get()
     _reap_gates(pool)
     started = []
-    for t in bus.read(status="done", role="execute"):
+    # a re-queued gate (_requeue_gate) goes behind every never-gated task
+    candidates = sorted(bus.read(status="done", role="execute"),
+                        key=lambda t: ((t.get("pipeline") or {}).get("gate_requeued_at") or 0, t["id"]))
+    for t in candidates:
         pipeline = t.get("pipeline") or {}
         if (is_goal(t) or stale(t) or pipeline.get("gated_at") or pipeline.get("gate_started_at")
                 or t.get("merged_into")):
@@ -1871,15 +1874,24 @@ def _apply_gate_result(pool, tid, done):
     if _hold_stale_high(t):
         return
     if result["timed_out"]:
+        if result.get("timeouts") and pipeline.get("gate_requeues", 0) < 1:
+            _requeue_gate(tid, "timeout_requeue", result)
+            return
         if stamp(tid, "gated_at",
                  pipeline_fields={"infra_failure": "gate_timeout",
                                   "gate_timeouts": pipeline.get("gate_timeouts", 0) + result["timeouts"]},
                  status="held", hold_reason="gate_timeout",
                  resume_hint={"gate_timeout_s": gate.settings(pool.cfg)["timeout_s"],
                               "output_tail": (result["stdout"] + result["stderr"])[-4000:]}):
-            notify(f"{tid}: gate timed out twice; held as infra failure")
+            notify(f"{tid}: gate timed out; held as infra failure")
         return
     if result["returncode"]:
+        patterns = gate.settings(pool.cfg).get("flake_patterns")
+        pattern = (gate_runner.flake_match(result.get("stderr") or "", patterns)
+                   if pipeline.get("flake_reruns", 0) < 1 else None)
+        if pattern:
+            _requeue_gate(tid, "flake_rerun", result, pattern=pattern)
+            return
         gate_reds = pipeline.get("gate_reds", 0) + 1
         if stamp(tid, "gated_at", pipeline_fields={"gate_reds": gate_reds},
                  status="held", hold_reason="gate_red",
@@ -1915,6 +1927,22 @@ def _apply_gate_result(pool, tid, done):
         complete(tid, "gated_at")
     except Exception as e:
         hold_failed(tid, "gated_error", "gate", e)
+
+
+def _requeue_gate(tid, kind, result, pattern=None):
+    """Re-queue a timed-out (kind timeout_requeue) or flake-pattern red (kind flake_rerun) gate once, at the back
+    of the gate queue: status stays done, gated_at stays unset (the gate markers are already cleared), and
+    pipeline.gate_requeues / flake_reruns, gate_requeued_at plus one runs/gates.jsonl line record it."""
+    counter = "gate_requeues" if kind == "timeout_requeue" else "flake_reruns"
+    with bus.locked():
+        pipeline = dict(bus.get(tid).get("pipeline") or {})
+        pipeline[counter] = pipeline.get(counter, 0) + 1
+        pipeline["gate_requeued_at"] = time.time()
+        if kind == "timeout_requeue":
+            pipeline["gate_timeouts"] = pipeline.get("gate_timeouts", 0) + result.get("timeouts", 0)
+        bus.update(tid, pipeline=pipeline)
+    gate_runner.record_requeue(tid, kind, pattern=pattern, mode=result.get("mode"), attempt=pipeline[counter])
+    print(f"[daemon] {tid}: gate {kind}; re-queued once", file=sys.stderr)
 
 
 def _merge_then(tid, then, on_error):

@@ -4173,7 +4173,8 @@ class Daemon(unittest.TestCase):
         results[red] = {"returncode": 1, "stdout": "", "stderr": "FAILED red", "timed_out": False,
                         "attempts": 1, "timeouts": 0}
         results[slow] = {"returncode": None, "stdout": "out", "stderr": "", "timed_out": True,
-                         "attempts": 2, "timeouts": 2}
+                         "attempts": 1, "timeouts": 1}
+        bus.update(slow, pipeline={"gate_requeues": 1, "gate_timeouts": 1})   # already re-queued once
         self.gate_in_tick(pool)
         self.assertEqual(sorted(calls), sorted([green, red, slow]))
         for tid in (green, red, slow):
@@ -4195,6 +4196,104 @@ class Daemon(unittest.TestCase):
         self.assertEqual(task["pipeline"]["gate_timeouts"], 2)
         for tid in (green, red, slow):
             self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(bus.get(tid)["pipeline"]))
+
+    def timeout_result(self):
+        return {"returncode": None, "stdout": "out", "stderr": "", "timed_out": True, "attempts": 1,
+                "timeouts": 1, "mode": "task", "base": "abc"}
+
+    def test_timed_out_gate_is_requeued_once_at_the_back(self):
+        results = {}
+        release, calls = self.bg_setup(results)
+        release.set()
+        pool = self.bg_pool()
+        slow = self.bg_task("slow", "wt-slow")
+        results[slow] = self.timeout_result()
+        daemon.gate(pool)
+        task = bus.get(slow)
+        self.assertEqual(task["status"], "done")
+        self.assertNotIn("gated_at", task["pipeline"])
+        self.assertEqual(task["pipeline"]["gate_requeues"], 1)
+        self.assertTrue(task["pipeline"]["gate_requeued_at"])
+        self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(task["pipeline"]))
+        fresh = self.bg_task("fresh", "wt-fresh")                    # never gated: goes ahead of the re-queued one
+        results[slow] = {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False, "attempts": 1,
+                         "timeouts": 0}
+        daemon.gate(pool)
+        self.assertEqual(calls, [slow, fresh, slow])
+        task = bus.get(slow)
+        self.assertTrue(task["pipeline"]["gated_at"])
+        self.assertEqual(task["pipeline"]["gate_requeues"], 1)
+
+    def test_second_timeout_holds_gate_timeout(self):
+        results = {}
+        release, calls = self.bg_setup(results)
+        release.set()
+        pool = self.bg_pool()
+        slow = self.bg_task("slow", "wt-slow")
+        results[slow] = self.timeout_result()
+        daemon.gate(pool)
+        self.assertEqual(bus.get(slow)["status"], "done")
+        daemon.gate(pool)
+        task = bus.get(slow)
+        self.assertEqual(calls, [slow, slow])
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_timeout"))
+        self.assertEqual(task["pipeline"]["infra_failure"], "gate_timeout")
+        self.assertEqual(task["pipeline"]["gate_timeouts"], 2)
+        self.assertEqual(task["pipeline"]["gate_requeues"], 1)
+        self.assertTrue(task["pipeline"]["gated_at"])
+        self.assertIn("out", task["resume_hint"]["output_tail"])
+        daemon.gate(pool)
+        self.assertEqual(calls, [slow, slow])                           # held: never gated a third time
+
+    def test_flaky_red_gate_reruns_once_before_gate_red(self):
+        results = {}
+        release, calls = self.bg_setup(results)
+        release.set()
+        pool = self.bg_pool()
+        flaky, red = self.bg_task("flaky", "wt-flaky"), self.bg_task("red", "wt-red")
+        results[flaky] = {"returncode": 1, "stdout": "", "timed_out": False, "attempts": 1, "timeouts": 0,
+                          "stderr": "FAILED tests/test_x.py::test_x - sqlite3.OperationalError: Database is locked"}
+        results[red] = {"returncode": 1, "stdout": "", "stderr": "FAILED tests/test_x.py::test_x - 1 != 2",
+                        "timed_out": False, "attempts": 1, "timeouts": 0}
+        daemon.gate(pool)
+        task = bus.get(flaky)
+        self.assertEqual(task["status"], "done")
+        self.assertNotIn("gated_at", task["pipeline"])
+        self.assertEqual(task["pipeline"]["flake_reruns"], 1)
+        self.assertNotIn("gate_reds", task["pipeline"])
+        task = bus.get(red)                                             # no flake pattern: held at once
+        self.assertEqual((task["status"], task["hold_reason"], task["pipeline"]["gate_reds"]),
+                         ("held", "gate_red", 1))
+        daemon.gate(pool)
+        task = bus.get(flaky)
+        self.assertEqual(calls, [flaky, red, flaky])
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_red"))
+        self.assertEqual((task["pipeline"]["gate_reds"], task["pipeline"]["flake_reruns"]), (1, 1))
+        self.assertIn("Database is locked", task["resume_hint"]["failures"])
+
+    def test_gate_requeue_is_recorded_in_run_log(self):
+        results = {}
+        release, _ = self.bg_setup(results)
+        release.set()
+        pool = self.bg_pool()
+        slow, flaky = self.bg_task("slow", "wt-slow"), self.bg_task("flaky", "wt-flaky")
+        results[slow] = self.timeout_result()
+        results[flaky] = {"returncode": 1, "stdout": "", "timed_out": False, "attempts": 1, "timeouts": 0,
+                          "mode": "full", "stderr": "XCTAssertLessThan failed: measured 2.1s exceeded ceiling"}
+        before = time.time()
+        daemon.gate(pool)
+        lines = [json.loads(line) for line in (bus.RUNS / "gates.jsonl").read_text().splitlines()]
+        self.assertEqual([(l["task_id"], l["kind"], l["mode"], l["attempt"]) for l in lines],
+                         [(slow, "timeout_requeue", "task", 1), (flaky, "flake_rerun", "full", 1)])
+        self.assertIsNone(lines[0]["pattern"])
+        self.assertIn("XCTAssert", lines[1]["pattern"])
+        for line in lines:
+            self.assertEqual(set(line), {"ts", "task_id", "kind", "pattern", "mode", "attempt"})
+            self.assertGreaterEqual(line["ts"], before)
+        self.assertEqual(bus.get(slow)["pipeline"]["gate_requeues"], 1)
+        self.assertEqual(bus.get(flaky)["pipeline"]["flake_reruns"], 1)
+        for tid in (slow, flaky):
+            self.assertGreaterEqual(bus.get(tid)["pipeline"]["gate_requeued_at"], before)
 
     def test_gate_worker_exception_holds_gated_error(self):
         tid = self.task("boom")

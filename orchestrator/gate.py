@@ -16,6 +16,12 @@ from . import pool
 
 
 DEFAULT_TIMEOUT_S = 2700
+# [gate].flake_patterns defaults (2026-10-11, goal T-1792): a red gate whose failures-only output matches one is
+# re-queued once before it holds gate_red (docs/gate-contract.md "Retries"). Matched case-insensitively.
+DEFAULT_FLAKE_PATTERNS = (
+    r"lock[ -_]?wait|could not (?:obtain|acquire|get) (?:the )?lock|database is locked|Too many open files",
+    r"XCTAssert.*(?:exceeded|ceiling)|relative standard deviation|measured.*exceeded|Time limit exceeded",
+)
 KILL_GRACE_S = 15
 _ON_START = ContextVar("gate_on_start", default=None)
 # Every process group _run() started in this process and has not finished yet: terminate_own() kills them on
@@ -119,15 +125,60 @@ def settings(cfg=None):
     if not isinstance(heavy, bool):
         print(f"[gate] invalid [gate].heavy={heavy!r}, using default False", file=sys.stderr)
         heavy = False
+    flake_patterns = gate_cfg.get("flake_patterns", list(DEFAULT_FLAKE_PATTERNS))
+    if not isinstance(flake_patterns, list):
+        print(f"[gate] invalid [gate].flake_patterns={flake_patterns!r}, using the defaults", file=sys.stderr)
+        flake_patterns = list(DEFAULT_FLAKE_PATTERNS)
+    valid = []
+    for entry in flake_patterns:
+        try:
+            if isinstance(entry, str) and entry:
+                re.compile(entry)
+                valid.append(entry)
+        except re.error:
+            pass
+    if len(valid) != len(flake_patterns):
+        print(f"[gate] ignored {len(flake_patterns) - len(valid)} invalid [gate].flake_patterns entries",
+              file=sys.stderr)
+    flake_patterns = valid
     return {"timeout_s": timeout_s, "cleanup_cmd": cleanup_cmd,
             "cleanup_timeout_s": cleanup_timeout_s, "post_cmd": post_cmd,
             "max_parallel": max_parallel, "scoped_task_gates": scoped is not False,
             "machine_max_parallel": machine_int("machine_max_parallel", 1, 0), "heavy": heavy,
-            # One queued gate outlives one worst-case holder: two attempts, each followed by cleanup_cmd and
-            # post_cmd bounded by cleanup_timeout_s, plus kill grace.
+            # One queued gate outlives one worst-case holder. Sized for two attempts (each followed by cleanup_cmd
+            # and post_cmd bounded by cleanup_timeout_s, plus kill grace) before the timeout requeue replaced the
+            # in-place retry; kept as the more generous bound.
             "machine_wait_max_s": machine_int("machine_wait_max_s", 2 * (timeout_s + 2 * cleanup_timeout_s) + 60, 1),
             "machine_wait_log_s": machine_int("machine_wait_log_s", 300, 1),
-            "machine_ticket_reissue_max": machine_int("machine_ticket_reissue_max", 3, 0)}
+            "machine_ticket_reissue_max": machine_int("machine_ticket_reissue_max", 3, 0),
+            "flake_patterns": flake_patterns}
+
+
+def flake_match(text, patterns=None):
+    """Return the first [gate].flake_patterns regex that matches text (case-insensitive), or None.
+    patterns None uses the defaults."""
+    for pattern in DEFAULT_FLAKE_PATTERNS if patterns is None else patterns:
+        try:
+            if re.search(pattern, text or "", re.IGNORECASE):
+                return pattern
+        except (TypeError, re.error):
+            continue
+    return None
+
+
+def record_requeue(task_id, kind, *, pattern=None, mode=None, attempt=1):
+    """Append one gate retry line (kind timeout_requeue | flake_rerun) to .orchestrator/runs/gates.jsonl.
+    A write failure is logged and never changes the gate outcome."""
+    line = {"ts": time.time(), "task_id": task_id, "kind": kind, "pattern": pattern, "mode": mode,
+            "attempt": attempt}
+    from . import bus  # bus.RUNS is .orchestrator/runs; imported late, as machine is
+    try:
+        path = bus.RUNS / "gates.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except OSError as e:
+        print(f"[gate] task_id={task_id} gates.jsonl write failed: {e!r}", file=sys.stderr)
 
 
 def _heavy(mode, opts):
@@ -303,7 +354,8 @@ def _post(opts, worktree, task_id):
 
 
 def run_gate(worktree, *, script, task_id=None, cfg=None, env=None, mode=None, base=None):
-    """Run a repository gate, cleaning up and retrying once after a timeout. Takes a [gate].max_parallel slot
+    """Run a repository gate once; a timeout runs cleanup_cmd and post_cmd and returns (attempts 1, timeouts 1):
+    the caller decides whether to re-queue it (docs/gate-contract.md "Retries"). Takes a [gate].max_parallel slot
     first, waiting until one frees, unless the calling context already holds the slot for this gate.
     mode (task | full) and base reach the gate as ORCH_GATE_MODE / ORCH_GATE_BASE when not None
     (docs/gate-contract.md); env None inherits os.environ.
@@ -447,39 +499,36 @@ def _run_attempts(worktree, *, script, task_id, env, key, mode, base, opts):
             env["ORCH_GATE_BASE"] = str(base)
     gates_dir = STATE / "gates"
     registry = gates_dir / f"{key}.json"
-    timeouts = 0
-    for attempt in (1, 2):
-        def register(pid):
-            from . import machine
-            owner = _owner()
-            _write_registry(registry, {"task_id": task_id, "worktree": str(worktree),
-                                            "pid": pid, "pgid": pid, "proc_start": machine.process_start(pid),
-                                            "owner_pid": owner["pid"], "owner_start": owner["start"],
-                                            "started_at": time.time(), "timeout_s": opts["timeout_s"],
-                                            "mode": mode, "base": base})
+    def register(pid):
+        from . import machine
+        owner = _owner()
+        _write_registry(registry, {"task_id": task_id, "worktree": str(worktree),
+                                   "pid": pid, "pgid": pid, "proc_start": machine.process_start(pid),
+                                   "owner_pid": owner["pid"], "owner_start": owner["start"],
+                                   "started_at": time.time(), "timeout_s": opts["timeout_s"],
+                                   "mode": mode, "base": base})
 
-        token = _ON_START.set(register)
+    token = _ON_START.set(register)
+    try:
+        result = run_bounded([str(script), str(worktree)], cwd=worktree,
+                             timeout_s=opts["timeout_s"], input="{}", env=env)
+    finally:
+        _ON_START.reset(token)
         try:
-            result = run_bounded([str(script), str(worktree)], cwd=worktree,
-                                 timeout_s=opts["timeout_s"], input="{}", env=env)
-        finally:
-            _ON_START.reset(token)
-            try:
-                registry.unlink()
-            except FileNotFoundError:
-                pass
-        if not result["timed_out"]:
-            _post(opts, worktree, task_id)
-            return {**{k: result[k] for k in ("returncode", "stdout", "stderr", "timed_out")},
-                    "attempts": attempt, "timeouts": timeouts, "mode": mode, "base": base}
-        timeouts += 1
-        if opts["cleanup_cmd"]:
-            run_bounded(["bash", "-c", opts["cleanup_cmd"]], cwd=worktree,
-                        timeout_s=opts["cleanup_timeout_s"])
+            registry.unlink()
+        except FileNotFoundError:
+            pass
+    if not result["timed_out"]:
         _post(opts, worktree, task_id)
-        notify.notify(f"gate timeout: task_id={task_id} attempt={attempt} timeout_s={opts['timeout_s']}")
+        return {**{k: result[k] for k in ("returncode", "stdout", "stderr", "timed_out")},
+                "attempts": 1, "timeouts": 0, "mode": mode, "base": base}
+    if opts["cleanup_cmd"]:
+        run_bounded(["bash", "-c", opts["cleanup_cmd"]], cwd=worktree,
+                    timeout_s=opts["cleanup_timeout_s"])
+    _post(opts, worktree, task_id)
+    notify.notify(f"gate timeout: task_id={task_id} attempt=1 timeout_s={opts['timeout_s']}")
     return {"returncode": None, "stdout": result["stdout"], "stderr": result["stderr"],
-            "timed_out": True, "attempts": 2, "timeouts": timeouts, "mode": mode, "base": base}
+            "timed_out": True, "attempts": 1, "timeouts": 1, "mode": mode, "base": base}
 
 
 def running_gates(now=None, threshold=0.8):

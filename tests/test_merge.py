@@ -352,6 +352,51 @@ class MergeQueue(unittest.TestCase):
             merge.merge(task2["id"], target="goal/scoped")
         self.assertEqual(seen["mode"], "full")
 
+    def test_merge_gate_flake_reruns_once(self):
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        flaky = {"returncode": 1, "stdout": "", "stderr": "FAILED t - database is locked", "timed_out": False,
+                 "attempts": 1, "timeouts": 0, "mode": "task"}
+        green = {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False, "attempts": 1, "timeouts": 0}
+        timeout = {"returncode": None, "stdout": "", "stderr": "", "timed_out": True, "attempts": 1,
+                   "timeouts": 1}
+
+        def task(name):
+            created = bus.create_task(name, "s", ["a"], [f"{name}.py"], role="execute")
+            wt = spawn.ensure_worktree(created["id"], base="HEAD"); bus.update(created["id"], worktree=str(wt))
+            (wt / f"{name}.py").write_text("VALUE = 1\n")
+            g("add", "-A", cwd=wt); g("commit", "-qm", name, cwd=wt)
+            return created["id"]
+
+        tid = task("flake")
+        with patch("orchestrator.merge.gate.run_gate", side_effect=[flaky, green]) as gated:
+            result = merge.merge(tid, target="goal/flake")
+        self.assertEqual(result["status"], "merged", result)
+        self.assertEqual(gated.call_count, 2)
+        self.assertEqual(bus.get(tid)["pipeline"]["flake_reruns"], 1)
+        lines = [json.loads(line) for line in (bus.RUNS / "gates.jsonl").read_text().splitlines()]
+        mine = [line for line in lines if line["task_id"] == tid]
+        self.assertEqual([(l["kind"], l["mode"], l["attempt"]) for l in mine], [("flake_rerun", "task", 1)])
+        self.assertIn("database is locked", mine[0]["pattern"])
+
+        tid = task("flaketwice")                                   # second red of any kind: tests_red
+        with patch("orchestrator.merge.gate.run_gate", side_effect=[flaky, flaky]) as gated:
+            result = merge.merge(tid, target="goal/flake")
+        self.assertEqual((result["status"], gated.call_count), ("tests_red", 2))
+        self.assertEqual(bus.get(tid)["pipeline"]["flake_reruns"], 1)
+
+        tid = task("flaketimeout")                                 # rerun timed out: held, no third run
+        with patch("orchestrator.merge.gate.run_gate", side_effect=[flaky, timeout]) as gated:
+            result = merge.merge(tid, target="goal/flake")
+        self.assertEqual((result["status"], gated.call_count), ("gate_timeout", 2))
+        task_after = bus.get(tid)
+        self.assertEqual((task_after["hold_reason"], task_after["pipeline"]["flake_reruns"]), ("gate_timeout", 1))
+
+        tid = task("timeoutonce")                                  # a merge-gate timeout never re-runs
+        with patch("orchestrator.merge.gate.run_gate", side_effect=[timeout]) as gated:
+            result = merge.merge(tid, target="goal/flake")
+        self.assertEqual((result["status"], gated.call_count), ("gate_timeout", 1))
+
 
 if __name__ == "__main__":
     unittest.main()
