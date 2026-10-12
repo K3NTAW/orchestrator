@@ -3695,8 +3695,12 @@ class Daemon(unittest.TestCase):
         self.assertEqual(gate_calls, [])
 
     def test_gate_holds_when_acceptance_test_file_missing_from_diff(self):
+        test_file = self.sandbox / "backend" / "test" / "oauth.test.ts"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_text("test")
+        self.addCleanup(test_file.unlink, True)
         t = bus.create_task("missing acceptance test file", "spec", [
-            "backend/test/oauth.test.ts is required"], ["x.py"],
+            "new backend/test/oauth.test.ts is required"], ["x.py"],
             role="execute", complexity=2, parent="T-0043")["id"]
         bus.update(t, status="done", worktree=str(self.sandbox))
         gate_calls = []
