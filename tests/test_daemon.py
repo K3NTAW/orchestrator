@@ -1934,6 +1934,43 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(disk_messages()), 2)
         self.assertFalse(P.Pool().notified_state()["disk_low"])
 
+    def test_disk_low_holds_only_new_ship_starts(self):
+        from orchestrator import ship
+        starts, tracked = [], []
+        self.swap(ship, "tick", lambda pool, **kwargs: starts.append(kwargs) or {"status": "started"})
+        self.swap(ship, "_track_enabled", lambda root, enabled: tracked.append(enabled))
+        pool = P.Pool()
+        pool.cfg["ship"] = {**pool.cfg.get("ship", {}), "enabled": True}
+        stop = threading.Event()
+        self.assertIsNone(daemon.ship_tick(pool, stop, hold_starts=True))
+        self.assertEqual((starts, tracked), ([], [True]))
+        self.assertEqual(daemon.ship_tick(pool, stop), {"status": "started"})
+        self.assertEqual(len(starts), 1)
+
+    def test_disk_floor_reuses_one_measurement(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(daemon, "notify", lambda message: None)
+        self.swap(daemon, "reap_worktrees", lambda *args, **kwargs: None)
+        reads = iter([1 * 2**30, 2 * 2**30])
+
+        def free(path):
+            try:
+                return next(reads)
+            except StopIteration:
+                raise OSError("statfs failed")
+
+        self.swap(daemon, "_free_bytes", free)
+        pool = P.Pool()
+        pool.cfg["daemon"] = {**pool.cfg.get("daemon", {}), "min_free_gb": 20}
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            self.assertTrue(daemon._disk_floor(pool))
+        self.assertIn("disk low: 2.0 GiB free < 20 GiB", err.getvalue())
+        reads = iter([1 * 2**30])
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            self.assertTrue(daemon._disk_floor(pool))
+        self.assertIn("disk re-check failed", err.getvalue())
+        self.assertIn("disk low: 1.0 GiB free < 20 GiB", err.getvalue())
+
     def test_auto_fix_round_on_gate_red_pytest_and_unittest_ids(self):
         for output, test_id in (("FAILED tests/test_x.py::test_x - assertion", "tests/test_x.py::test_x"),
                                 ("FAIL: test_x (module.Class.test_x)", "module.Class.test_x"),

@@ -1582,7 +1582,7 @@ def _hold_stale_high(task):
 
 
 def gate(pool, hold_starts=False):
-    """hold_starts (free-space floor): start no new gate; running gates are still reaped. done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
+    """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
     split). The second of two reviews (only possible under "always") must never run on the model that executed:
     when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on review_tier(t)
@@ -1600,7 +1600,9 @@ def gate(pool, hold_starts=False):
     (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call.
     Only gate.run_gate leaves the calling thread (_start_gate/_gate_worker); its result is applied by
     _reap_gates() on the tick. Called from tick() it waits at most TICK_GATE_WAIT_S for the gates it started;
-    called directly it waits for each gate, so results land before it returns."""
+    called directly it waits for each gate, so results land before it returns.
+    hold_starts (free-space floor): start no new gate; running gates are still reaped.
+    """
     wait_s = _GATE_WAIT_S.get()
     _reap_gates(pool)
     started = []
@@ -2393,7 +2395,9 @@ def _tick(pool=None, stop_event=None):
             _timed("planner_runs.tick", planner_runs.tick, pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
-    if not held:
+    if held:
+        _timed("ship_tick", ship_tick, pool, stop_event, hold_starts=True)
+    else:
         _timed("ship_tick", ship_tick, pool, stop_event)
     try:
         _timed("reap_worktrees", reap_worktrees, pool)
@@ -2421,28 +2425,39 @@ def _min_free_gb(pool):
     return (getattr(pool, "cfg", None) or {}).get("daemon", {}).get("min_free_gb", 20)
 
 
+def _measure_disk(pool):
+    """(low, free bytes) from one measurement; free is None when the floor is disabled ([daemon].min_free_gb 0)."""
+    floor = _min_free_gb(pool)
+    if not floor:
+        return False, None
+    free = _free_bytes(ROOT)
+    return free < floor * 2**30, free
+
+
 def disk_low(pool):
     """True when free space under ROOT is below [daemon].min_free_gb GiB; 0 disables the floor."""
-    floor = _min_free_gb(pool)
-    return bool(floor) and _free_bytes(ROOT) < floor * 2**30
+    return _measure_disk(pool)[0]
 
 
 def _disk_floor(pool):
     """Free-space floor, evaluated once per tick: when low, reap finished worktrees with zero grace and
-    re-check. Returns True when dispatch, gate starts and ship starts must be held this tick."""
+    re-check. Returns True when dispatch, gate starts and ship starts must be held this tick. A failed first
+    measurement lifts the floor; a failed re-check after the reap keeps the first measurement."""
     try:
-        low = disk_low(pool)
-        if low:
-            try:
-                _timed("reap_worktrees", reap_worktrees, pool, grace_s=0)
-            except Exception as e:
-                print(f"[daemon] reap_worktrees failed: {e}", file=sys.stderr)
-            low = disk_low(pool)
-        free_gib = _free_bytes(ROOT) / 2**30 if low else None
+        low, free = _measure_disk(pool)
     except Exception as e:
         print(f"[daemon] disk check failed: {e}", file=sys.stderr)
         return False
-    message = (f"disk low: {free_gib:.1f} GiB free < {_min_free_gb(pool)} GiB; dispatch and gates held"
+    if low:
+        try:
+            _timed("reap_worktrees", reap_worktrees, pool, grace_s=0)
+        except Exception as e:
+            print(f"[daemon] reap_worktrees failed: {e}", file=sys.stderr)
+        try:
+            low, free = _measure_disk(pool)
+        except Exception as e:
+            print(f"[daemon] disk re-check failed: {e}", file=sys.stderr)
+    message = (f"disk low: {free / 2**30:.1f} GiB free < {_min_free_gb(pool)} GiB; dispatch and gates held"
                if low else None)
     if low:
         print(f"[daemon] {message}", file=sys.stderr)
@@ -2487,12 +2502,17 @@ def acquire_lock(kind="cli"):
     return fh
 
 
-def ship_tick(pool, stop_event):
+def ship_tick(pool, stop_event, hold_starts=False):
     """--once (no stop_event) never ships: a full gate can block for hours. The loop runs ship in a non-daemon
-    thread it joins on shutdown."""
+    thread it joins on shutdown.
+    hold_starts (free-space floor): start no new ship run, since any run may start a full gate. A ship thread
+    already running keeps gating and merging to the end, and the ship_enabled_at window is still tracked."""
     if stop_event is None or stop_event.is_set():
         return None
     try:
+        if hold_starts:
+            ship._track_enabled(ship.ROOT, ship.settings(pool.cfg)["enabled"])
+            return None
         return ship.tick(pool, stop_event=stop_event, inline=False)
     except Exception as e:
         print(f"[daemon] ship failed: {e}", file=sys.stderr)
