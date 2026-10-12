@@ -622,6 +622,16 @@ class PlannerPromptAndConfig(unittest.TestCase):
         self.assertIn("Headless", planner_md)
         self.assertIn("GOAL task id", planner_md)
 
+    def test_planner_prompt_allows_fresh_scout_subagents(self):
+        claude_md = (goals.PACKAGE_REPO / "CLAUDE.md").read_text()
+        planner_md = (goals.PACKAGE_REPO / ".orchestrator" / "prompts" / "planner.md").read_text()
+        for prompt in (claude_md, planner_md):
+            never = self._section(prompt, "Never")
+            self.assertIn("Fork this session", never)
+            self.assertIn("Agent that inherits its context", never)
+            self.assertIn("Fresh read-only scout subagents", never)
+            self.assertIn("allowed for a named uncertainty", never)
+
     def test_pool_parses_new_tables(self):
         cfg = Pool().cfg
         self.assertEqual(cfg["models"]["planner"], "claude-fable-5-1")

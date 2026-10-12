@@ -6,6 +6,26 @@ from orchestrator import scopes, stale, steering_policy
 
 
 class ScopeTests(unittest.TestCase):
+    def test_effective_scope_includes_grant_scope(self):
+        task = {"scope": ["a/"], "constraints": {"grant_scope": ["tests/test_extra.py", "../secret.py"]}}
+        self.assertEqual(scopes.effective_scope(task), ["a/", "tests/test_extra.py", "../secret.py"])
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(scopes.safe_scope({**task, "worktree": directory}, directory),
+                             ["a/", "tests/test_extra.py"])
+        self.assertEqual(scopes.effective_scope({"scope": ["a/"]}), ["a/"])
+
+    def test_effective_scope_keeps_write_scope_precedence(self):
+        task = {"write_scope": ["x/"], "scope": ["y/"],
+                "constraints": {"grant_scope": ["tests/test_x.py"]}}
+        self.assertEqual(scopes.effective_scope(task), ["x/", "tests/test_x.py"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "x").mkdir()
+            (root / "tests").mkdir()
+            self.assertEqual(scopes.safe_scope({**task, "worktree": directory}, directory),
+                             ["x/", "tests/test_x.py"])
+        self.assertEqual(scopes.effective_scope({"scope": ["y/"]}), ["y/"])
+
     def test_shared_import_walk_and_acceptance_id_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

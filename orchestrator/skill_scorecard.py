@@ -403,9 +403,9 @@ def build(root=STATE):
         by_role_skill[f"{role}/{skill_id}"] = {
             "role": role, "skill_id": skill_id, "exposures": len(selected), "uses": uses,
             "use_rate": round(uses / len(selected), 3),
-            "skill_tokens_l0": _avg([row["context"].get("skill_tokens_l0", 0) for row in selected]),
-            "skill_tokens_l2": _avg([row["context"].get("skill_tokens_presented_l2",
-                                                         row["context"].get("skill_tokens_l2", 0))
+            "skill_tokens_l0": _avg([row["context"].get("skill_tokens_l0") or 0 for row in selected]),
+            "skill_tokens_l2": _avg([row["context"].get("skill_tokens_presented_l2") or
+                                      row["context"].get("skill_tokens_l2") or 0
                                       for row in selected]),
             "skill_overhead_ratio": _avg(overhead),
         }
@@ -490,7 +490,7 @@ def economy(root=STATE, rows=None):
             overhead.append(((context.get("skill_tokens_l0") or 0) +
                              (context.get("skill_tokens_presented_l2", context.get("skill_tokens_l2")) or 0)) / tokens)
     utility = []
-    skills = sorted({s for r in rows for s in (r.get("context") or {}).get("skills_used", [])})
+    skills = sorted({s for r in rows for s in (r.get("context") or {}).get("skills_used") or []})
     for skill in skills:
         for row in marginal(root, skill):
             quality, tokens = row.get("first_pass_delta"), row.get("skill_token_overhead")

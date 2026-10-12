@@ -3,10 +3,14 @@ import unittest
 
 from unittest import mock
 
-from orchestrator import attribution, spawn, tool_catalog
+from orchestrator import attribution, spawn, specialist, tool_catalog
 
 
 class ToolCatalogTests(unittest.TestCase):
+    def test_catalog_lists_execute_tool(self):
+        self.assertEqual(tool_catalog.CATALOG["execute"]["category"], "executor")
+        self.assertIn("execute", specialist.TOOL_ALIASES)
+
     def test_catalog_covers_every_allowlisted_id(self):
         ids = {item.strip() for value in spawn.TOOLS.values() for item in value.split(",")}
         self.assertEqual(ids - set(tool_catalog.CATALOG), set())

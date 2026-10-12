@@ -3,9 +3,49 @@ running it under the wrong role (gotcha 2026-09-18: spawn_spec_review handed an 
 import json, sys, unittest
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_mcp.py` doesn't add this dir itself
 from _harness import TMP  # noqa: F401 -- sets ORCH_ROOT before any `orchestrator` import
 from orchestrator import bus, mcp
+
+
+class ExecuteToolRouting(unittest.TestCase):
+    def test_execute_tool_dispatches_and_codex_tools_refuse_without_codex_row(self):
+        result = {"status": "done", "message": "finished"}
+        with mock.patch.object(mcp.executor, "start", return_value=result) as start, \
+                mock.patch.object(mcp.executor, "post_tool_result", return_value=(True, "result posted")) as post, \
+                mock.patch.object(mcp.executor, "codex_rows", return_value=[]):
+            reply = mcp.execute("T-execute", "implement", executor_id="claude:sonnet")
+            self.assertEqual(reply, {**result, "posted": True, "posted_reason": "result posted"})
+            start.assert_called_once_with("T-execute", "implement", executor_id="claude:sonnet")
+            post.assert_called_once_with("T-execute", result)
+            self.assertEqual(mcp.codex("T-codex", "go"),
+                             {"status": "refused", "reason": "no enabled codex row; use execute"})
+            self.assertEqual(mcp.codex_reply("T-codex", "fix"),
+                             {"status": "refused", "reason": "no enabled codex row; use execute"})
+            self.assertEqual(start.call_count, 1)
+
+        with mock.patch.object(mcp.executor, "codex_rows", return_value=[object()]), \
+                mock.patch.object(mcp.executor, "start", return_value=result) as start, \
+                mock.patch.object(mcp.executor, "post_tool_result", return_value=(True, "posted")), \
+                mock.patch.object(mcp.executor, "reply", return_value=result) as reply:
+            mcp.codex("T-codex", "go")
+            mcp.codex_reply("T-codex", "fix")
+            start.assert_called_once_with("T-codex", "go")
+            reply.assert_called_once_with("T-codex", "fix")
+
+    def test_executor_fallback_reports_claude_rows_without_codex(self):
+        rows = {
+            "claude:sonnet": SimpleNamespace(id="claude:sonnet", enabled=True, provider="claude", roles=["execute"]),
+            "claude:opus": SimpleNamespace(id="claude:opus", enabled=True, provider="claude", roles=["execute"]),
+            "disabled": SimpleNamespace(id="disabled", enabled=False, provider="claude", roles=["execute"]),
+        }
+        pool = mock.Mock(executors=rows, cfg={})
+        pool.row_covers.side_effect = lambda row, complexity: row.id == "claude:sonnet" and complexity == 5
+        with mock.patch.object(mcp, "Pool", return_value=pool), \
+                mock.patch.object(mcp.executor, "codex_rows", return_value=[]):
+            self.assertEqual(mcp.executor_fallback(5), {"use": "execute", "rows": ["claude:sonnet"]})
+            self.assertEqual(mcp.executor_fallback(9), {"use": "hold", "hint": "no row covers this complexity"})
 
 
 class SpawnToolsRefuseWrongRole(unittest.TestCase):

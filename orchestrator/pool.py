@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from . import ROOT, STATE, bus
+from . import ROOT, STATE, attribution, bus
 
 WINDOW_S = 5 * 3600
 TZ = ZoneInfo("Europe/Zurich")
@@ -182,6 +182,34 @@ def executor_identity(field, cfg):
     return {"provider": None, "model": None}
 
 
+def claude_split(cfg, card) -> int:
+    """Choose the Sonnet/Opus complexity boundary from resolved scorecard evidence."""
+    routing = cfg.get("routing", {})
+    base = int(routing.get("sonnet_max_complexity", 5))
+    lo = int(routing.get("split_min", 4))
+    hi = int(routing.get("split_max", 7))
+    n_min = int(routing.get("split_min_samples", 10))
+    base = max(lo, min(hi, base))
+    floor = cfg.get("models", {}).get("success_floor", 0.6)
+
+    def rate(eid, complexity):
+        row = card.get(eid, {}).get("by_complexity", {}).get(attribution.band(complexity), {})
+        merged = row.get("merged", 0)
+        failed = row.get("failed", 0)
+        n = merged + failed
+        return (merged / n, n) if n else (None, 0)
+
+    sonnet_rate, sonnet_n = rate("claude:sonnet", base + 1)
+    opus_rate, opus_n = rate("claude:opus", base + 1)
+    if (base + 1 <= hi and sonnet_n >= n_min and sonnet_rate >= floor
+            and (opus_n < n_min or sonnet_rate >= opus_rate)):
+        return base + 1
+    sonnet_rate, sonnet_n = rate("claude:sonnet", base)
+    if base - 1 >= lo and sonnet_n >= n_min and sonnet_rate < floor:
+        return base - 1
+    return base
+
+
 class Pool:
     def __init__(self, cfg=None):
         self.cfg = cfg or config()
@@ -191,8 +219,19 @@ class Pool:
                          for a in self.cfg["claude_accounts"]]
         self.codex = Codex()
         self.executors = self._read_executors()
+        self._claude_split = None
         self._load()
         self._sync_legacy_codex()
+
+    def claude_split(self):
+        if self._claude_split is None:
+            try:
+                from .scorecard import build
+                card = build()
+            except Exception:
+                card = {}
+            self._claude_split = claude_split(self.cfg, card)
+        return self._claude_split
 
     def _read_executors(self):
         """[[executors]] rows -> {id: Executor}. No table (old config) -> one row synthesized from [codex]."""
@@ -226,6 +265,20 @@ class Pool:
 
     def is_claude_executor(self, field):
         return self.executor_identity(field)["provider"] == "claude"
+
+    def row_covers(self, ex, complexity):
+        """Return whether an executor row covers *complexity* under today's bands."""
+        paired_claude = all(self.executors.get(eid) and self.executors[eid].enabled
+                            for eid in ("claude:sonnet", "claude:opus"))
+        if paired_claude and ex.id == "claude:sonnet":
+            return ex.complexity_min <= complexity <= self.claude_split()
+        if paired_claude and ex.id == "claude:opus":
+            return self.claude_split() < complexity <= ex.complexity_max
+        return ex.complexity_min <= complexity <= ex.complexity_max
+
+    def claude_has_headroom(self):
+        """Return whether at least one Claude account can execute."""
+        return self.pick("execute") is not None
 
     # persistence -------------------------------------------------------------------------------
     def _load(self):
@@ -603,7 +656,7 @@ class Pool:
         for ex in self.executors.values():
             if not ex.enabled or role not in ex.roles or ex.cooling():
                 continue
-            if not ex.complexity_min <= complexity <= ex.complexity_max:
+            if not self.row_covers(ex, complexity):
                 continue
             ex.roll_day()
             if ex.running >= ex.max_parallel:
@@ -612,7 +665,7 @@ class Pool:
                 continue
             if ex.provider == "claude":
                 if claude_headroom is None:
-                    claude_headroom = self.pick("execute") is not None
+                    claude_headroom = self.claude_has_headroom()
                 if not claude_headroom:
                     continue
             ok.append(ex)
@@ -699,7 +752,7 @@ class Pool:
                                "expected_cost": self._expected_costs(e.id)} for e in self.executors.values()],
                 "codex": {"available": avail, "running": legacy.running, "day_tasks": legacy.day_tasks,
                           "cooling_s": max(0, int(legacy.cooldown_until - time.time())),
-                          "on_exhausted": self.cfg["codex"]["on_exhausted"]}}
+                          "on_exhausted": self.cfg.get("codex", {}).get("on_exhausted", "hold")}}
 
     def _expected_costs(self, executor_id):
         from . import scorecard

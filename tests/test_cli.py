@@ -729,6 +729,8 @@ class Cli(unittest.TestCase):
     def test_pick_planner_model_flag(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
         pl = P.Pool()
+        # The live routing mode is an operator setting; the shadow line is checked with shadow pinned.
+        pl.cfg.setdefault("planner", {}).setdefault("routing", {})["mode"] = "shadow"
         legacy = io.StringIO()
         with mock.patch.object(cli, "Pool", return_value=pl), \
                 mock.patch.object(pl, "tally_planner"), \

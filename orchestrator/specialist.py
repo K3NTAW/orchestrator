@@ -15,7 +15,7 @@ TOOL_ALIASES = {
     **{name.removeprefix("mcp__bus__"): (name,)
        for name in tool_catalog.CATALOG if name.startswith("mcp__bus__")},
     **{name: (name,) for name in (
-        "spawn_scout", "spawn_review", "spawn_challenge", "spawn_spec_review", "codex",
+        "spawn_scout", "spawn_review", "spawn_challenge", "spawn_spec_review", "execute", "codex",
         "codex_reply", "merge", "status", "executor_fallback", "hold_account", "resume_account")},
 }
 

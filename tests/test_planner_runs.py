@@ -5,6 +5,7 @@ goals.identity_of are patched per test so nothing here spawns a real `claude` su
 state; every test gets its own sandbox for bus.STATE/TASKS/RUNS, handover.STATE/ROOT and planner_runs.STATE so
 plan.md, tasks and planner_runs.json never touch the shared TMP root other test files use."""
 import contextlib, io, json, os, sys, tempfile, time, unittest
+from unittest import mock
 from datetime import date
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_planner_runs.py` doesn't add this dir itself
@@ -183,7 +184,7 @@ class DecisionPoints(PlannerRunsBase):
 
         time.sleep(0.01)
         bus.update(tid, status="queued")
-        bus.update(tid, status="held", hold_reason="gate_red")
+        bus.update(tid, status="held", hold_reason="gate_red again")
         key2 = PR._held_key(bus.get(tid))
         self.assertNotEqual(key1, key2)
         self.assertIn((goal_id, "held", key2), list(PR.decision_points()))
@@ -283,7 +284,9 @@ class RunGuards(PlannerRunsBase):
         pool.cooldown(pool.get("A"), 600)
         pool.cooldown(pool.get("B"), 600)
 
-        r = PR.run(goal_id, "scouts_done", goal_id)
+        # The live [planner].account pin bypasses headroom by design; this guard is checked unpinned.
+        with mock.patch.object(P.Pool, "planner_pin", return_value=None):
+            r = PR.run(goal_id, "scouts_done", goal_id)
         self.assertFalse(r["launched"])
         self.assertEqual(r["reason"], "no account with headroom")
         self.assertEqual(calls, [])
@@ -539,21 +542,22 @@ class Reconcile(PlannerRunsBase):
         self.assertEqual(rec1["status"], "exited_early")
         self.assertEqual(rec1["attempts"], 1)
         self.assertEqual(notified, [])
-        self.assertIn((goal_id, "held", key), list(PR.decision_points()))  # not blocked yet
+        self.assertNotIn((goal_id, "held", key), list(PR.decision_points()))  # unchanged hold is suppressed
 
+        bus.update(tid, hold_reason="gate_red, retry requested")
         PR._record_running(goal_id, "held", key, {"pid": 223, "pid_start": None, "log": "y"}, "A", rec1["attempts"])
         PR.reconcile()
         rec2 = self.record(goal_id, "held", key)
         self.assertEqual(rec2["status"], "gave_up")
         self.assertEqual(rec2["attempts"], 2)
-        self.assertEqual(len(notified), 1)
+        self.assertEqual(len(notified), 2)
 
         # gave_up blocks forever, even though the task is still held exactly the same way.
         self.assertNotIn((goal_id, "held", key), list(PR.decision_points()))
         PR.reconcile()  # idempotent: no further transition, no second notify
         rec3 = self.record(goal_id, "held", key)
         self.assertEqual(rec3["status"], "gave_up")
-        self.assertEqual(len(notified), 1)
+        self.assertEqual(len(notified), 2)
 
     def test_reconcile_held_resolved_by_fix_round_task_depends_on(self):
         """A held task never leaves status "held" by itself -- the Planner clears a hold by writing a new task
@@ -1319,6 +1323,24 @@ class RoutedDecisions(PlannerRunsBase):
         PR._save_records(records)
         PR.tick(self.pool)
         self.assertEqual(len(self.launches), 1)
+
+    def test_unchanged_hold_fingerprint_never_relaunches(self):
+        goal = self.goal()
+        tid = self.held(goal, reason="gate_red")
+        PR.tick(self.pool)
+        records = PR._load_records()
+        records[0]["status"] = "exited_early"
+        PR._save_records(records)
+
+        bus.update(goal, pipeline={"unrelated_event": True})
+        self.assertNotIn((goal, "held", PR._held_key(bus.get(tid))), list(PR.decision_points()))
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 1)
+
+        bus.update(tid, hold_reason="gate_red, retry requested")
+        self.assertIn((goal, "held", PR._held_key(bus.get(tid))), list(PR.decision_points()))
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 2)
 
     def test_two_goals_two_launches(self):
         for _ in range(2):

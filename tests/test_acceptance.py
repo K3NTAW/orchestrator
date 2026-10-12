@@ -6,10 +6,41 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import TMP  # noqa: F401  (sets ORCH_ROOT before the orchestrator import below)
 
-from orchestrator.acceptance import missing_tests, named_tests
+from orchestrator.acceptance import missing_test_files, missing_tests, named_tests, test_file_paths
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_missing_test_files_requires_test_paths_in_diff(self):
+        acceptance = [
+            "backend/test/oauth.test.ts, web/src/a.spec.ts, apple/AppTests/FooTests.swift,",
+            "android/app/src/test/BarTest.kt and tests/test_x.py (bare, no ::)",
+            "tests/test_x.py::test_y .claude/hooks/tests-green.sh globs/* directories/",
+        ]
+        self.assertEqual(test_file_paths(acceptance), sorted([
+            "android/app/src/test/BarTest.kt",
+            "apple/AppTests/FooTests.swift",
+            "backend/test/oauth.test.ts",
+            "tests/test_x.py",
+            "web/src/a.spec.ts",
+        ]))
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            (root / "web/src").mkdir(parents=True)
+            (root / "web/src/a.spec.ts").write_text("test")
+            (root / "tests").mkdir()
+            (root / "tests/test_x.py").write_text("def test_x(): pass\n")
+            self.assertEqual(missing_test_files(root, acceptance, ["tests/test_x.py"]), [
+                "android/app/src/test/BarTest.kt",
+                "apple/AppTests/FooTests.swift",
+                "backend/test/oauth.test.ts",
+                "web/src/a.spec.ts",
+            ])
+            self.assertEqual(missing_test_files(root, acceptance), [
+                "android/app/src/test/BarTest.kt",
+                "apple/AppTests/FooTests.swift",
+                "backend/test/oauth.test.ts",
+            ])
+
     def test_named_tests_parses_full_and_shorthand_ids(self):
         criteria = [
             "tests/test_one.py::test_first and ::test_second pass",

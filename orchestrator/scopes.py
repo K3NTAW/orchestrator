@@ -11,14 +11,22 @@ def matches(path, entries):
 
 
 
+def effective_scope(task):
+    """Return the task scope plus any explicitly granted paths."""
+    base = task["write_scope"] if "write_scope" in task else task.get("scope")
+    entries = list(base or [])
+    entries.extend((task.get("constraints") or {}).get("grant_scope") or [])
+    return list(dict.fromkeys(entries))
+
+
 def safe_scope(task, worktree=None):
     """Scope entries contained in the worktree, including resolved symlinks."""
     worktree = worktree or task.get("worktree")
     if not worktree:
-        return list(task.get("write_scope", task.get("scope", [])))
+        return effective_scope(task)
     root = Path(worktree).resolve()
     entries = []
-    for value in task.get("write_scope", task.get("scope", [])):
+    for value in effective_scope(task):
         entry = str(value)
         try:
             (root / entry).resolve().relative_to(root)

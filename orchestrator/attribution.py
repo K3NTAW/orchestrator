@@ -115,6 +115,22 @@ def model_of(executor_id, tier, pool_cfg):
     return pool_cfg.get("models", {}).get(tier)
 
 
+def executor_label(executor, tier, cfg):
+    """Return the stable scorecard/run label for an executor or legacy tier."""
+    from .pool import executor_rows
+
+    codex_ids = {row.get("id") for row in executor_rows(cfg or {}) if row.get("provider") == "codex"}
+    if executor:
+        if isinstance(executor, str) and executor.startswith("claude:"):
+            suffix = executor.split(":", 1)[1]
+            if suffix in codex_ids:
+                return suffix
+        return executor
+    if tier in codex_ids:
+        return tier
+    return f"claude:{tier}" if tier else None
+
+
 def band(complexity):
     if complexity is None:
         return None

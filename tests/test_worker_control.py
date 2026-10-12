@@ -116,6 +116,17 @@ class WorkerControl(unittest.TestCase):
         pool.assert_not_called()
         self.assertEqual(registry.get(self.tid)['status'], 'cancelling')
 
+    def test_post_if_current_single_lock_entry(self):
+        payload = {"summary": "derived", "commit": "abc", "derived_from": "git_state"}
+        self.assertTrue(control.post_if_current(self.tid, 1, "done", payload))
+        self.assertEqual(bus.get(self.tid)["status"], "done")
+        self.assertEqual(registry.get(self.tid)["status_reason"], "derived_done")
+
+    def test_cancel_or_steer_pending_matrix(self):
+        self.assertFalse(control.cancel_or_steer_pending(self.tid, 1))
+        registry.upsert(self.tid, status="cancelling")
+        self.assertTrue(control.cancel_or_steer_pending(self.tid, 1))
+
 
 class Steering(unittest.TestCase):
     def setUp(self):
