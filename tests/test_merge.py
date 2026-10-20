@@ -173,6 +173,52 @@ class MergeQueue(unittest.TestCase):
             return ["upstream insertion\n", *lines]
         result = self.reviewed_same_file_rebase(insert_at_top)
         self.assertEqual(result["status"], "merged", result)
+        self.assertEqual(result["rebase"], "ran", result)
+
+    def test_task_tip_merging_target_skips_rebase(self):
+        """Task tip is a merge of the target with a hand-resolved conflict: rebasing would flatten the merge and
+        replay the conflict, so merge() skips the rebase and fast-forwards the target to the merge commit."""
+        with tempfile.TemporaryDirectory(prefix="orch-ancestor-merge-") as directory:
+            repo = Path(directory)
+            scratch_repo(repo)
+            state = repo / ".orchestrator"
+            state.mkdir(exist_ok=True)
+            def git(*args, cwd=repo, check=True):
+                result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+                if check:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+            with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                    patch.multiple(merge, ROOT=repo, git=git):
+                (repo / "f.txt").write_text("base\n")
+                git("add", "f.txt")
+                git("commit", "-qm", "f baseline")
+                git("branch", "goal/anc")
+                wt = repo / "task-worktree"
+                git("worktree", "add", "-b", "task/anc", str(wt), "HEAD")
+                git("checkout", "-q", "goal/anc")
+                (repo / "f.txt").write_text("target A\n")
+                git("commit", "-qam", "A: target edits f")
+                (wt / "f.txt").write_text("task B\n")
+                git("commit", "-qam", "B: task edits f", cwd=wt)
+                self.assertNotEqual(git("merge", "goal/anc", cwd=wt, check=False).returncode, 0)
+                (wt / "f.txt").write_text("resolved\n")
+                git("add", "f.txt", cwd=wt)
+                git("commit", "-qm", "M: merge goal/anc into task", cwd=wt)
+                tip = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+                task = bus.create_task("ancestor merge", "s", ["a"], ["f.txt"], role="execute", parent="anc")
+                bus.update(task["id"], worktree=str(wt))
+                gate = repo / "passing-gate.sh"
+                gate.write_text("#!/bin/sh\nexit 0\n")
+                gate.chmod(0o755)
+                with patch.object(merge, "TESTS_GREEN", gate), patch.object(bus, "commit_state"), \
+                        patch.object(merge.scorecard, "write"), patch.object(merge.scorecard, "build", return_value={}):
+                    result = merge.merge(task["id"], target="goal/anc", refresh_repomap=False)
+                self.assertEqual(result["status"], "merged", result)
+                self.assertEqual(result["rebase"], "skipped_ancestor", result)
+                self.assertEqual(git("rev-parse", "goal/anc").stdout.strip(), tip)
+                self.assertEqual(git("show", "goal/anc:f.txt").stdout, "resolved\n")
+                self.assertEqual(bus.get(task["id"])["pipeline"]["merge_gate"]["rebase"], "skipped_ancestor")
 
     def test_patch_content_change_after_rebase_holds(self):
         def duplicate_one_task_hunk(lines):
@@ -433,7 +479,7 @@ class MergeQueue(unittest.TestCase):
                         stored = bus.get(task["id"])
                         if fix:
                             self.assertEqual(result, {"status": "empty_merge", "target": "goal/empty",
-                                                      "sha": target_sha})
+                                                      "sha": target_sha, "rebase": "ran"})
                             gate.assert_not_called()
                             self.assertEqual((stored["status"], stored["hold_reason"]),
                                              ("held", "empty_merge: fix round added no commit"))
