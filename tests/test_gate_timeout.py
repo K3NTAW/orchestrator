@@ -125,7 +125,7 @@ class GateTimeoutTest(unittest.TestCase):
         with mock.patch.multiple(merge, ROOT=repo, TESTS_GREEN=script, git=git), \
                 mock.patch.object(gate.pool, "config", return_value=pool.cfg):
             result = merge.merge(tid, target="goal/timeout", refresh_repomap=False)
-        self.assertEqual(result, {"status": "gate_timeout", "reason": "gate_timeout"})
+        self.assertEqual(result, {"status": "gate_timeout", "reason": "gate_timeout", "rebase": "skipped_ancestor"})
         self.assertEqual(_harness.g("rev-parse", "goal/timeout", cwd=repo, check=True).stdout, before)
         task = bus.get(tid)
         self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_timeout"))
