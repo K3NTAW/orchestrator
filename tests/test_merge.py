@@ -424,10 +424,11 @@ class MergeQueue(unittest.TestCase):
                         self.assertEqual(result["gate"], "reused_green")
                         self.assertEqual(stored["pipeline"]["merge_gate"],
                                          {"mode": "reused_green", "gated_target_sha": target_sha,
-                                          "gated_head": head_sha})
+                                          "gated_head": head_sha, "rebase": "skipped_ancestor"})
                     else:
                         gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"])
-                        self.assertEqual(stored["pipeline"]["merge_gate"], {"mode": "ran"})
+                        self.assertEqual(stored["pipeline"]["merge_gate"],
+                                         {"mode": "ran", "rebase": "skipped_ancestor"})
                         self.assertNotIn("gate", result)
                     if case in ("red", "timeout"):
                         self.assertFalse(stored.get("merged_into"))
