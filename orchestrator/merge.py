@@ -41,26 +41,33 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             reason = "diff_unavailable: git diff --binary or git patch-id --stable failed before rebase"
             bus.update(task_id, status="failed", reason=reason)
             return {"status": "failed", "reason": reason}
-        r = git("rebase", target, cwd=wt, check=False)
-        if r.returncode:
+        # A task tip that already contains the target (e.g. the executor merged the goal in and hand-resolved
+        # conflicts) fast-forwards as is; rebasing would flatten that merge and replay the conflicts.
+        if git("merge-base", "--is-ancestor", target, "HEAD", cwd=wt, check=False).returncode == 0:
+            rebase_mode = "skipped_ancestor"
+            r = None
+        else:
+            rebase_mode = "ran"
+            r = git("rebase", target, cwd=wt, check=False)
+        if r is not None and r.returncode:
             conflicts = git("diff", "--name-only", "--diff-filter=U", cwd=wt, check=False).stdout.split()
             hunks = git("diff", "--", *conflicts, cwd=wt, check=False).stdout[:20000]
             git("rebase", "--abort", cwd=wt, check=False)
             bus.update(task_id, status="failed", reason="rebase_conflict", resume_hint={"conflicts": conflicts, "hunks": hunks})
-            return {"status": "conflict", "files": conflicts, "hunks": hunks}
+            return {"status": "conflict", "files": conflicts, "hunks": hunks, "rebase": rebase_mode}
         after_diff = _diff_hash(target, wt) if reviewed else None
         if reviewed and after_diff is None:
             reason = "diff_unavailable: git diff --binary or git patch-id --stable failed after rebase"
             bus.update(task_id, status="failed", reason=reason)
-            return {"status": "failed", "reason": reason}
+            return {"status": "failed", "reason": reason, "rebase": rebase_mode}
         if reviewed and before_diff != after_diff:
-            return {"status": "rebase_changed_diff"}
+            return {"status": "rebase_changed_diff", "rebase": rebase_mode}
         if (t.get("constraints") or {}).get("fix_round_for"):
             ahead = git("rev-list", "--count", f"{target}..HEAD", cwd=wt, check=False)
             if ahead.returncode == 0 and ahead.stdout.strip() == "0":
                 sha = git("rev-parse", target).stdout.strip()
                 bus.update(task_id, status="held", hold_reason="empty_merge: fix round added no commit")
-                return {"status": "empty_merge", "target": target, "sha": sha}
+                return {"status": "empty_merge", "target": target, "sha": sha, "rebase": rebase_mode}
         pipeline = t.get("pipeline") or {}
         gated_target_sha = pipeline.get("gated_target_sha")
         gated_head = pipeline.get("gated_head")
@@ -75,10 +82,10 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         if can_reuse:
             result = {"returncode": 0, "timed_out": False, "stdout": "", "stderr": ""}
             gate_mode = {"mode": "reused_green", "gated_target_sha": gated_target_sha,
-                         "gated_head": gated_head}
+                         "gated_head": gated_head, "rebase": rebase_mode}
         else:
             result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)
-            gate_mode = {"mode": "ran"}
+            gate_mode = {"mode": "ran", "rebase": rebase_mode}
         with bus.locked():
             pipeline = dict(bus.get(task_id).get("pipeline") or {})
             pipeline["merge_gate"] = gate_mode
@@ -87,18 +94,19 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             bus.update(task_id, status="held", hold_reason="gate_timeout",
                        pipeline={**pipeline, "infra_failure": "gate_timeout"},
                        resume_hint={"output_tail": (result["stdout"] + result["stderr"])[-4000:]})
-            return {"status": "gate_timeout", "reason": "gate_timeout"}
+            return {"status": "gate_timeout", "reason": "gate_timeout", "rebase": rebase_mode}
         if result["returncode"]:
             bus.update(task_id, status="failed", reason="tests_red",
                        resume_hint={"failures": result["stderr"][-4000:]})
-            return {"status": "tests_red", "failures": result["stderr"][-4000:]}
-        # fast-forward target without checking it out: safe because the task branch was just rebased onto it.
+            return {"status": "tests_red", "failures": result["stderr"][-4000:], "rebase": rebase_mode}
+        # fast-forward target without checking it out: safe because the task branch was just rebased onto it
+        # (or already contained it, rebase_mode == "skipped_ancestor").
         # Exception: ROOT (the main checkout) has target checked out -> `git merge --ff-only` there instead, so
         # its HEAD, index and working tree move together (update-ref alone would leave them stale, see 2026-09-18).
         sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
         previous_sha = git("rev-parse", target).stdout.strip()
         checked_out = git("symbolic-ref", "-q", "HEAD", cwd=ROOT, check=False).stdout.strip() == f"refs/heads/{target}"
-        result = {"status": "merged", "target": target, "sha": sha}
+        result = {"status": "merged", "target": target, "sha": sha, "rebase": rebase_mode}
         if gate_mode["mode"] == "reused_green":
             result["gate"] = "reused_green"
         if checked_out:
@@ -108,7 +116,7 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             else:
                 ff = git("update-ref", f"refs/heads/{target}", sha, git("rev-parse", target).stdout.strip(), check=False)
                 if ff.returncode:
-                    return {"status": "failed", "reason": ff.stderr}
+                    return {"status": "failed", "reason": ff.stderr, "rebase": rebase_mode}
                 result["checkout_synced"] = False
                 result["checkout_stale"] = True
                 result["checkout_stale_error"] = mff.stderr[:500]
@@ -116,7 +124,7 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         else:
             ff = git("update-ref", f"refs/heads/{target}", sha, git("rev-parse", target).stdout.strip(), check=False)
             if ff.returncode:
-                return {"status": "failed", "reason": ff.stderr}
+                return {"status": "failed", "reason": ff.stderr, "rebase": rebase_mode}
             result["checkout_synced"] = False
         try:
             changed = git("diff", "--name-only", previous_sha, sha, "--", "orchestrator", check=False).stdout.splitlines()
