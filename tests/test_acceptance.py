@@ -69,6 +69,28 @@ class AcceptanceTests(unittest.TestCase):
                     self.assertEqual(missing, ["backend/test/oauth.test.ts"])
                     self.assertEqual(missing[0].reason, "absent")
 
+    def test_missing_test_files_add_verb_in_other_clause_needs_no_diff(self):
+        acceptance = ["cargo test passes crates/gateway/tests/oidc_flow.rs; "
+                      "new workspace dependencies are limited to uuid 1.x"]
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            (root / "crates/gateway/tests").mkdir(parents=True)
+            (root / "crates/gateway/tests/oidc_flow.rs").write_text("test")
+            self.assertEqual(missing_test_files(root, acceptance, []), [])
+
+    def test_missing_test_files_unchanged_marker_exempts_named_file(self):
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            (root / "backend/test").mkdir(parents=True)
+            (root / "backend/test/old.test.ts").write_text("test")
+            (root / "backend/test/new.test.ts").write_text("test")
+            self.assertEqual(missing_test_files(
+                root, ["adds refresh and keeps backend/test/old.test.ts unchanged"], []), [])
+            missing = missing_test_files(
+                root, ["adds backend/test/new.test.ts and keeps backend/test/old.test.ts unchanged"], [])
+            self.assertEqual(missing, ["backend/test/new.test.ts"])
+            self.assertEqual(missing[0].reason, "not_in_diff")
+
     def test_named_tests_parses_full_and_shorthand_ids(self):
         criteria = [
             "tests/test_one.py::test_first and ::test_second pass",

@@ -55,6 +55,46 @@ _ADD_VERB = re.compile(
 )
 
 
+_CLAUSE_SPLIT = re.compile(r";|\.(?=\s+[A-Z]|\s*$)")
+
+_UNCHANGED_AFTER = re.compile(
+    r"\b(?:unchanged|untouched|not\s+modified|not\s+changed|stays?|remains?)\b",
+    re.IGNORECASE,
+)
+
+_UNCHANGED_BEFORE = re.compile(r"\bno\s+changes?\s+to\b", re.IGNORECASE)
+
+_GROUP_SEPARATOR = re.compile(r"^(?:\s|,|\band\b|\bor\b)*$", re.IGNORECASE)
+
+
+def _paths_needing_diff(clause):
+    """Return test files named in one clause, minus those asserted unchanged.
+
+    Adjacent files joined only by commas, 'and' or 'or' form a group; a group is
+    exempt when the text after it (up to the next file) carries an unchanged
+    marker, or the text before it carries 'no change(s) to'."""
+    hits = []
+    for match in re.finditer(r"\S+", clause):
+        found = test_file_paths([match.group()])
+        if found:
+            hits.append((match.start(), match.end(), found[0]))
+    groups = []
+    for start, end, path in hits:
+        if groups and _GROUP_SEPARATOR.match(clause[groups[-1]["end"]:start]):
+            groups[-1]["paths"].append(path)
+            groups[-1]["end"] = end
+        else:
+            groups.append({"start": start, "end": end, "paths": [path]})
+    result = set()
+    for index, group in enumerate(groups):
+        before = clause[groups[index - 1]["end"] if index else 0:group["start"]]
+        after = clause[group["end"]:groups[index + 1]["start"] if index + 1 < len(groups) else len(clause)]
+        if _UNCHANGED_AFTER.search(after) or _UNCHANGED_BEFORE.search(before):
+            continue
+        result.update(group["paths"])
+    return result
+
+
 class MissingTestFile(str):
     """A missing test file path that also says why: absent or not_in_diff."""
 
@@ -66,13 +106,17 @@ class MissingTestFile(str):
 
 def missing_test_files(worktree, acceptance, changed=None):
     """Return named test files absent from the worktree, or absent from the task diff
-    when a criterion naming them asks to add or change tests."""
+    when the clause naming them asks to add or change tests and does not assert
+    them unchanged."""
     root = Path(worktree)
     changed_set = set(changed) if isinstance(changed, list) else None
     needs_diff = set()
     for criterion in acceptance or []:
-        if isinstance(criterion, str) and _ADD_VERB.search(criterion):
-            needs_diff.update(test_file_paths([criterion]))
+        if not isinstance(criterion, str):
+            continue
+        for clause in _CLAUSE_SPLIT.split(criterion):
+            if _ADD_VERB.search(clause):
+                needs_diff.update(_paths_needing_diff(clause))
     missing = []
     for path in test_file_paths(acceptance):
         if not (root / path).is_file():
