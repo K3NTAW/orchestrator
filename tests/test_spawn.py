@@ -2661,7 +2661,7 @@ class DisclosureCachePresentation(unittest.TestCase):
         task = {"id": "cache-tools", "title": "Example", "role": "execute", "scope": [], "acceptance": []}
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}), \
-             mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="example")), \
+             mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="example", returncode=0)), \
              mock.patch.object(spawn, "_shadow_route", return_value={}), \
              mock.patch.object(decision_log, "record") as record, \
              mock.patch.object(decision_log, "last_row", return_value=None):
