@@ -155,6 +155,12 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
     normalized_dep = fix_round_for if fix_round_for in deps else None
     if normalized_dep:
         deps = [dep for dep in deps if dep != normalized_dep]
+    respec_for = (constraints or {}).get("respec_for")
+    if respec_for:
+        try:
+            get(respec_for)
+        except KeyError:
+            raise ValueError(f"respec_for references unknown task: {respec_for}")
     t = {"id": tid, "created_at": time.time(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
          "depends_on": deps,
@@ -165,7 +171,41 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
         _event(t["id"], "depends_on_resolved", resolved)
     if normalized_dep:
         _event(t["id"], "depends_on_normalized", {"dropped": normalized_dep})
+    if respec_for:
+        _supersede_for_respec(respec_for, tid)
     return t
+
+
+def _dispatched(t):
+    return bool(t.get("claimed_at") or t.get("worktree") or t.get("pipeline", {}).get("dispatched_at") is not None)
+
+
+def _supersede_for_respec(old_id, new_id):
+    """A revised spec replaces a held or queued, never-dispatched task: the old task becomes superseded and its
+    queued, undispatched dependents follow the revision. Any other old status keeps only the respec link on new_id."""
+    with locked():
+        old = get(old_id)
+        if old.get("status") not in ("held", "queued") or _dispatched(old):
+            return
+        repointed = []
+        for dependent in read():
+            deps = dependent.get("depends_on", [])
+            if (dependent["id"] in (old_id, new_id) or old_id not in deps
+                    or dependent.get("status") != "queued" or _dispatched(dependent)):
+                continue
+            new_deps = []
+            for dep in deps:
+                dep = new_id if dep == old_id else dep
+                if dep not in new_deps:
+                    new_deps.append(dep)
+            dependent["depends_on"] = new_deps
+            _save(dependent)
+            repointed.append(dependent["id"])
+        old["status"] = "superseded"
+        old["superseded_by"] = new_id
+        old["hold_reason"] = None
+        _save(old)
+        _event(old_id, "respec_superseded", {"by": new_id, "repointed": repointed})
 
 
 def update(tid, **fields):

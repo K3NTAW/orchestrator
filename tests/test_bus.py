@@ -127,6 +127,46 @@ class Bus(BusSandbox):
         bus._save(task)
         self.assertNotIn("created_at", bus.get(task["id"]))
 
+    def test_respec_for_supersedes_held_task_and_repoints_dependents(self):
+        x = bus.create_task("X", "s", ["ok"], ["x.py"], role="execute")
+        bus.update(x["id"], status="held", hold_reason="spec_review")
+        a = bus.create_task("A", "s", ["ok"], ["a.py"], role="execute", depends_on=[x["id"]])
+        landing = bus.create_task("L", "s", ["ok"], ["l.py"], role="execute", depends_on=[x["id"], a["id"]])
+        n = bus.create_task("X rev 2", "s", ["ok"], ["x.py"], role="execute", constraints={"respec_for": x["id"]})
+        old = bus.get(x["id"])
+        self.assertEqual(old["status"], "superseded")
+        self.assertEqual(old["superseded_by"], n["id"])
+        self.assertIsNone(old["hold_reason"])
+        self.assertEqual(bus.get(a["id"])["depends_on"], [n["id"]])
+        self.assertEqual(bus.get(landing["id"])["depends_on"], [n["id"], a["id"]])
+        rows = bus.db().execute("select task_id, data from events where kind='respec_superseded'").fetchall()
+        self.assertEqual([(r[0], json.loads(r[1])) for r in rows],
+                         [(x["id"], {"by": n["id"], "repointed": [a["id"], landing["id"]]})])
+
+    def test_respec_for_leaves_dispatched_dependents_alone(self):
+        x = bus.create_task("X", "s", ["ok"], ["x.py"], role="execute")
+        bus.update(x["id"], status="held")
+        a = bus.create_task("A", "s", ["ok"], ["a.py"], role="execute", depends_on=[x["id"]])
+        bus.update(a["id"], claimed_at=time.time())
+        n = bus.create_task("X rev 2", "s", ["ok"], ["x.py"], role="execute", constraints={"respec_for": x["id"]})
+        self.assertEqual(bus.get(x["id"])["superseded_by"], n["id"])
+        self.assertEqual(bus.get(a["id"])["depends_on"], [x["id"]])
+
+    def test_respec_for_running_task_changes_nothing(self):
+        x = bus.create_task("X", "s", ["ok"], ["x.py"], role="execute")
+        bus.claim(x["id"], "worker")
+        a = bus.create_task("A", "s", ["ok"], ["a.py"], role="execute", depends_on=[x["id"]])
+        n = bus.create_task("X rev 2", "s", ["ok"], ["x.py"], role="execute", constraints={"respec_for": x["id"]})
+        old = bus.get(x["id"])
+        self.assertEqual(old["status"], "running")
+        self.assertNotIn("superseded_by", old)
+        self.assertEqual(bus.get(a["id"])["depends_on"], [x["id"]])
+        self.assertEqual(n["constraints"]["respec_for"], x["id"])
+
+    def test_respec_for_unknown_id_raises(self):
+        with self.assertRaises(ValueError):
+            bus.create_task("rev", "s", ["ok"], ["x.py"], role="execute", constraints={"respec_for": "T-9999"})
+
     def written_row(self, **fields):
         bus.log_run(**fields)
         return json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
