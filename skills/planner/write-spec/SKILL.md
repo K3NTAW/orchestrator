@@ -17,7 +17,7 @@ Splitting a synthesized plan into an atomic task.
 Create one independently verifiable execute-task spec.
 
 ## Procedure
-Title verb+object; what/why ≤12 lines citing `path:line`. Acceptance: 2–5 observable checks; tests `tests/test_<module>.py::test_name` (unittest.TestCase unless pytest). Declare disjoint Scope, read_scope, interface_contract, task_class (mechanical/unfamiliar/debugging/architectural/security), route (straightforward/full), read_only=false, timeout_s, budget_turns, dependencies. Complexity ≥5: spec review. Warn >5 files; split by behavior/dependency. Test paths resolve from repo root (`crates/<crate>/tests/x.rs`, never `tests/x.rs`); put unchanged assertions in their own criterion. Render `.orchestrator/prompts/execute.md`; `bus_create_task(role="execute", tier="astra", complexity=N, parent=GOAL_ID, ...)`. A revised spec that replaces a task held at spec review carries `constraints.respec_for` set to the held task's id, so its dependents follow the revision.
+Title verb+object; what/why ≤12 lines citing `path:line`. Acceptance: 2–5 checks; tests `tests/test_<module>.py::test_name` (unittest unless pytest). Declare disjoint Scope, read_scope, interface_contract, task_class (mechanical/unfamiliar/debugging/architectural/security), route (straightforward/full), read_only=false, timeout_s, budget_turns, dependencies. Complexity ≥5: spec review. Warn >5 files; split by behavior. Test paths from repo root; unchanged assertions get own criterion. Revising a task held at spec review: set `constraints.respec_for` to the held task id. Render `.orchestrator/prompts/execute.md`; `bus_create_task(role="execute", tier="astra", complexity=N, parent=GOAL_ID, ...)`.
 
 ## Tools
 Read; bus_create_task.
