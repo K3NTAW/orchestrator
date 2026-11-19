@@ -4286,6 +4286,7 @@ class Daemon(unittest.TestCase):
             for race in ("merged", "chain_changed"):
                 with self.subTest(race=race):
                     ancestor = self.task("race ancestor")
+                    bus.update(ancestor, claimed_at=time.time())
                     replacement = self.task("new ancestor")
                     fix = self.task("race fix", constraints={"fix_round_for": ancestor})
                     snapshots = {}
@@ -4309,6 +4310,7 @@ class Daemon(unittest.TestCase):
 
     def test_landed_uses_ancestry_cherry_then_merged_into(self):
         ancestor = self.task("ancestor")
+        bus.update(ancestor, claimed_at=time.time())
         cases = [
             ("ancestor", [(0, ""), (0, "")], False, True),
             ("rebased", [(0, ""), (1, ""), (0, "- one\n- two\n")], False, True),
@@ -4343,6 +4345,46 @@ class Daemon(unittest.TestCase):
                     return subprocess.CompletedProcess(args, reply[0], reply[1], "")
                 self.assertEqual(daemon.landed(ancestor, "goal/G", git=fake), expected)
                 self.assertEqual(calls, commands[:len(replies)])
+
+    def test_landed_true_for_never_dispatched_ancestor_without_branch(self):
+        def missing(root, *args):
+            return subprocess.CompletedProcess(args, 1, "", "")
+        held = self.task("held at spec review")
+        bus.update(held, status="held", hold_reason="spec_review")
+        queued = self.task("never claimed")
+        for tid in (held, queued):
+            with self.subTest(tid=tid):
+                self.assertTrue(daemon.landed(tid, "goal/G", git=missing))
+
+    def test_landed_false_for_dispatched_ancestor_without_branch_or_merge(self):
+        def missing(root, *args):
+            return subprocess.CompletedProcess(args, 1, "", "")
+        for name, fields in (
+            ("claimed", {"status": "held", "claimed_at": time.time()}),
+            ("worktree", {"status": "held", "worktree": str(TMP / "wt-gone")}),
+            ("dispatched", {"status": "queued", "pipeline": {"dispatched_at_done": time.time()}}),
+            ("failed", {"status": "failed"}),
+        ):
+            with self.subTest(name=name):
+                tid = self.task(name)
+                bus.update(tid, **fields)
+                self.assertFalse(daemon.landed(tid, "goal/G", git=missing))
+
+    def test_fix_round_merge_stamps_never_run_ancestor_done(self):
+        repo = scratch_repo(self.sandbox / "repo")
+        g("branch", "goal/G", cwd=repo, check=True)
+        sha = g("rev-parse", "goal/G", cwd=repo, check=True).stdout.strip()
+        with mock.patch.object(spawn, "ROOT", repo), mock.patch.object(daemon, "notify"):
+            ancestor = self.task("connector-files rev 2")
+            bus.update(ancestor, status="held", hold_reason="spec_review: changes requested")
+            fix = self.task("fix", constraints={"fix_round_for": ancestor})
+            daemon.report_merge(fix, {"status": "merged", "target": "goal/G", "sha": sha})
+        stamped = bus.get(ancestor)
+        self.assertEqual(stamped["status"], "done")
+        self.assertEqual(stamped["merged_into"], "goal/G")
+        self.assertEqual(stamped["merged_via"], f"fix round {fix} {sha}")
+        self.assertFalse(stamped.get("hold_reason"))
+        self.assertEqual(bus.get(fix)["pipeline"]["ancestor_stamps"], {ancestor: "merged"})
 
     def test_reviews_merge_caller_keeps_existing_hold(self):
         for status, written_status, reason, expected in (
