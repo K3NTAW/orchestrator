@@ -124,7 +124,7 @@ def _prepare_skills(task, role, cfg):
             choice["mode"] = "shadow"
             notify.notify(f"{task['id']}: active skill routing refused; using shadow "
                           f"(role={role}, rows={rows}, recovery={recovery:.3f})")
-    choice.update(_skills_section(choice) if choice["mode"] == "active"
+    choice.update(_skills_section(choice, task["id"]) if choice["mode"] == "active"
                   else {"section": "", "presented": [], "demoted": [], "skill_tokens_presented_l2": 0})
     catalog = skill_router.catalog_block(role, _skill_records())
     choice["catalog_chars"] = len(catalog)
@@ -149,9 +149,29 @@ def _prepare_skills(task, role, cfg):
     return choice
 
 
-def _skills_section(choice):
-    selected = list(choice["selected"])
-    mandatory = set(choice.get("mandatory") or [])
+def _missing_skills(task_id, wanted):
+    """Sync the registry once when a wanted skill has no record; return ids still missing after it."""
+    records = _skill_records()
+    missing = [skill_id for skill_id in wanted if skill_id not in records]
+    if not missing:
+        return []
+    try:
+        skills_registry.sync()
+    except (OSError, ValueError) as exc:
+        notify.notify(f"{task_id}: skills registry sync failed: {exc}")
+        return missing
+    notify.notify(f"{task_id}: skills registry synced (missing {', '.join(missing)})")
+    records = _skill_records()
+    return [skill_id for skill_id in missing if skill_id not in records]
+
+
+def _skills_section(choice, task_id="(unknown)"):
+    wanted = list(dict.fromkeys(list(choice["selected"]) + list(choice.get("mandatory") or [])
+                                + list(choice.get("ambiguous") or [])))
+    missing = _missing_skills(task_id, wanted)
+    # A skill still missing after the sync is dropped, never raised: render_error holds are not retried.
+    selected = [item for item in choice["selected"] if item not in missing]
+    mandatory = set(choice.get("mandatory") or []) - set(missing)
     levels = {skill_id: 2 for skill_id in selected}
     dropped, demoted = [], []
     def l2_chars():
@@ -173,11 +193,11 @@ def _skills_section(choice):
     for skill_id in selected:
         version = _skill_records().get(skill_id, {}).get("version", "unknown")
         parts.append(f"### {skill_id} (v{version})\n{skills_registry.render(skill_id, levels[skill_id])}")
-    ambiguous = [item for item in choice.get("ambiguous", []) if item not in selected]
+    ambiguous = [item for item in choice.get("ambiguous", []) if item not in selected and item not in missing]
     if ambiguous:
         parts.append("### available on request\n" + "\n".join(skills_registry.render(item, 0) for item in ambiguous))
-    return {"section": "## skills\n" + "\n\n".join(parts), "presented": selected,
-            "demoted": demoted, "dropped": dropped,
+    return {"section": "## skills\n" + "\n\n".join(parts) if parts else "", "presented": selected,
+            "demoted": demoted, "dropped": dropped, "missing": missing,
             "skill_tokens_presented_l2": sum(len(skills_registry.render(item, 2)) // 4
                                                for item in selected if levels[item] == 2)}
 

@@ -2283,6 +2283,70 @@ class ContextTelemetry(unittest.TestCase):
         self.assertLessEqual(100, spawn._SKILL_PRESENTATION_CAP)
         self.assertIn("executor/extra", rendered["demoted"])
 
+    def _skills_sandbox(self, tmp, with_skill):
+        """Temporary STATE without a registry and a skills source; returns (sync mock, notify mock, patches)."""
+        from orchestrator import skills_registry
+        state, repo = Path(tmp) / "state", Path(tmp) / "repo"
+        state.mkdir()
+        (repo / "skills").mkdir(parents=True)
+        if with_skill:
+            skill = repo / "skills" / "executor" / "implement-spec"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: implement-spec\ndescription: Implement one spec.\n---\n"
+                                            "# Implement spec\n\n## Procedure\nDo the spec.\n")
+        real_load, real_sync, real_render = skills_registry.load, skills_registry.sync, skills_registry.render
+        sync = mock.Mock(side_effect=lambda: real_sync(state, repo / "skills"))
+        notify = mock.Mock()
+        patches = [mock.patch.object(skills_registry, "REPO", repo),
+                   mock.patch.object(skills_registry, "load", side_effect=lambda root=None: real_load(state)),
+                   mock.patch.object(skills_registry, "sync", sync),
+                   mock.patch.object(skills_registry, "render",
+                                     side_effect=lambda skill_id, level, root=None: real_render(skill_id, level, state)),
+                   mock.patch.object(spawn.notify, "notify", notify)]
+        return sync, notify, patches
+
+    def _with(self, patches, fn):
+        for patch in patches:
+            patch.start()
+        try:
+            return fn()
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+
+    def test_skills_section_syncs_missing_registry_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sync, notify, patches = self._skills_sandbox(tmp, with_skill=True)
+            first = self._with(patches, lambda: spawn._skills_section(self._active_choice(), "T-0089"))
+            second = self._with(patches, lambda: spawn._skills_section(self._active_choice(), "T-0089"))
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(first["presented"], ["executor/implement-spec"])
+        self.assertIn("### executor/implement-spec", first["section"])
+        self.assertIn("Do the spec.", first["section"])
+        self.assertEqual(first["missing"], [])
+        self.assertEqual(second["presented"], ["executor/implement-spec"])
+        notify.assert_called_once_with("T-0089: skills registry synced (missing executor/implement-spec)")
+
+    def test_skills_section_missing_skill_after_sync_degrades(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sync, _, patches = self._skills_sandbox(tmp, with_skill=False)
+            rendered = self._with(patches, lambda: spawn._skills_section(self._active_choice(), "T-0089"))
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(rendered["missing"], ["executor/implement-spec"])
+        self.assertEqual(rendered["presented"], [])
+        self.assertNotIn("executor/implement-spec", rendered["section"])
+
+    def test_skills_section_unchanged_when_registry_complete(self):
+        records = {"executor/implement-spec": {"version": "1"}}
+        with mock.patch.object(spawn.skills_registry, "sync") as sync, \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.skills_registry, "render", side_effect=lambda skill, level: f"L{level}:{skill}"):
+            rendered = spawn._skills_section(self._active_choice(), "T-0089")
+        sync.assert_not_called()
+        self.assertEqual(rendered["missing"], [])
+        self.assertEqual(rendered["presented"], ["executor/implement-spec"])
+        self.assertIn("### executor/implement-spec (v1)\nL2:executor/implement-spec", rendered["section"])
+
     def test_active_refused_without_shadow_evidence_or_with_high_recovery(self):
         cfg = {"skills": {"mode": "active", "max_recovery": .1}}
         with mock.patch.object(spawn.skill_router, "select", return_value=self._active_choice()), \
