@@ -211,12 +211,35 @@ def _is_failed_key(payload_key):
 
 
 def _superseded(t, all_tasks):
-    """A failed task some live task already handles (fix round, respec) or one marked superseded_by."""
+    """A failed task some live task already handles (fix round, respec), one marked superseded_by, or a failed
+    fix round / respec whose work landed anyway: its fix_round_for / respec_for target carries merged_into, or a
+    sibling with the same fix_round_for / respec_for value is done with merged_into."""
     if t.get("superseded_by"):
         return True
-    return any(x.get("status") != "failed" and x["id"] != t["id"] and t["id"] in (
-        (x.get("constraints") or {}).get("fix_round_for"), (x.get("constraints") or {}).get("respec_for"))
-        for x in all_tasks)
+    if any(x.get("status") != "failed" and x["id"] != t["id"] and t["id"] in (
+            (x.get("constraints") or {}).get("fix_round_for"), (x.get("constraints") or {}).get("respec_for"))
+           for x in all_tasks):
+        return True
+    if t.get("status") != "failed":
+        return False
+    constraints = t.get("constraints") or {}
+    for field in ("fix_round_for", "respec_for"):
+        target = constraints.get(field)
+        if not target:
+            continue
+        if any(x["id"] == target and x.get("merged_into") for x in all_tasks):
+            return True
+        if any(x["id"] != t["id"] and x.get("status") == "done" and x.get("merged_into")
+               and (x.get("constraints") or {}).get(field) == target for x in all_tasks):
+            return True
+    return False
+
+
+def _close_blockers(executes, all_tasks):
+    """Execute children that keep a goal from closing: not superseded (by status or by _superseded) and not
+    merged. A failed fix round whose sibling or target landed does not block."""
+    return [c for c in executes
+            if c["status"] != "superseded" and not c.get("merged_into") and not _superseded(c, all_tasks)]
 
 
 def _worktree_note(t):
@@ -453,12 +476,18 @@ def decision_points():
                 yield goal_id, "held", key
 
         # A superseded execute child (e.g. a re-gate round whose target merged another way) never merges; it must
-        # not hold the goal open. failed still blocks so a real failure reaches the Planner.
-        live = [c for c in executes if c["status"] != "superseded"]
-        if live and all(c.get("merged_into") for c in live) and \
-                not any(ch["status"] in ("queued", "running") for ch in children):
+        # not hold the goal open, nor must a failed round whose sibling or target landed. Any other failure still
+        # blocks so it reaches the Planner.
+        blockers = _close_blockers(executes, all_tasks)
+        merged = any(c.get("merged_into") for c in executes)
+        active = any(ch["status"] in ("queued", "running") for ch in children)
+        if merged and not blockers and not active:
             if not _blocked(goal_id, "closable", goal_id, records):
                 yield goal_id, "closable", goal_id
+        elif merged and blockers and not active and all(c["status"] in ("failed", "held") for c in blockers):
+            ids = ",".join(c["id"] for c in blockers)
+            notify.notify_once(goal_id, f"close_blocked:{ids}", f"{goal_id}: close blocked by " +
+                               ", ".join(f"{c['id']} ({c['status']})" for c in blockers))
 
     yield from _next_goal_points(all_tasks, records)
 
@@ -1341,7 +1370,7 @@ def build_ctx(point, pool=None):
                    open_goals=_open_goals(bus.read(), exclude=goal["id"]))
     elif point["kind"] == "closable":
         executes = [t for t in children if t["role"] == "execute"]
-        ctx.update(all_children_merged=bool(executes) and all(t["status"] == "done" and t.get("merged_into") for t in executes),
+        ctx.update(all_children_merged=any(t.get("merged_into") for t in executes) and not _close_blockers(executes, children),
                    gate_state=_gate_state(goal, children))
     return ctx
 

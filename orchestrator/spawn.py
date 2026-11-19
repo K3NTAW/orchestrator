@@ -124,7 +124,7 @@ def _prepare_skills(task, role, cfg):
             choice["mode"] = "shadow"
             notify.notify(f"{task['id']}: active skill routing refused; using shadow "
                           f"(role={role}, rows={rows}, recovery={recovery:.3f})")
-    choice.update(_skills_section(choice) if choice["mode"] == "active"
+    choice.update(_skills_section(choice, task["id"]) if choice["mode"] == "active"
                   else {"section": "", "presented": [], "demoted": [], "skill_tokens_presented_l2": 0})
     catalog = skill_router.catalog_block(role, _skill_records())
     choice["catalog_chars"] = len(catalog)
@@ -149,9 +149,29 @@ def _prepare_skills(task, role, cfg):
     return choice
 
 
-def _skills_section(choice):
-    selected = list(choice["selected"])
-    mandatory = set(choice.get("mandatory") or [])
+def _missing_skills(task_id, wanted):
+    """Sync the registry once when a wanted skill has no record; return ids still missing after it."""
+    records = _skill_records()
+    missing = [skill_id for skill_id in wanted if skill_id not in records]
+    if not missing:
+        return []
+    try:
+        skills_registry.sync()
+    except (OSError, ValueError, KeyError) as exc:
+        notify.notify(f"{task_id}: skills registry sync failed: {exc}")
+        return missing
+    notify.notify(f"{task_id}: skills registry synced (missing {', '.join(missing)})")
+    records = _skill_records()
+    return [skill_id for skill_id in missing if skill_id not in records]
+
+
+def _skills_section(choice, task_id="(unknown)"):
+    wanted = list(dict.fromkeys(list(choice["selected"]) + list(choice.get("mandatory") or [])
+                                + list(choice.get("ambiguous") or [])))
+    missing = _missing_skills(task_id, wanted)
+    # A skill still missing after the sync is dropped, never raised: render_error holds are not retried.
+    selected = [item for item in choice["selected"] if item not in missing]
+    mandatory = set(choice.get("mandatory") or []) - set(missing)
     levels = {skill_id: 2 for skill_id in selected}
     dropped, demoted = [], []
     def l2_chars():
@@ -173,11 +193,11 @@ def _skills_section(choice):
     for skill_id in selected:
         version = _skill_records().get(skill_id, {}).get("version", "unknown")
         parts.append(f"### {skill_id} (v{version})\n{skills_registry.render(skill_id, levels[skill_id])}")
-    ambiguous = [item for item in choice.get("ambiguous", []) if item not in selected]
+    ambiguous = [item for item in choice.get("ambiguous", []) if item not in selected and item not in missing]
     if ambiguous:
         parts.append("### available on request\n" + "\n".join(skills_registry.render(item, 0) for item in ambiguous))
-    return {"section": "## skills\n" + "\n\n".join(parts), "presented": selected,
-            "demoted": demoted, "dropped": dropped,
+    return {"section": "## skills\n" + "\n\n".join(parts) if parts else "", "presented": selected,
+            "demoted": demoted, "dropped": dropped, "missing": missing,
             "skill_tokens_presented_l2": sum(len(skills_registry.render(item, 2)) // 4
                                                for item in selected if levels[item] == 2)}
 
@@ -278,6 +298,22 @@ def branch_exists(name):
     return git("rev-parse", "--verify", name, check=False).returncode == 0
 
 
+def trunk_ref(cwd=ROOT):
+    """origin/main when it verifies, else local main, else the root repo's HEAD sha. A repo with no remote
+    (Atelier) has no origin/main, and diffing against it failed silently into an empty review diff."""
+    for ref in ("origin/main", "main"):
+        # A stubbed git result without returncode keeps the historical origin/main answer.
+        if getattr(git("rev-parse", "--verify", "--quiet", ref, cwd=cwd, check=False), "returncode", 0) == 0:
+            return ref
+    return git("rev-parse", "HEAD", cwd=ROOT, check=False).stdout.strip() or "HEAD"
+
+
+def diff_unavailable(r):
+    """One-line cause for a failed git diff, so reviewers and logs never see a silent "(empty diff)"."""
+    first = next((line.strip() for line in (r.stderr or "").splitlines() if line.strip()), f"exit {r.returncode}")
+    return f"(diff unavailable: {first})"
+
+
 def base_choice(task):
     """Pick the base branch for a new worktree. review tasks whose inputs[0] is a task id: base on that task's
     own branch so the reviewer sees the code under review, not a worktree cut from origin/main before the
@@ -321,7 +357,7 @@ def base_choice(task):
             current_id = (src.get("constraints") or {}).get("fix_round_for")
     if role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
         return {"base": f"goal/{parent}", "via": "goal", "chain": chain}
-    return {"base": "origin/main", "via": "trunk", "chain": chain}
+    return {"base": trunk_ref(), "via": "trunk", "chain": chain}
 
 
 def base_for(task):
@@ -368,7 +404,7 @@ def render(name, *, task=None, signals=None, **kw):
     if name in ("review", "spec-review", "scout") and "packet" not in kw:
         raise ValueError(f"packet is required for {name}")
     if name == "scout":
-        kw.setdefault("base_branch", "origin/main")
+        kw.setdefault("base_branch", trunk_ref())
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
     legacy_template = t
@@ -458,6 +494,8 @@ def bounded_text(text, cap_chars, expand_hint):
 def bounded_diff(diff_text, cap_chars=12000, expand_hint="git diff"):
     """Put a compact diffstat before bounded unified-diff hunks."""
     text = str(diff_text)
+    if text.startswith("(diff unavailable"):
+        return f"Diffstat: unavailable\n{text.splitlines()[0]}"
     files = additions = deletions = 0
     hunks = []
     current = []
@@ -771,7 +809,7 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
             tests.append(entry)
 
     parent = task.get("parent") or "(none)"
-    goal_branch = f"goal/{parent}" if task.get("parent") else "origin/main"
+    goal_branch = f"goal/{parent}" if task.get("parent") else trunk_ref(wt)
     branch = git("branch", "--show-current", cwd=wt, check=False).stdout.strip() or "(detached)"
     merge_base = git("merge-base", "HEAD", goal_branch, cwd=wt, check=False).stdout.strip()
     if not merge_base:
@@ -1136,9 +1174,9 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
                 paths = lineage_paths(fix_chain(src))
             except LookupError:
                 label = "lineage unresolved; reviewing the whole branch"
-        lineage_range = f"{base}..{lineage_head}" if base else f"origin/main...{lineage_head}"
-        raw_diff = git("diff", "-U3", "--no-renames", lineage_range, "--", *(paths or []),
-                       cwd=wt, check=False).stdout or "(empty diff)"
+        lineage_range = f"{base}..{lineage_head}" if base else f"{trunk_ref(wt)}...{lineage_head}"
+        r = git("diff", "-U3", "--no-renames", lineage_range, "--", *(paths or []), cwd=wt, check=False)
+        raw_diff = diff_unavailable(r) if r.returncode else r.stdout or "(empty diff)"
         hint = f"git -C {wt} diff {lineage_range}"
     else:
         raw_diff = scoped_diff(src)
@@ -1906,7 +1944,7 @@ def code_excerpts(scope, base_dir, cap=12000):
 
 def scoped_diff_base(src):
     parent = src.get("parent")
-    return f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+    return f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else trunk_ref(src.get("worktree") or ROOT)
 
 
 def scoped_diff(src):
@@ -1916,6 +1954,8 @@ def scoped_diff(src):
     wt = src.get("worktree") or ROOT
     base = scoped_diff_base(src)
     r = git("diff", "-U3", f"{base}...HEAD", "--", *effective_scope(src), cwd=wt, check=False)
+    if r.returncode:
+        return diff_unavailable(r)
     return r.stdout[:40000] or "(empty diff)"
 
 
@@ -1971,13 +2011,15 @@ def _fix_round_base(src):
     if fix_for and exists(f"task/{fix_for}"):
         return f"task/{fix_for}"
     parent = src.get("parent")
-    return f"goal/{parent}" if parent and exists(f"goal/{parent}") else "origin/main"
+    return f"goal/{parent}" if parent and exists(f"goal/{parent}") else trunk_ref(wt)
 
 
 def fix_round_diff(src, head="HEAD"):
     """Only this fix round's commits: the fixed task's branch (the fix worktree's cut point) to the fix head."""
     wt = src.get("worktree") or ROOT
     r = git("diff", "-U3", f"{_fix_round_base(src)}...{head}", "--", *src.get("scope", []), cwd=wt, check=False)
+    if r.returncode:
+        return diff_unavailable(r)
     return r.stdout or "(empty diff)"
 
 

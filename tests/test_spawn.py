@@ -1273,7 +1273,7 @@ class Render(unittest.TestCase):
         with mock.patch.object(P, "config", return_value=cfg):
             spawn.run_worker(review["id"])
         prompt = captured["prompt"]
-        hint = f"git -C {TMP} diff -U3 origin/main...HEAD -- widget.py"
+        hint = f"git -C {TMP} diff -U3 {spawn.trunk_ref()}...HEAD -- widget.py"
         self.assertIn("Diffstat: ", prompt)
         cap = 8000
         non_diff = len(prompt) - len(prompt.split("## diff\n", 1)[1].split("\n## ", 1)[0])
@@ -1347,13 +1347,13 @@ class SpawnBase(unittest.TestCase):
         self.assertEqual(spawn.base_for(review), "goal/G")            # task/<id> doesn't exist, parent's goal does
         no_parent = bus.create_task("no wt no goal", "s", ["a"], ["x.py"], role="execute")
         review2 = bus.create_task("review no parent", "s", ["a"], ["x.py"], role="review", inputs=[no_parent["id"]])
-        self.assertEqual(spawn.base_for(review2), "origin/main")      # neither branch exists
+        self.assertEqual(spawn.base_for(review2), spawn.trunk_ref())  # neither branch exists
 
     def test_execute_stacks_on_existing_goal_branch(self):
         t = bus.create_task("stack", "s", ["a"], ["more.py"], role="execute", parent="G")
         self.assertEqual(spawn.base_for(t), "goal/G")
         t2 = bus.create_task("no goal yet", "s", ["a"], ["more.py"], role="execute", parent="ghost")
-        self.assertEqual(spawn.base_for(t2), "origin/main")
+        self.assertEqual(spawn.base_for(t2), spawn.trunk_ref())
 
     def test_challenge_bases_on_goal_branch(self):
         challenge = bus.create_task("challenge x", "s", ["a"], ["x.py"], role="challenge", parent="G",
@@ -1361,7 +1361,7 @@ class SpawnBase(unittest.TestCase):
         self.assertEqual(spawn.base_for(challenge), "goal/G")
         challenge2 = bus.create_task("challenge y", "s", ["a"], ["y.py"], role="challenge", parent="ghost",
                                       inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
-        self.assertEqual(spawn.base_for(challenge2), "origin/main")
+        self.assertEqual(spawn.base_for(challenge2), spawn.trunk_ref())
 
     def test_scout_bases_on_goal_branch(self):
         scout = bus.create_task("scout x", "s", ["a"], ["x.py"], role="scout", parent="G")
@@ -1369,7 +1369,7 @@ class SpawnBase(unittest.TestCase):
 
     def test_scout_without_goal_branch_uses_origin_main(self):
         scout = bus.create_task("scout y", "s", ["a"], ["y.py"], role="scout", parent="ghost")
-        self.assertEqual(spawn.base_for(scout), "origin/main")
+        self.assertEqual(spawn.base_for(scout), spawn.trunk_ref())
 
     def test_scout_prompt_names_base(self):
         task = {"id": "T-1", "title": "scout", "spec": "q", "acceptance": ["a"],
@@ -1426,9 +1426,9 @@ class SpawnBase(unittest.TestCase):
                                   constraints={"fix_round_for": "missing-id"})
         cycle_b = bus.create_task("cycle B", "s", ["a"], ["a.py"], role="execute", parent="missing",
                                   constraints={"fix_round_for": cycle_a["id"]})
-        self.assertEqual(spawn.base_for(cycle_a), "origin/main")
+        self.assertEqual(spawn.base_for(cycle_a), spawn.trunk_ref())
         self.assertEqual(spawn.base_choice(cycle_a)["chain"], ["missing-id"])
-        self.assertEqual(spawn.base_for(cycle_b), "origin/main")
+        self.assertEqual(spawn.base_for(cycle_b), spawn.trunk_ref())
 
     def test_ensure_worktree_records_worktree_base(self):
         original = bus.create_task("record source", "s", ["a"], ["record.py"], role="execute", parent="G")
@@ -1462,6 +1462,40 @@ class SpawnBase(unittest.TestCase):
         diff = spawn.scoped_diff(bus.get(t["id"]))
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
+
+    def _no_remote_repo(self, root):
+        repo = scratch_repo(Path(root) / "atelier")
+        (repo / "keep.py").write_text("K = 1\n")
+        self.g("add", "-A", cwd=repo); self.g("commit", "-qm", "keep", cwd=repo)
+        return repo
+
+    def test_scoped_diff_without_origin_uses_local_main(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = self._no_remote_repo(root)
+            self.g("checkout", "-qb", "task/T-0074", cwd=repo)
+            (repo / "feat.py").write_text("F = 1\n")
+            self.g("add", "-A", cwd=repo); self.g("commit", "-qm", "feat", cwd=repo)
+            src = {"id": "T-0074", "parent": "T-0073", "worktree": str(repo), "scope": ["feat.py"]}
+            self.assertEqual(spawn.trunk_ref(cwd=repo), "main")
+            diff = spawn.scoped_diff(src)
+        self.assertIn("+F = 1", diff)
+        self.assertNotIn("(empty diff)", diff)
+
+    def test_scoped_diff_reports_git_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = self._no_remote_repo(root)
+            src = {"id": "T-0075", "worktree": str(repo), "scope": ["keep.py"]}
+            with mock.patch.object(spawn, "scoped_diff_base", return_value="no-such-ref"):
+                diff = spawn.scoped_diff(src)
+        self.assertTrue(diff.startswith("(diff unavailable"), diff)
+        self.assertEqual(len(diff.splitlines()), 1)
+        self.assertTrue(spawn.bounded_diff(diff).splitlines()[0].startswith("Diffstat: unavailable"))
+
+    def test_trunk_ref_prefers_origin_main(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = self._no_remote_repo(root)
+            self.g("update-ref", "refs/remotes/origin/main", "HEAD", cwd=repo)
+            self.assertEqual(spawn.trunk_ref(cwd=repo), "origin/main")
 
     def test_review_packet_hint_names_base_range_and_branch(self):
         task = bus.create_task("review hint", "s", ["a"], ["hint.py"], role="execute", parent="G")
@@ -2249,6 +2283,70 @@ class ContextTelemetry(unittest.TestCase):
         self.assertLessEqual(100, spawn._SKILL_PRESENTATION_CAP)
         self.assertIn("executor/extra", rendered["demoted"])
 
+    def _skills_sandbox(self, tmp, with_skill):
+        """Temporary STATE without a registry and a skills source; returns (sync mock, notify mock, patches)."""
+        from orchestrator import skills_registry
+        state, repo = Path(tmp) / "state", Path(tmp) / "repo"
+        state.mkdir()
+        (repo / "skills").mkdir(parents=True)
+        if with_skill:
+            skill = repo / "skills" / "executor" / "implement-spec"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: implement-spec\ndescription: Implement one spec.\n---\n"
+                                            "# Implement spec\n\n## Procedure\nDo the spec.\n\n## Output contract\nA diff.\n")
+        real_load, real_sync, real_render = skills_registry.load, skills_registry.sync, skills_registry.render
+        sync = mock.Mock(side_effect=lambda: real_sync(state, repo / "skills"))
+        notify = mock.Mock()
+        patches = [mock.patch.object(skills_registry, "REPO", repo),
+                   mock.patch.object(skills_registry, "load", side_effect=lambda root=None: real_load(state)),
+                   mock.patch.object(skills_registry, "sync", sync),
+                   mock.patch.object(skills_registry, "render",
+                                     side_effect=lambda skill_id, level, root=None: real_render(skill_id, level, state)),
+                   mock.patch.object(spawn.notify, "notify", notify)]
+        return sync, notify, patches
+
+    def _with(self, patches, fn):
+        for patch in patches:
+            patch.start()
+        try:
+            return fn()
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+
+    def test_skills_section_syncs_missing_registry_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sync, notify, patches = self._skills_sandbox(tmp, with_skill=True)
+            first = self._with(patches, lambda: spawn._skills_section(self._active_choice(), "T-0089"))
+            second = self._with(patches, lambda: spawn._skills_section(self._active_choice(), "T-0089"))
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(first["presented"], ["executor/implement-spec"])
+        self.assertIn("### executor/implement-spec", first["section"])
+        self.assertIn("Do the spec.", first["section"])
+        self.assertEqual(first["missing"], [])
+        self.assertEqual(second["presented"], ["executor/implement-spec"])
+        notify.assert_called_once_with("T-0089: skills registry synced (missing executor/implement-spec)")
+
+    def test_skills_section_missing_skill_after_sync_degrades(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sync, _, patches = self._skills_sandbox(tmp, with_skill=False)
+            rendered = self._with(patches, lambda: spawn._skills_section(self._active_choice(), "T-0089"))
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(rendered["missing"], ["executor/implement-spec"])
+        self.assertEqual(rendered["presented"], [])
+        self.assertNotIn("executor/implement-spec", rendered["section"])
+
+    def test_skills_section_unchanged_when_registry_complete(self):
+        records = {"executor/implement-spec": {"version": "1"}}
+        with mock.patch.object(spawn.skills_registry, "sync") as sync, \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.skills_registry, "render", side_effect=lambda skill, level: f"L{level}:{skill}"):
+            rendered = spawn._skills_section(self._active_choice(), "T-0089")
+        sync.assert_not_called()
+        self.assertEqual(rendered["missing"], [])
+        self.assertEqual(rendered["presented"], ["executor/implement-spec"])
+        self.assertIn("### executor/implement-spec (v1)\nL2:executor/implement-spec", rendered["section"])
+
     def test_active_refused_without_shadow_evidence_or_with_high_recovery(self):
         cfg = {"skills": {"mode": "active", "max_recovery": .1}}
         with mock.patch.object(spawn.skill_router, "select", return_value=self._active_choice()), \
@@ -2627,7 +2725,7 @@ class DisclosureCachePresentation(unittest.TestCase):
         task = {"id": "cache-tools", "title": "Example", "role": "execute", "scope": [], "acceptance": []}
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}), \
-             mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="example")), \
+             mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="example", returncode=0)), \
              mock.patch.object(spawn, "_shadow_route", return_value={}), \
              mock.patch.object(decision_log, "record") as record, \
              mock.patch.object(decision_log, "last_row", return_value=None):

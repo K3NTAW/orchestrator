@@ -533,9 +533,15 @@ def landed(ancestor_id, target, *, git=None):
         if ref.returncode != 0:
             if ref.returncode == 1:
                 try:
-                    return bool(bus.get(ancestor_id).get("merged_into"))
+                    ancestor = bus.get(ancestor_id)
                 except (KeyError, OSError):
                     return False
+                if ancestor.get("merged_into"):
+                    return True
+                # Never dispatched (e.g. held at spec review): the fix round is the only carrier of its work.
+                return (ancestor.get("status") in ("held", "queued") and not ancestor.get("claimed_at")
+                        and not ancestor.get("worktree")
+                        and not (ancestor.get("pipeline") or {}).get("dispatched_at_done"))
             return False
         ancestry = git(spawn.ROOT, "merge-base", "--is-ancestor", branch, target)
         if ancestry.returncode == 0:
