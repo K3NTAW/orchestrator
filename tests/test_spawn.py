@@ -2293,7 +2293,7 @@ class ContextTelemetry(unittest.TestCase):
             skill = repo / "skills" / "executor" / "implement-spec"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text("---\nname: implement-spec\ndescription: Implement one spec.\n---\n"
-                                            "# Implement spec\n\n## Procedure\nDo the spec.\n")
+                                            "# Implement spec\n\n## Procedure\nDo the spec.\n\n## Output contract\nA diff.\n")
         real_load, real_sync, real_render = skills_registry.load, skills_registry.sync, skills_registry.render
         sync = mock.Mock(side_effect=lambda: real_sync(state, repo / "skills"))
         notify = mock.Mock()

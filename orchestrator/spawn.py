@@ -157,7 +157,7 @@ def _missing_skills(task_id, wanted):
         return []
     try:
         skills_registry.sync()
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, KeyError) as exc:
         notify.notify(f"{task_id}: skills registry sync failed: {exc}")
         return missing
     notify.notify(f"{task_id}: skills registry synced (missing {', '.join(missing)})")
