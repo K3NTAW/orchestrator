@@ -118,6 +118,53 @@ class DecisionPoints(PlannerRunsBase):
         self.execute_child(goal, status="failed")
         self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
 
+    def fix_round_tree(self, name):
+        goal = self.goal(name)
+        target = self.execute_child(goal, status="held", hold_reason="gate_red")
+        bus.update(target, status="done", merged_into=f"goal/{goal}")
+        failed = self.execute_child(goal, status="failed", constraints={"fix_round_for": target})
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}", constraints={"fix_round_for": target})
+        return goal, failed
+
+    def capture_notices(self):
+        notices = []
+        self.swap(PR.notify, "_sink", notices.append)
+        return notices
+
+    def test_closable_point_ignores_failed_fix_round_whose_sibling_merged(self):
+        goal, _ = self.fix_round_tree("sibling merged")
+        self.assertIn((goal, "closable", goal), list(PR.decision_points()))
+
+    def test_routine_close_context_ignores_failed_fix_round_whose_sibling_merged(self):
+        goal, _ = self.fix_round_tree("sibling merged ctx")
+        self.swap(PR.gitutil, "_git_in", lambda *a: __import__('subprocess').CompletedProcess(a, 0, "abc\n", ""))
+        ctx = PR.build_ctx((goal, "closable", goal), P.Pool())
+        self.assertIs(ctx["all_children_merged"], True)
+
+    def test_closable_point_ignores_failed_fix_round_whose_target_merged(self):
+        goal = self.goal("target merged")
+        target = self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        self.execute_child(goal, status="failed", constraints={"fix_round_for": target})
+        self.assertIn((goal, "closable", goal), list(PR.decision_points()))
+
+    def test_failed_child_blocking_close_notifies_once(self):
+        notices = self.capture_notices()
+        goal = self.goal("blocked close")
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        failed = self.execute_child(goal, status="failed")
+        list(PR.decision_points())
+        list(PR.decision_points())
+        blocked = [n for n in notices if "close blocked" in n]
+        self.assertEqual(blocked, [f"{goal}: close blocked by {failed} (failed)"])
+
+    def test_goal_with_unmerged_live_child_is_not_closable(self):
+        notices = self.capture_notices()
+        goal = self.goal("unmerged live")
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        self.execute_child(goal, status="done")
+        self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
+        self.assertFalse([n for n in notices if "close blocked" in n])
+
     def test_held_decision_skipped_when_fix_round_exists(self):
         goal = self.goal()
         tid = self.execute_child(goal, status="held", hold_reason="gate_red")
