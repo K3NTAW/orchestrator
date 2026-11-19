@@ -282,7 +282,8 @@ def trunk_ref(cwd=ROOT):
     """origin/main when it verifies, else local main, else the root repo's HEAD sha. A repo with no remote
     (Atelier) has no origin/main, and diffing against it failed silently into an empty review diff."""
     for ref in ("origin/main", "main"):
-        if git("rev-parse", "--verify", "--quiet", ref, cwd=cwd, check=False).returncode == 0:
+        # A stubbed git result without returncode keeps the historical origin/main answer.
+        if getattr(git("rev-parse", "--verify", "--quiet", ref, cwd=cwd, check=False), "returncode", 0) == 0:
             return ref
     return git("rev-parse", "HEAD", cwd=ROOT, check=False).stdout.strip() or "HEAD"
 
