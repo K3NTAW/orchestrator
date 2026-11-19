@@ -278,6 +278,21 @@ def branch_exists(name):
     return git("rev-parse", "--verify", name, check=False).returncode == 0
 
 
+def trunk_ref(cwd=ROOT):
+    """origin/main when it verifies, else local main, else the root repo's HEAD sha. A repo with no remote
+    (Atelier) has no origin/main, and diffing against it failed silently into an empty review diff."""
+    for ref in ("origin/main", "main"):
+        if git("rev-parse", "--verify", "--quiet", ref, cwd=cwd, check=False).returncode == 0:
+            return ref
+    return git("rev-parse", "HEAD", cwd=ROOT, check=False).stdout.strip() or "HEAD"
+
+
+def diff_unavailable(r):
+    """One-line cause for a failed git diff, so reviewers and logs never see a silent "(empty diff)"."""
+    first = next((line.strip() for line in (r.stderr or "").splitlines() if line.strip()), f"exit {r.returncode}")
+    return f"(diff unavailable: {first})"
+
+
 def base_choice(task):
     """Pick the base branch for a new worktree. review tasks whose inputs[0] is a task id: base on that task's
     own branch so the reviewer sees the code under review, not a worktree cut from origin/main before the
@@ -321,7 +336,7 @@ def base_choice(task):
             current_id = (src.get("constraints") or {}).get("fix_round_for")
     if role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
         return {"base": f"goal/{parent}", "via": "goal", "chain": chain}
-    return {"base": "origin/main", "via": "trunk", "chain": chain}
+    return {"base": trunk_ref(), "via": "trunk", "chain": chain}
 
 
 def base_for(task):
@@ -368,7 +383,7 @@ def render(name, *, task=None, signals=None, **kw):
     if name in ("review", "spec-review", "scout") and "packet" not in kw:
         raise ValueError(f"packet is required for {name}")
     if name == "scout":
-        kw.setdefault("base_branch", "origin/main")
+        kw.setdefault("base_branch", trunk_ref())
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
     legacy_template = t
@@ -458,6 +473,8 @@ def bounded_text(text, cap_chars, expand_hint):
 def bounded_diff(diff_text, cap_chars=12000, expand_hint="git diff"):
     """Put a compact diffstat before bounded unified-diff hunks."""
     text = str(diff_text)
+    if text.startswith("(diff unavailable"):
+        return f"Diffstat: unavailable\n{text.splitlines()[0]}"
     files = additions = deletions = 0
     hunks = []
     current = []
@@ -771,7 +788,7 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
             tests.append(entry)
 
     parent = task.get("parent") or "(none)"
-    goal_branch = f"goal/{parent}" if task.get("parent") else "origin/main"
+    goal_branch = f"goal/{parent}" if task.get("parent") else trunk_ref(wt)
     branch = git("branch", "--show-current", cwd=wt, check=False).stdout.strip() or "(detached)"
     merge_base = git("merge-base", "HEAD", goal_branch, cwd=wt, check=False).stdout.strip()
     if not merge_base:
@@ -1136,9 +1153,9 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
                 paths = lineage_paths(fix_chain(src))
             except LookupError:
                 label = "lineage unresolved; reviewing the whole branch"
-        lineage_range = f"{base}..{lineage_head}" if base else f"origin/main...{lineage_head}"
-        raw_diff = git("diff", "-U3", "--no-renames", lineage_range, "--", *(paths or []),
-                       cwd=wt, check=False).stdout or "(empty diff)"
+        lineage_range = f"{base}..{lineage_head}" if base else f"{trunk_ref(wt)}...{lineage_head}"
+        r = git("diff", "-U3", "--no-renames", lineage_range, "--", *(paths or []), cwd=wt, check=False)
+        raw_diff = diff_unavailable(r) if r.returncode else r.stdout or "(empty diff)"
         hint = f"git -C {wt} diff {lineage_range}"
     else:
         raw_diff = scoped_diff(src)
@@ -1906,7 +1923,7 @@ def code_excerpts(scope, base_dir, cap=12000):
 
 def scoped_diff_base(src):
     parent = src.get("parent")
-    return f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+    return f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else trunk_ref(src.get("worktree") or ROOT)
 
 
 def scoped_diff(src):
@@ -1916,6 +1933,8 @@ def scoped_diff(src):
     wt = src.get("worktree") or ROOT
     base = scoped_diff_base(src)
     r = git("diff", "-U3", f"{base}...HEAD", "--", *effective_scope(src), cwd=wt, check=False)
+    if r.returncode:
+        return diff_unavailable(r)
     return r.stdout[:40000] or "(empty diff)"
 
 
@@ -1971,13 +1990,15 @@ def _fix_round_base(src):
     if fix_for and exists(f"task/{fix_for}"):
         return f"task/{fix_for}"
     parent = src.get("parent")
-    return f"goal/{parent}" if parent and exists(f"goal/{parent}") else "origin/main"
+    return f"goal/{parent}" if parent and exists(f"goal/{parent}") else trunk_ref(wt)
 
 
 def fix_round_diff(src, head="HEAD"):
     """Only this fix round's commits: the fixed task's branch (the fix worktree's cut point) to the fix head."""
     wt = src.get("worktree") or ROOT
     r = git("diff", "-U3", f"{_fix_round_base(src)}...{head}", "--", *src.get("scope", []), cwd=wt, check=False)
+    if r.returncode:
+        return diff_unavailable(r)
     return r.stdout or "(empty diff)"
 
 

@@ -1347,13 +1347,13 @@ class SpawnBase(unittest.TestCase):
         self.assertEqual(spawn.base_for(review), "goal/G")            # task/<id> doesn't exist, parent's goal does
         no_parent = bus.create_task("no wt no goal", "s", ["a"], ["x.py"], role="execute")
         review2 = bus.create_task("review no parent", "s", ["a"], ["x.py"], role="review", inputs=[no_parent["id"]])
-        self.assertEqual(spawn.base_for(review2), "origin/main")      # neither branch exists
+        self.assertEqual(spawn.base_for(review2), spawn.trunk_ref())  # neither branch exists
 
     def test_execute_stacks_on_existing_goal_branch(self):
         t = bus.create_task("stack", "s", ["a"], ["more.py"], role="execute", parent="G")
         self.assertEqual(spawn.base_for(t), "goal/G")
         t2 = bus.create_task("no goal yet", "s", ["a"], ["more.py"], role="execute", parent="ghost")
-        self.assertEqual(spawn.base_for(t2), "origin/main")
+        self.assertEqual(spawn.base_for(t2), spawn.trunk_ref())
 
     def test_challenge_bases_on_goal_branch(self):
         challenge = bus.create_task("challenge x", "s", ["a"], ["x.py"], role="challenge", parent="G",
@@ -1361,7 +1361,7 @@ class SpawnBase(unittest.TestCase):
         self.assertEqual(spawn.base_for(challenge), "goal/G")
         challenge2 = bus.create_task("challenge y", "s", ["a"], ["y.py"], role="challenge", parent="ghost",
                                       inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
-        self.assertEqual(spawn.base_for(challenge2), "origin/main")
+        self.assertEqual(spawn.base_for(challenge2), spawn.trunk_ref())
 
     def test_scout_bases_on_goal_branch(self):
         scout = bus.create_task("scout x", "s", ["a"], ["x.py"], role="scout", parent="G")
@@ -1369,7 +1369,7 @@ class SpawnBase(unittest.TestCase):
 
     def test_scout_without_goal_branch_uses_origin_main(self):
         scout = bus.create_task("scout y", "s", ["a"], ["y.py"], role="scout", parent="ghost")
-        self.assertEqual(spawn.base_for(scout), "origin/main")
+        self.assertEqual(spawn.base_for(scout), spawn.trunk_ref())
 
     def test_scout_prompt_names_base(self):
         task = {"id": "T-1", "title": "scout", "spec": "q", "acceptance": ["a"],
@@ -1426,9 +1426,9 @@ class SpawnBase(unittest.TestCase):
                                   constraints={"fix_round_for": "missing-id"})
         cycle_b = bus.create_task("cycle B", "s", ["a"], ["a.py"], role="execute", parent="missing",
                                   constraints={"fix_round_for": cycle_a["id"]})
-        self.assertEqual(spawn.base_for(cycle_a), "origin/main")
+        self.assertEqual(spawn.base_for(cycle_a), spawn.trunk_ref())
         self.assertEqual(spawn.base_choice(cycle_a)["chain"], ["missing-id"])
-        self.assertEqual(spawn.base_for(cycle_b), "origin/main")
+        self.assertEqual(spawn.base_for(cycle_b), spawn.trunk_ref())
 
     def test_ensure_worktree_records_worktree_base(self):
         original = bus.create_task("record source", "s", ["a"], ["record.py"], role="execute", parent="G")
@@ -1462,6 +1462,40 @@ class SpawnBase(unittest.TestCase):
         diff = spawn.scoped_diff(bus.get(t["id"]))
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
+
+    def _no_remote_repo(self, root):
+        repo = scratch_repo(Path(root) / "atelier")
+        (repo / "keep.py").write_text("K = 1\n")
+        self.g("add", "-A", cwd=repo); self.g("commit", "-qm", "keep", cwd=repo)
+        return repo
+
+    def test_scoped_diff_without_origin_uses_local_main(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = self._no_remote_repo(root)
+            self.g("checkout", "-qb", "task/T-0074", cwd=repo)
+            (repo / "feat.py").write_text("F = 1\n")
+            self.g("add", "-A", cwd=repo); self.g("commit", "-qm", "feat", cwd=repo)
+            src = {"id": "T-0074", "parent": "T-0073", "worktree": str(repo), "scope": ["feat.py"]}
+            self.assertEqual(spawn.trunk_ref(cwd=repo), "main")
+            diff = spawn.scoped_diff(src)
+        self.assertIn("+F = 1", diff)
+        self.assertNotIn("(empty diff)", diff)
+
+    def test_scoped_diff_reports_git_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = self._no_remote_repo(root)
+            src = {"id": "T-0075", "worktree": str(repo), "scope": ["keep.py"]}
+            with mock.patch.object(spawn, "scoped_diff_base", return_value="no-such-ref"):
+                diff = spawn.scoped_diff(src)
+        self.assertTrue(diff.startswith("(diff unavailable"), diff)
+        self.assertEqual(len(diff.splitlines()), 1)
+        self.assertTrue(spawn.bounded_diff(diff).splitlines()[0].startswith("Diffstat: unavailable"))
+
+    def test_trunk_ref_prefers_origin_main(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = self._no_remote_repo(root)
+            self.g("update-ref", "refs/remotes/origin/main", "HEAD", cwd=repo)
+            self.assertEqual(spawn.trunk_ref(cwd=repo), "origin/main")
 
     def test_review_packet_hint_names_base_range_and_branch(self):
         task = bus.create_task("review hint", "s", ["a"], ["hint.py"], role="execute", parent="G")
