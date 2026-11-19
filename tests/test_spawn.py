@@ -1273,7 +1273,7 @@ class Render(unittest.TestCase):
         with mock.patch.object(P, "config", return_value=cfg):
             spawn.run_worker(review["id"])
         prompt = captured["prompt"]
-        hint = f"git -C {TMP} diff -U3 origin/main...HEAD -- widget.py"
+        hint = f"git -C {TMP} diff -U3 {spawn.trunk_ref()}...HEAD -- widget.py"
         self.assertIn("Diffstat: ", prompt)
         cap = 8000
         non_diff = len(prompt) - len(prompt.split("## diff\n", 1)[1].split("\n## ", 1)[0])
